@@ -25,6 +25,16 @@ enum ConnectionAccessMethod: Equatable, CaseIterable {
     case lan
     case tailscale
     case reverseProxy
+
+    /// The wizard card's user-facing title. Single source of truth so the
+    /// copy-safety tests cover the shipped strings, not local literals.
+    var displayTitle: String {
+        switch self {
+        case .lan: return "I’m on the same network as Hermes"
+        case .tailscale: return "Tailscale"
+        case .reverseProxy: return "I already have a domain or reverse proxy"
+        }
+    }
 }
 
 /// One screen of the guided flow.
@@ -150,7 +160,9 @@ struct ConnectionSetupFlow: Equatable {
     }
 
     /// Answering Yes moves on; No / I don't know keep the question on screen
-    /// with its Ask Hermes guidance until the user confirms readiness.
+    /// with its Ask Hermes guidance until the user confirms readiness. The
+    /// recorded answer is never rewritten by the confirmation — "ready" is a
+    /// navigation action, not a retroactive Yes.
     mutating func answerDashboard(_ answer: ConnectionSetupAnswer) {
         dashboardAnswer = answer
         if answer == .yes {
@@ -161,7 +173,7 @@ struct ConnectionSetupFlow: Equatable {
     /// The "Dashboard is ready" continuation after the No / I don't know
     /// guidance.
     mutating func confirmDashboardReady() {
-        answerDashboard(.yes)
+        advance(to: .credentials)
     }
 
     mutating func answerCredentials(_ answer: ConnectionSetupAnswer) {
@@ -173,12 +185,12 @@ struct ConnectionSetupFlow: Equatable {
 
     /// The continuation after the credentials No / I don't know guidance.
     mutating func confirmCredentialsReady() {
-        answerCredentials(.yes)
+        advance(to: .accessMethod)
     }
 
     mutating func selectAccessMethod(_ method: ConnectionAccessMethod) {
         accessMethod = method
-        advance(to: step(for: method))
+        advance(to: Self.step(for: method))
     }
 
     /// "I have the connection details" on a branch screen. This round lands
@@ -188,13 +200,22 @@ struct ConnectionSetupFlow: Equatable {
     }
 
     /// Topic switching on the troubleshooting surfaces (TLS ⇄ Cloudflare).
-    /// Ignored for wizard destinations, which route through the questions.
+    /// Switching REPLACES the current troubleshooting step rather than
+    /// pushing, so repeated flips never grow the back path; Back then exits
+    /// troubleshooting toward whatever preceded it. Ignored for wizard
+    /// destinations, which route through the questions.
     mutating func showTroubleshooting(_ destination: ConnectionHelpDestination) {
         guard destination == .tls || destination == .cloudflare else { return }
-        advance(to: Self.entryStep(for: destination))
+        let target = Self.entryStep(for: destination)
+        guard target != step else { return }
+        if let last = path.last, last == .tlsTroubleshooting || last == .cloudflareTroubleshooting {
+            path[path.count - 1] = target
+        } else {
+            path.append(target)
+        }
     }
 
-    func step(for method: ConnectionAccessMethod) -> ConnectionSetupStep {
+    static func step(for method: ConnectionAccessMethod) -> ConnectionSetupStep {
         switch method {
         case .lan: return .lan
         case .tailscale: return .tailscale

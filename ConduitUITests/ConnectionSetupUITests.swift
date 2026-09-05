@@ -34,11 +34,16 @@ final class ConnectionSetupUITests: XCTestCase {
     }
 
     private func stepLabel(_ app: XCUIApplication, _ expected: String) {
+        // Poll rather than assert once: during the NavigationStack push/pop
+        // transition both steps can be mounted, so the first snapshot may
+        // still show the outgoing label.
         let label = app.staticTexts[Identity.stepLabel]
-        XCTAssertTrue(
-            label.waitForExistence(timeout: 5) && label.label == expected,
-            "Expected step '\(expected)', saw '\(label.exists ? label.label : "none")'. Tree:\n\(app.debugDescription)"
-        )
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if label.exists, label.label == expected { return }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        XCTFail("Expected step '\(expected)', saw '\(label.exists ? label.label : "none")'. Tree:\n\(app.debugDescription)")
     }
 
     func testWizardAdvancesThroughQuestionsToTailscaleBranchAndBack() throws {

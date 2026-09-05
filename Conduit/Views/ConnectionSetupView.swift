@@ -16,13 +16,11 @@
 import SwiftUI
 
 struct ConnectionSetupView: View {
-    let initialDestination: ConnectionHelpDestination
-
     @Environment(\.dismiss) private var dismiss
     @State private var flow: ConnectionSetupFlow
+    @State private var showNotSureGuidance = false
 
     init(initialDestination: ConnectionHelpDestination) {
-        self.initialDestination = initialDestination
         _flow = State(initialValue: ConnectionSetupFlow(entry: initialDestination))
     }
 
@@ -147,7 +145,7 @@ struct ConnectionSetupView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             methodCard(
-                title: "I’m on the same network as Hermes",
+                title: ConnectionAccessMethod.lan.displayTitle,
                 supporting: "Use this when Conduit and the Hermes machine are on the same home or local network.",
                 identifier: "setup.method-lan"
             ) {
@@ -155,7 +153,7 @@ struct ConnectionSetupView: View {
             }
 
             methodCard(
-                title: "Tailscale",
+                title: ConnectionAccessMethod.tailscale.displayTitle,
                 supporting: "Use Tailscale when you want to reach Hermes securely while away from home.",
                 badge: "Recommended for remote access",
                 identifier: "setup.method-tailscale"
@@ -164,7 +162,7 @@ struct ConnectionSetupView: View {
             }
 
             methodCard(
-                title: "I already have a domain or reverse proxy",
+                title: ConnectionAccessMethod.reverseProxy.displayTitle,
                 supporting: "Use this if you already access Hermes through an HTTPS hostname you manage.",
                 identifier: "setup.method-reverseProxy"
             ) {
@@ -174,8 +172,6 @@ struct ConnectionSetupView: View {
             notSureGuidance
         }
     }
-
-    @State private var showNotSureGuidance = false
 
     private var notSureGuidance: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -536,36 +532,14 @@ extension ConnectionHelpDestination {
         }
     }
 
-    /// Static quick checks shown on the troubleshooting surfaces. Safe by
-    /// construction: never recommends exposing the dashboard to the public
-    /// internet or weakening HTTPS.
+    /// Static quick checks shown on the troubleshooting surfaces. Only the
+    /// TLS and Cloudflare topics are reachable (they are the direct
+    /// troubleshooting entries); the other destinations route to wizard
+    /// questions, so they carry no checks. Safe by construction: never
+    /// recommends exposing the dashboard to the public internet or weakening
+    /// HTTPS.
     var checks: [String] {
         switch self {
-        case .start:
-            return [
-                "The dashboard address should look like https://hermes.example — include any path prefix your reverse proxy uses (for example https://example.com/hermes).",
-                "Open the same address in Safari on this device. If the dashboard doesn’t load there, what you see is the same wall Conduit hits.",
-                "Remote dashboards must use HTTPS. Plain HTTP works only for localhost, private LAN addresses, and Tailscale."
-            ]
-        case .dashboard:
-            return [
-                "Confirm the address points at the Hermes dashboard itself, not another service on the same host.",
-                "Include custom ports (for example https://hermes.example:9119) and any reverse-proxy path prefix.",
-                "If the dashboard moved or its certificate changed, re-enter the full address from scratch."
-            ]
-        case .credentials:
-            return [
-                "Conduit needs the username and password you use to sign in to the Hermes dashboard — not a Cloudflare or Tailscale account.",
-                "Try signing in on the dashboard’s own web page to confirm the account still works.",
-                "If the password was rejected after a dashboard change, reset it where your dashboard manages users."
-            ]
-        case .network:
-            return [
-                "Make sure the Hermes dashboard is actually running on its host machine.",
-                "This device must be on the same network as the dashboard, or connected through Tailscale or a VPN. Tailscale Serve also gives you HTTPS for free.",
-                "Mobile hotspots and guest Wi-Fi often block device-to-device traffic — try another network.",
-                "Avoid opening the dashboard port directly to the internet; prefer Tailscale or an authenticated reverse proxy."
-            ]
         case .tls:
             return [
                 "If you use your own certificate authority, install and trust its root certificate on this device (Settings → General → VPN & Device Management → Certificate Trust Settings).",
@@ -578,6 +552,8 @@ extension ConnectionHelpDestination {
                 "Make sure a Service Auth policy allows that token to reach this Access application.",
                 "Or turn off \"Use Cloudflare Access service token\" to sign in interactively through the in-app browser."
             ]
+        case .start, .dashboard, .credentials, .network:
+            return []
         }
     }
 }

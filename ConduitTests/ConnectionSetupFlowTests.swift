@@ -48,7 +48,25 @@ final class ConnectionSetupFlowTests: XCTestCase {
 
         flow.confirmDashboardReady()
         XCTAssertEqual(flow.step, .credentials)
-        XCTAssertEqual(flow.dashboardAnswer, .yes)
+        XCTAssertEqual(
+            flow.dashboardAnswer, .no,
+            "Confirming readiness is navigation — it must not rewrite the recorded answer to Yes"
+        )
+    }
+
+    func testAnswerSurvivesConfirmAndBackRoundTrip() {
+        // Answer No, confirm ready, go Back: the recorded answer and its
+        // Ask Hermes guidance state must be exactly what the user said.
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.no)
+        flow.confirmDashboardReady()
+        flow.back()
+        XCTAssertEqual(flow.step, .dashboard)
+        XCTAssertEqual(flow.dashboardAnswer, .no, "Back must restore the original No answer, not a fabricated Yes")
+
+        // Re-confirming from the restored state advances cleanly again.
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .credentials)
     }
 
     func testDashboardUnknownThenConfirmAdvances() {
@@ -75,7 +93,24 @@ final class ConnectionSetupFlowTests: XCTestCase {
 
         flow.confirmCredentialsReady()
         XCTAssertEqual(flow.step, .accessMethod)
-        XCTAssertEqual(flow.credentialsAnswer, .yes)
+        XCTAssertEqual(
+            flow.credentialsAnswer, .no,
+            "Confirming readiness is navigation — it must not rewrite the recorded answer to Yes"
+        )
+    }
+
+    func testRepeatedConfirmationsAreIdempotent() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.yes)
+        flow.answerCredentials(.yes)
+        flow.selectAccessMethod(.lan)
+        flow.confirmDetailsReady()
+        XCTAssertEqual(flow.step, .detailsReady)
+        // Double-taps on a continue/confirm button must not push duplicates.
+        flow.confirmDetailsReady()
+        flow.confirmDetailsReady()
+        XCTAssertEqual(flow.step, .detailsReady)
+        XCTAssertEqual(flow.path.count, 5, "Path must stay entry step + one entry per real navigation")
     }
 
     func testEntryAtCredentialsSkipsDashboardQuestion() {
@@ -145,12 +180,19 @@ final class ConnectionSetupFlowTests: XCTestCase {
 
     // MARK: - Troubleshooting topic switching
 
-    func testTroubleshootingTopicsSwitchBetweenEachOther() {
-        var tlsFlow = ConnectionSetupFlow(entry: .tls)
-        tlsFlow.showTroubleshooting(.cloudflare)
-        XCTAssertEqual(tlsFlow.step, .cloudflareTroubleshooting)
-        tlsFlow.back()
-        XCTAssertEqual(tlsFlow.step, .tlsTroubleshooting)
+    func testTroubleshootingTopicsReplaceEachOtherInsteadOfStacking() {
+        // A topic switch is replacement, not navigation: flipping TLS ⇄
+        // Cloudflare repeatedly must never grow the back path.
+        var flow = ConnectionSetupFlow(entry: .tls)
+        flow.showTroubleshooting(.cloudflare)
+        XCTAssertEqual(flow.step, .cloudflareTroubleshooting)
+        XCTAssertEqual(flow.path.count, 1)
+        XCTAssertFalse(flow.canGoBack, "Back after a topic replacement leaves troubleshooting entirely")
+        flow.showTroubleshooting(.tls)
+        XCTAssertEqual(flow.step, .tlsTroubleshooting)
+        XCTAssertEqual(flow.path.count, 1)
+        flow.showTroubleshooting(.tls)
+        XCTAssertEqual(flow.step, .tlsTroubleshooting, "Same-topic switch is a no-op")
     }
 
     func testWizardDestinationsDoNotJumpOutOfTheQuestionSequence() {
@@ -174,6 +216,16 @@ final class ConnectionSetupFlowTests: XCTestCase {
 
         flow.selectAccessMethod(.lan)
         XCTAssertNil(flow.progressLabel, "Branch screens sit outside the numbered question sequence")
+
+        // Non-question entries are unnumbered too.
+        XCTAssertNil(ConnectionSetupFlow(entry: .tls).progressLabel)
+        XCTAssertNil(ConnectionSetupFlow(entry: .cloudflare).progressLabel)
+        var detailsFlow = ConnectionSetupFlow(entry: .start)
+        detailsFlow.answerDashboard(.yes)
+        detailsFlow.answerCredentials(.yes)
+        detailsFlow.selectAccessMethod(.lan)
+        detailsFlow.confirmDetailsReady()
+        XCTAssertNil(detailsFlow.progressLabel)
     }
 
     // MARK: - Ask Hermes prompt safety
@@ -213,13 +265,11 @@ final class ConnectionSetupFlowTests: XCTestCase {
     }
 
     func testGuidanceMethodLabelsContainNoExposureLanguage() {
-        // The strings the wizard itself shows for the three methods must stay
-        // free of public-exposure framing.
-        let labels = [
-            "I’m on the same network as Hermes",
-            "Tailscale",
-            "I already have a domain or reverse proxy"
-        ]
+        // The shipped card titles come from the model's displayTitle — the
+        // same strings the wizard renders — so this guards real copy, not
+        // local literals.
+        let labels = ConnectionAccessMethod.allCases.map { $0.displayTitle }
+        XCTAssertEqual(labels.count, 3)
         for label in labels {
             let lowered = label.lowercased()
             XCTAssertFalse(lowered.contains("public"))

@@ -15,6 +15,7 @@ struct AskHermesPromptView: View {
     let prompt: String
 
     @State private var copied = false
+    @State private var copyCount = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -32,6 +33,7 @@ struct AskHermesPromptView: View {
                 Button {
                     UIPasteboard.general.string = prompt
                     copied = true
+                    copyCount += 1
                 } label: {
                     Label("Copy Prompt", systemImage: copied ? "checkmark" : "doc.on.doc")
                         .font(.footnote.weight(.semibold))
@@ -43,10 +45,6 @@ struct AskHermesPromptView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("setup.copied-confirmation")
-                        .task {
-                            try? await Task.sleep(for: .seconds(2))
-                            copied = false
-                        }
                 }
             }
             .buttonStyle(.borderless)
@@ -54,5 +52,12 @@ struct AskHermesPromptView: View {
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .conduitGlassSurface(cornerRadius: 18, tint: .conduitAura.opacity(0.06))
+        // Keyed to the copy count so each tap restarts the confirmation
+        // window instead of inheriting an earlier tap's deadline.
+        .task(id: copyCount) {
+            guard copyCount > 0 else { return }
+            try? await Task.sleep(for: .seconds(2))
+            copied = false
+        }
     }
 }
