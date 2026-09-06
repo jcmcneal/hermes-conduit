@@ -2780,7 +2780,7 @@ final class AppState: ObservableObject {
                     let durablyAnchored = targetStored == nil
                         || preservedIdentity.durableSessionID == nil
                         || targetStored == preservedIdentity.durableSessionID
-                        || preservedIdentity.acceptedSessionIDs.contains(targetStored)
+                        || targetStored.map { preservedIdentity.acceptedSessionIDs.contains($0) } ?? false
                     if durablyAnchored {
                         acceptedTargetIDs.formUnion(preservedIdentity.acceptedSessionIDs)
                     }
