@@ -134,8 +134,10 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
         XCTAssertTrue(openedA)
         let handoffContext = harness.appState.composerSubmissionContext()
 
-        XCTAssertTrue(await harness.appState.openSession("stored-b"))
-        XCTAssertTrue(await harness.appState.openSession("stored-a"))
+        let openedB = await harness.appState.openSession("stored-b")
+        XCTAssertTrue(openedB)
+        let reopenedA = await harness.appState.openSession("stored-a")
+        XCTAssertTrue(reopenedA)
 
         let submitted = await harness.appState.submitComposer(text: "Stale", context: handoffContext)
 
