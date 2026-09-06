@@ -110,6 +110,21 @@ struct LoginView: View {
                 initialDestination: destination,
                 initialDraft: ConnectionSetupDraft(existingServerURL: serverUrl, username: username, password: password)
             ) { result in
+                // Clear the in-memory Cloudflare token BEFORE the new address
+                // lands whenever the origin changes, so a retained token can
+                // never be applied against a dashboard it was not entered for.
+                let cloudflare = LoginCloudflareHandoff.state(
+                    from: serverUrl,
+                    to: result.serverURL,
+                    keeping: LoginCloudflareState(
+                        isEnabled: cloudflareEnabled,
+                        clientID: cloudflareClientID,
+                        clientSecret: cloudflareClientSecret
+                    )
+                )
+                cloudflareEnabled = cloudflare.isEnabled
+                cloudflareClientID = cloudflare.clientID
+                cloudflareClientSecret = cloudflare.clientSecret
                 serverUrl = result.serverURL
                 username = result.username
                 password = result.password
@@ -500,6 +515,40 @@ struct LoginView: View {
         case .system:
             return colorScheme == .dark ? AppIconChoice.dark.previewAssetName : AppIconChoice.light.previewAssetName
         }
+    }
+}
+
+// MARK: - Setup handoff Cloudflare state
+
+/// The login card's in-memory Cloudflare service-token fields, as a plain
+/// value so the setup-wizard handoff decision is unit-testable without
+/// hosting the view.
+struct LoginCloudflareState: Equatable {
+    var isEnabled: Bool
+    var clientID: String
+    var clientSecret: String
+}
+
+enum LoginCloudflareHandoff {
+    /// Decides the in-memory Cloudflare token state after the setup wizard
+    /// hands back a dashboard address. A retained service token is bound to
+    /// the origin it was entered for; when the handoff moves the dashboard to
+    /// a different origin (scheme, host, or effective port — path-only
+    /// changes are same-origin, per `ConnectionURLPolicy`), the token must
+    /// never be silently sent there, so the in-memory state clears. The
+    /// persisted Keychain token stays origin-scoped and is deliberately
+    /// untouched by this decision.
+    static func state(from oldServerURL: String, to newServerURL: String,
+                      keeping current: LoginCloudflareState) -> LoginCloudflareState {
+        if sameOrigin(oldServerURL, newServerURL) { return current }
+        return LoginCloudflareState(isEnabled: false, clientID: "", clientSecret: "")
+    }
+
+    static func sameOrigin(_ oldServerURL: String, _ newServerURL: String) -> Bool {
+        ConnectionURLPolicy.originMatches(
+            URL(string: oldServerURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+            expected: URL(string: newServerURL.trimmingCharacters(in: .whitespacesAndNewlines))
+        )
     }
 }
 

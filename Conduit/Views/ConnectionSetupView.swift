@@ -231,7 +231,7 @@ struct ConnectionSetupView: View {
             needs: [
                 "The Hermes dashboard is running.",
                 "You have dashboard login credentials.",
-                "You know the Hermes machine’s LAN IP address or local hostname.",
+                "You know the Hermes machine’s local IP address.",
                 "You know the dashboard port.",
                 "This device is on the same reachable network."
             ],

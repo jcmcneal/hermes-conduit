@@ -330,6 +330,57 @@ final class ConnectionSetupFlowTests: XCTestCase {
         XCTAssertNil(detailsFlow.progressLabel)
     }
 
+    // MARK: - Step-gated confirmations
+
+    func testDashboardReadyConfirmationIsStepGated() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .credentials, "The legitimate call from the dashboard step advances")
+        XCTAssertEqual(flow.path.count, 2)
+
+        // A stray call from any other step must be a deterministic no-op.
+        flow.answerCredentials(.yes)
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .accessMethod)
+        XCTAssertEqual(flow.path.count, 3, "Stray confirmDashboardReady calls must not mutate the path")
+
+        flow.selectAccessMethod(.lan)
+        let before = flow.path
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.path, before)
+    }
+
+    func testReviewStateRevalidatesPurelyForRendering() throws {
+        var flow = ConnectionSetupFlow(entry: .network)
+        flow.selectAccessMethod(.lan)
+        flow.confirmDetailsReady()
+        flow.draft.lan.host = "192.168.1.28"
+        flow.draft.lan.port = "9119"
+        flow.submitDetails()
+        flow.draft.username = "eric"
+        flow.draft.password = "fixture"
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .review)
+
+        guard case .success(let result) = flow.reviewState() else {
+            return XCTFail("A complete draft must revalidate at Review")
+        }
+        XCTAssertEqual(result.serverURL, "http://192.168.1.28:9119")
+        XCTAssertEqual(flow.step, .review)
+
+        // A draft that stops validating after reaching Review must surface a
+        // typed failure the Review card can render, not silently blank it.
+        flow.draft.password = " "
+        guard case .failure(let error) = flow.reviewState() else {
+            return XCTFail("An incomplete draft must fail Review revalidation")
+        }
+        XCTAssertEqual(error, .credentialsRequired)
+        XCTAssertEqual(error.message, ConnectionSetupValidationError.credentialsRequired.message)
+        XCTAssertEqual(flow.step, .review)
+        XCTAssertEqual(flow.path.count, 5, "Render-time revalidation must never mutate the path")
+        XCTAssertNil(flow.validationError, "Render-time revalidation is pure and records nothing")
+    }
+
     // MARK: - Ask Hermes prompt safety
 
     func testEveryPromptPreservesDashboardAuthentication() {
@@ -351,6 +402,15 @@ final class ConnectionSetupFlowTests: XCTestCase {
             ConnectionSetupPrompt.tailscaleServe.text.contains("Tailscale Serve"),
             "The Tailscale branch prompt must include the Tailscale Serve configuration path"
         )
+    }
+
+    func testLANPromptRequestsAnIPAddressNotAHostname() {
+        // LAN entry is IP-address-only: canonical transport policy rejects
+        // local hostnames (hermes.local, hermes.home.arpa), so neither the
+        // prompt nor the wizard copy may promise them.
+        let prompt = ConnectionSetupPrompt.lanDetails.text.lowercased()
+        XCTAssertTrue(prompt.contains("ip address"), "The LAN prompt must request the machine's local IP address: \(prompt)")
+        XCTAssertFalse(prompt.contains("hostname"), "The LAN prompt must not promise hostname support: \(prompt)")
     }
 
     func testNoPromptRequestsPublicExposureOrHardCodedPorts() {

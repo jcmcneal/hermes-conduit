@@ -57,14 +57,15 @@ struct ConnectionSetupForm: View {
                         .submitLabel(.next)
                         .onSubmit { flow.submitDetails() }
                         .accessibilityIdentifier("setup.url")
+                        .accessibilityLabel("Dashboard address")
                 }.id(Field.url)
             } else {
                 Text(flow.accessMethod == .lan
-                     ? "Enter the host and dashboard port Hermes gave you. You don’t need to type http://."
+                     ? "Enter the dashboard's local IP address and port Hermes gave you. You don’t need to type http://."
                      : "Enter the Tailscale hostname or address Hermes gave you. Tailscale Serve hostnames use HTTPS; leave the port blank unless Hermes supplied one.")
                     .foregroundStyle(.secondary)
-                labeled(flow.accessMethod == .lan ? "Host / IP address" : "Tailscale hostname / address") {
-                    TextField("Host or IP address", text: hostBinding)
+                labeled(flow.accessMethod == .lan ? "Private LAN IP address" : "Tailscale hostname / address") {
+                    TextField(flow.accessMethod == .lan ? "Local IP address" : "Tailscale host or address", text: hostBinding)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -72,12 +73,14 @@ struct ConnectionSetupForm: View {
                         .submitLabel(.next)
                         .onSubmit { focusedField = .port }
                         .accessibilityIdentifier("setup.host")
+                        .accessibilityLabel(flow.accessMethod == .lan ? "Private LAN IP address" : "Tailscale hostname or address")
                 }.id(Field.host)
                 labeled(flow.accessMethod == .lan ? "Port" : "Port (optional)") {
                     TextField("Port supplied by Hermes", text: portBinding)
                         .keyboardType(.numberPad)
                         .focused($focusedField, equals: .port)
                         .accessibilityIdentifier("setup.port")
+                        .accessibilityLabel(flow.accessMethod == .lan ? "Dashboard port" : "Dashboard port (optional)")
                 }.id(Field.port)
                 if flow.accessMethod == .tailscale,
                    !ConnectionSetupAddressBuilder.isServeHostname(flow.draft.tailscale.host) {
@@ -116,6 +119,7 @@ struct ConnectionSetupForm: View {
                     .submitLabel(.next)
                     .onSubmit { focusedField = .password }
                     .accessibilityIdentifier("setup.username")
+                    .accessibilityLabel("Dashboard username")
             }.id(Field.username)
             labeled("Dashboard password") {
                 SecureField("Dashboard password", text: $flow.draft.password)
@@ -126,6 +130,7 @@ struct ConnectionSetupForm: View {
                     .submitLabel(.next)
                     .onSubmit { flow.submitCredentials() }
                     .accessibilityIdentifier("setup.password")
+                    .accessibilityLabel("Dashboard password")
             }.id(Field.password)
             validationNotice
             nextButton("Review") { flow.submitCredentials() }
@@ -135,12 +140,9 @@ struct ConnectionSetupForm: View {
     private var review: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Review").font(.title2.weight(.semibold))
-            if let result = try? flow.draft.result() {
-                reviewValue("Connection method", flow.draft.methodTitle)
-                reviewValue("Dashboard address", result.serverURL)
-                reviewValue("Username", result.username)
-                reviewValue("Password", "Entered")
-            }
+            // Revalidate for rendering only: a draft that stopped validating
+            // after reaching Review must never silently blank the card.
+            reviewContent
             Text("These settings will fill the login form. You’ll tap Connect there when you’re ready. This assistant has not tested the connection.")
                 .foregroundStyle(.secondary)
             validationNotice
@@ -148,8 +150,34 @@ struct ConnectionSetupForm: View {
                 if let result = flow.complete() { onComplete(result) }
             }
             .buttonStyle(.borderedProminent)
+            .disabled(!reviewIsValid)
             .accessibilityIdentifier("setup.use-settings")
         }
+    }
+
+    @ViewBuilder private var reviewContent: some View {
+        switch flow.reviewState() {
+        case .success(let result):
+            reviewValue("Connection method", flow.draft.methodTitle)
+            reviewValue("Dashboard address", result.serverURL)
+            reviewValue("Username", result.username)
+            reviewValue("Password", "Entered")
+        case .failure(let error):
+            VStack(alignment: .leading, spacing: 8) {
+                Text("These settings can’t be used yet. Go Back to edit them, then return here.")
+                    .font(.subheadline.weight(.semibold))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(error.message).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("setup.review-invalid")
+        }
+    }
+
+    private var reviewIsValid: Bool {
+        if case .success = flow.reviewState() { return true }
+        return false
     }
 
     @ViewBuilder private var validationNotice: some View {

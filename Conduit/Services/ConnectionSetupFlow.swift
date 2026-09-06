@@ -97,8 +97,11 @@ enum ConnectionSetupPrompt: CaseIterable {
             return "Does my Hermes dashboard require authentication? If so, tell me what username and password I should "
                 + "use with Hermes Conduit. If authentication is not configured, set it up securely. Do not disable authentication."
         case .lanDetails:
+            // LAN entry is IP-address-only today: canonical transport policy
+            // admits localhost, literal private LAN addresses, and Tailscale —
+            // not local hostnames. The prompt must not promise them.
             return "Please make sure the Hermes dashboard is reachable from other devices on my local network, then tell me "
-                + "the local IP address or hostname and the dashboard port I should use with Hermes Conduit. "
+                + "the machine's local IP address and the dashboard port I should use with Hermes Conduit. "
                 + "Keep dashboard authentication enabled."
         case .tailscaleServe:
             return "Please check whether the Hermes dashboard is running. Make sure Tailscale is available on this machine, "
@@ -180,8 +183,10 @@ struct ConnectionSetupFlow: Equatable {
     }
 
     /// The "Dashboard is ready" continuation after the No / I don't know
-    /// guidance.
+    /// guidance. Step-gated like `confirmCredentialsReady()` so a stray call
+    /// from any other step stays a deterministic no-op.
     mutating func confirmDashboardReady() {
+        guard step == .dashboard else { return }
         advance(to: .credentials)
     }
 
@@ -249,6 +254,19 @@ struct ConnectionSetupFlow: Equatable {
         guard step == .review else { return nil }
         do { return try draft.result() }
         catch { record(error); return nil }
+    }
+
+    /// Pure revalidation for rendering the Review card: the validated result
+    /// when the draft is still complete, otherwise the typed validation error
+    /// the screen must show. Never mutates the path, so a revalidation
+    /// failure can never silently blank the Review content — the view renders
+    /// the failure branch instead.
+    func reviewState() -> Result<ConnectionSetupResult, ConnectionSetupValidationError> {
+        do { return .success(try draft.result()) }
+        catch {
+            let validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
+            return .failure(validationError)
+        }
     }
 
     private mutating func record(_ error: Error) {
