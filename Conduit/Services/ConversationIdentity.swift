@@ -56,7 +56,7 @@ enum ResumeIdentityAdmission: Equatable {
     case legacyRuntimeRebind
 }
 
-enum ResumeIdentityRejection: Equatable {
+enum ResumeIdentityRejection: Error, Equatable {
     /// The response explicitly names a different durable conversation.
     case durableContradiction(selected: String, returned: String)
     /// The returned runtime id positively belongs to another catalog row.
