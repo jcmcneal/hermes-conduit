@@ -2374,8 +2374,9 @@ final class AppStateChatResumeTests: XCTestCase {
         // Live truth: runtime-x belongs to stored-b (authoritative registry
         // + catalog). A stale push claims runtime-x + stored-a. The routing
         // attempt follows the payload, resume/admission rejects the
-        // contradiction, the open fails — and the index still says runtime-x
-        // → stored-b.
+        // contradiction, the open fails — the index still says runtime-x
+        // → stored-b, and NEITHER durable conversation's presentation cache
+        // is touched by the rejected promotion attempt.
         var requests: [String] = []
         let index = ConversationIdentityIndex()
         index.recordAuthoritative(
@@ -2384,6 +2385,24 @@ final class AppStateChatResumeTests: XCTestCase {
             profile: "default",
             source: .activeList
         )
+        let cacheSuite = "conduit.tests.promotion-rejected-\(UUID().uuidString)"
+        guard let cacheDefaults = UserDefaults(suiteName: cacheSuite) else {
+            XCTFail("Could not create cache defaults suite")
+            return
+        }
+        let cache = SessionPresentationCache(defaults: cacheDefaults)
+        defer {
+            cache.clear()
+            cacheDefaults.removePersistentDomain(forName: cacheSuite)
+        }
+        let transcriptA = [
+            ChatMessage(id: "a-row", role: .assistant, content: "A presentation", timestamp: "a-ts")
+        ]
+        let transcriptB = [
+            ChatMessage(id: "b-row", role: .assistant, content: "B presentation", timestamp: "b-ts")
+        ]
+        cache.save(transcriptA, profile: "default", sessionIDs: ["stored-a"])
+        cache.save(transcriptB, profile: "default", sessionIDs: ["stored-b"])
         let harness = makeHarness(
             lifecycleOperations: ChatResumeLifecycleOperations(
                 loadCatalog: { _, _ in [
@@ -2400,6 +2419,7 @@ final class AppStateChatResumeTests: XCTestCase {
                 },
                 refreshContext: { _, _ in }
             ),
+            sessionPresentationCache: cache,
             conversationIdentityIndex: index
         )
         let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
@@ -2411,7 +2431,12 @@ final class AppStateChatResumeTests: XCTestCase {
                 profile: nil,
                 sessionId: "runtime-x",
                 durableSessionID: "stored-a",
-                type: nil
+                type: "approval.needed",
+                decision: .approval(
+                    sessionKey: "runtime-x",
+                    description: "Stale push approval",
+                    choices: ["once", "deny"]
+                )
             )
         )
 
@@ -2429,6 +2454,103 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertNotEqual(
             harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-b",
             "The rejected claim must not re-home the scroll canonical onto stored-b"
+        )
+        // Neither durable conversation inherited anything from the rejected
+        // promotion attempt: stored-a's and stored-b's cached presentation
+        // are exactly what they were, with no pending card injected.
+        XCTAssertTrue(
+            cache.merge(transcriptA, profile: "default", sessionIDs: ["stored-a"], includePendingApprovals: true)
+                .filter { $0.role == .approval }.isEmpty,
+            "The claimed durable (stored-a) must not gain the rejected card"
+        )
+        XCTAssertEqual(
+            cache.merge(transcriptB, profile: "default", sessionIDs: ["stored-b"], includePendingApprovals: true)
+                .first?.timestamp,
+            "b-ts",
+            "stored-b's durable presentation is unchanged"
+        )
+        XCTAssertTrue(
+            cache.storedPendingDecisionKeys(profile: "default", sessionIDs: ["stored-a", "stored-b"]).isEmpty,
+            "No pending decision from the rejected push lives under either durable key"
+        )
+    }
+
+    func testRejectedPushResidueCannotPromoteIntoTrueOwnerOnLaterOpen() async {
+        // The rejection-eviction invariant, extended: the rejected push's
+        // card was pre-recorded under runtime-x. A LATER legitimate open of
+        // stored-b (runtime-x's true owner) must not promote that stale card
+        // into stored-b — the rejection evicted it.
+        let index = ConversationIdentityIndex()
+        index.recordAuthoritative(
+            runtimeID: "runtime-x",
+            durableID: "stored-b",
+            profile: "default",
+            source: .activeList
+        )
+        let cacheSuite = "conduit.tests.promotion-eviction-\(UUID().uuidString)"
+        guard let cacheDefaults = UserDefaults(suiteName: cacheSuite) else {
+            XCTFail("Could not create cache defaults suite")
+            return
+        }
+        let cache = SessionPresentationCache(defaults: cacheDefaults)
+        defer {
+            cache.clear()
+            cacheDefaults.removePersistentDomain(forName: cacheSuite)
+        }
+        cache.save(
+            [ChatMessage(id: "b-row", role: .assistant, content: "B transcript", timestamp: "b-ts")],
+            profile: "default",
+            sessionIDs: ["stored-b"]
+        )
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [
+                    self.session("stored-b", storedID: "stored-b", alternateIDs: ["runtime-x"])
+                ] },
+                openSession: { _, sessionID, _ in
+                    SessionResumeResult(
+                        sessionId: "runtime-x",
+                        storedSessionId: "stored-b",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            sessionPresentationCache: cache,
+            conversationIdentityIndex: index
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        // 1. The stale push is rejected by identity admission.
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(
+                profile: nil,
+                sessionId: "runtime-x",
+                durableSessionID: "stored-a",
+                type: "approval.needed",
+                decision: .approval(
+                    sessionKey: "runtime-x",
+                    description: "Stale push approval",
+                    choices: ["once", "deny"]
+                )
+            )
+        )
+        XCTAssertFalse(opened)
+
+        // 2. A later legitimate open of the true owner (stored-b) must not
+        // surface the rejected card.
+        let openedOwner = await harness.appState.openSession("stored-b")
+        XCTAssertTrue(openedOwner)
+        XCTAssertTrue(
+            harness.appState.messages.filter { $0.role == .approval }.isEmpty,
+            "The rejected push's card must not surface in the true owner's transcript"
+        )
+        XCTAssertTrue(
+            cache.storedPendingDecisionKeys(profile: "default", sessionIDs: ["stored-b"]).isEmpty,
+            "And it must not have been promoted into stored-b's durable cache"
         )
     }
 
@@ -2474,6 +2596,173 @@ final class AppStateChatResumeTests: XCTestCase {
             index.durableID(forRuntime: "runtime-x", profile: "default"),
             "stored-a",
             "Another profile's registry rows cannot reattribute this profile's runtime"
+        )
+    }
+
+    func testConfirmedAliasNotificationDecisionSurvivesRotatedRuntimePromotion() async {
+        // The promotion case: a confirmedAlias notification carries a pending
+        // approval under runtime-old; the resume of stored-a is admitted and
+        // returns a ROTATED runtime (runtime-new) that was never in the
+        // accepted set. The pre-open card (cached under runtime-old) must be
+        // promoted into the durable conversation and answer there, the
+        // runtime keys must be retired, and the index must keep both runtimes
+        // pointing at stored-a.
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-old",
+            durableID: "stored-a",
+            profile: "default",
+            source: .resume
+        )
+        let cacheSuite = "conduit.tests.promotion-rotated-\(UUID().uuidString)"
+        guard let cacheDefaults = UserDefaults(suiteName: cacheSuite) else {
+            XCTFail("Could not create cache defaults suite")
+            return
+        }
+        let cache = SessionPresentationCache(defaults: cacheDefaults)
+        defer {
+            cache.clear()
+            cacheDefaults.removePersistentDomain(forName: cacheSuite)
+        }
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [] },
+                openSession: { _, sessionID, _ in
+                    SessionResumeResult(
+                        sessionId: "runtime-new",
+                        storedSessionId: "stored-a",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            sessionPresentationCache: cache,
+            conversationIdentityIndex: index
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(
+                profile: nil,
+                sessionId: "runtime-old",
+                type: "approval.needed",
+                decision: .approval(
+                    sessionKey: "runtime-old",
+                    description: "Push approval",
+                    choices: ["once", "deny"]
+                )
+            )
+        )
+
+        XCTAssertTrue(opened)
+        let card = harness.appState.messages.first { $0.role == .approval }
+        XCTAssertEqual(card?.approval?.description, "Push approval", "The push card is restored into the transcript")
+        XCTAssertEqual(
+            card?.approval?.sessionId, "stored-a",
+            "The promoted card answers against the durable session"
+        )
+        XCTAssertEqual(
+            harness.appState.activeSessionId, "runtime-new",
+            "The admitted rotated runtime is the live selection"
+        )
+        // Durable cache: the card lives under stored-a; neither runtime key
+        // remains an independent presentation owner.
+        XCTAssertEqual(
+            cache.storedPendingDecisionKeys(profile: "default", sessionIDs: ["stored-a"]),
+            ["approval:stored-a"]
+        )
+        XCTAssertTrue(cache.storedPendingDecisionKeys(profile: "default", sessionIDs: ["runtime-old"]).isEmpty)
+        XCTAssertTrue(cache.storedPendingDecisionKeys(profile: "default", sessionIDs: ["runtime-new"]).isEmpty)
+        // Identity: both runtimes belong to stored-a.
+        XCTAssertEqual(index.durableID(forRuntime: "runtime-old", profile: "default"), "stored-a")
+        XCTAssertEqual(index.durableID(forRuntime: "runtime-new", profile: "default"), "stored-a")
+    }
+
+    func testExistingDurableCacheGainsNotificationApprovalUnderDurableKey() async {
+        // The durable record already holds presentation when the
+        // notification arrives. The open must keep the existing durable
+        // presentation, promote the fresh pending approval into the durable
+        // key, route it to stored-a, retire the runtime key, and never
+        // duplicate the card.
+        let cacheSuite = "conduit.tests.promotion-existing-\(UUID().uuidString)"
+        guard let cacheDefaults = UserDefaults(suiteName: cacheSuite) else {
+            XCTFail("Could not create cache defaults suite")
+            return
+        }
+        let cache = SessionPresentationCache(defaults: cacheDefaults)
+        defer {
+            cache.clear()
+            cacheDefaults.removePersistentDomain(forName: cacheSuite)
+        }
+        let durableTranscript = [
+            ChatMessage(id: "d1", role: .assistant, content: "Existing durable row", timestamp: "durable-ts")
+        ]
+        cache.save(durableTranscript, profile: "default", sessionIDs: ["stored-a"])
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-x",
+            durableID: "stored-a",
+            profile: "default",
+            source: .resume
+        )
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [] },
+                openSession: { _, sessionID, _ in
+                    // A real resume of stored-a returns the conversation's
+                    // own rows (Hermes compact shape: no cached timestamps).
+                    SessionResumeResult(
+                        sessionId: "runtime-x",
+                        storedSessionId: "stored-a",
+                        messages: [
+                            ChatMessage(id: "d1", role: .assistant, content: "Existing durable row", timestamp: "")
+                        ],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            sessionPresentationCache: cache,
+            conversationIdentityIndex: index
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(
+                profile: nil,
+                sessionId: "runtime-x",
+                type: "approval.needed",
+                decision: .approval(
+                    sessionKey: "runtime-x",
+                    description: "Newest approval",
+                    choices: ["once", "deny"]
+                )
+            )
+        )
+
+        XCTAssertTrue(opened)
+        // Existing durable presentation survives: the resumed row is
+        // enriched from the durable key (had consolidation dropped or
+        // replaced it, the timestamp would be lost).
+        XCTAssertEqual(
+            harness.appState.messages.first(where: { $0.id == "d1" })?.timestamp, "durable-ts",
+            "Existing durable presentation survives the promotion"
+        )
+        let cards = harness.appState.messages.filter { $0.role == .approval }
+        XCTAssertEqual(cards.count, 1, "Exactly one pending card")
+        XCTAssertEqual(cards.first?.approval?.sessionId, "stored-a", "The card routes to the durable session")
+        XCTAssertEqual(
+            cache.storedPendingDecisionKeys(profile: "default", sessionIDs: ["stored-a"]),
+            ["approval:stored-a"]
+        )
+        XCTAssertTrue(
+            cache.storedPendingDecisionKeys(profile: "default", sessionIDs: ["runtime-x"]).isEmpty,
+            "The runtime-x cache key is retired"
         )
     }
 

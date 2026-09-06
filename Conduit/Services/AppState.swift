@@ -3124,7 +3124,8 @@ final class AppState: ObservableObject {
         automaticWorkToken: ChatResumeAutomaticWorkToken? = nil,
         automaticSyncOperationID: UUID? = nil,
         requiredViewportTransitionGeneration: UInt64? = nil,
-        historySourceUnavailable: Bool = false
+        historySourceUnavailable: Bool = false,
+        presentationMigrationSessionIDs: Set<String> = []
     ) async -> Bool {
         guard automaticChatResumeWorkIsCurrent(
             automaticWorkToken,
@@ -3345,8 +3346,14 @@ final class AppState: ObservableObject {
                     // now, and the alias keys are retired so a later
                     // re-attribution of a runtime id to a different
                     // conversation can never inherit this presentation.
+                    // `presentationMigrationSessionIDs` are notification
+                    // presentation sources — untrusted as identity, so they
+                    // were never added to the accepted set; now that
+                    // admission HAS succeeded they are legitimate migration
+                    // sources for the pending decision cards they carried.
                     let runtimeAliases = acceptedSessionIDs
                         .union([result.sessionId, sessionId])
+                        .union(presentationMigrationSessionIDs)
                         .subtracting([admittedDurable])
                     sessionPresentationCache.consolidateUnderDurableKey(
                         profile: profile,
@@ -3400,10 +3407,18 @@ final class AppState: ObservableObject {
                 // Desktop keeps its live projection during an active turn. Seed
                 // the same durable presentation details first so the completed
                 // portion of a backgrounded turn does not lose its timestamps.
+                // Durable-owned: writes land on the durable key only, so the
+                // alias keys consolidation just retired stay retired.
+                let presentationDurableID = context?.resolvedDurableSessionId
+                    ?? referenceIdentity.durableSessionID
+                    ?? sessionId
                 sessionPresentationCache.save(
                     transcript.messages,
                     profile: profile,
-                    sessionIDs: [sessionId, result.sessionId, transcript.resolvedSessionId].compactMap { $0 }
+                    sessionIDs: Self.durableOwnedPresentationIDs(
+                        [sessionId, result.sessionId, transcript.resolvedSessionId].compactMap { $0 },
+                        durableSessionID: presentationDurableID
+                    )
                 )
             }
             // A compact resume ships no persisted transcript, so the REST rows
@@ -6485,7 +6500,8 @@ final class AppState: ObservableObject {
 
     private func openSession(
         _ sessionId: String,
-        reusing viewportTransitionGeneration: UInt64?
+        reusing viewportTransitionGeneration: UInt64?,
+        presentationMigrationSessionIDs: Set<String> = []
     ) async -> Bool {
         guard let client else { return false }
         let previousTurnState = turnState
@@ -6532,7 +6548,8 @@ final class AppState: ObservableObject {
             token: token,
             acceptedSessionIDs: acceptedSessionIDs,
             conversationIdentity: openedIdentity,
-            requiredViewportTransitionGeneration: transitionGeneration
+            requiredViewportTransitionGeneration: transitionGeneration,
+            presentationMigrationSessionIDs: presentationMigrationSessionIDs
         )
         guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
             return false
@@ -6633,7 +6650,14 @@ final class AppState: ObservableObject {
         }
         let opened = await openSession(
             route.resumeTargetID,
-            reusing: transitionGeneration
+            reusing: transitionGeneration,
+            // The push-named runtime id is a PRESENTATION MIGRATION SOURCE,
+            // never an identity alias: a pending decision card recorded
+            // under it before the open must be promoted into the admitted
+            // durable conversation now that admission succeeded. On a
+            // rejected open nothing migrates (the hook only runs on
+            // admission success).
+            presentationMigrationSessionIDs: [requestedID]
         )
         // Commit the payload's dual identity as positive evidence only once
         // the open actually succeeded — a failed resume (e.g. the durable
@@ -6651,11 +6675,41 @@ final class AppState: ObservableObject {
                 )
             }
         }
+        if !opened, let decision = target.decision,
+           let evictionKey = Self.pendingDecisionEvictionKey(for: decision) {
+            // The claim was rejected: evict the pre-open card from the
+            // push-named runtime key. Without this, the stale card would
+            // still sit under that runtime id and a LATER legitimate open
+            // of the true owner would promote it into the wrong durable
+            // conversation.
+            sessionPresentationCache.removePendingDecision(
+                key: evictionKey,
+                profile: activeProfile,
+                sessionIDs: [requestedID]
+            )
+        }
         guard notificationOpenAttemptIsCurrent(
             id: notificationAttemptID,
             transitionGeneration: transitionGeneration
         ) else { return false }
         return opened
+    }
+
+    /// The stable decision key a push-delivered card was recorded under
+    /// (`approval:<sessionKey>` / `clarify:<requestId>`) — used to evict a
+    /// pre-open card when its open is rejected. Batch clarifies share the
+    /// scalar key shape via their relay request id.
+    private static func pendingDecisionEvictionKey(
+        for decision: PendingDecisionPayload
+    ) -> String? {
+        switch decision {
+        case .approval(let sessionKey, _, _):
+            return "approval:\(sessionKey)"
+        case .clarify(let requestId, _, _):
+            return "clarify:\(requestId)"
+        case .clarifyBatch(let requestId, _):
+            return "clarify:\(requestId)"
+        }
     }
 
     /// Caches a push-delivered decision card so the resume merge can restore

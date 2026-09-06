@@ -299,9 +299,26 @@ final class SessionPresentationCache {
             let pendingApprovals = cached.compactMap(\.approval).filter {
                 Self.isPendingDecision($0.status)
             }
-            for approval in pendingApprovals where !merged.contains(where: {
-                $0.approval?.sessionId == approval.sessionId
-            }) {
+            // Hermes approvals are a single gate per conversation. When the
+            // gateway transcript already announces a pending approval under
+            // ANY identity of this conversation (the supplied lookup set),
+            // a promoted push card for the same gate — keyed by the durable
+            // id after routing rewrite — would render as a duplicate.
+            let suppliedIDs = Set(sessionIDs.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            })
+            let gatewayAnnouncesPendingGate = merged.contains { message in
+                guard let approval = message.approval else { return false }
+                return Self.isPendingDecision(approval.status)
+                    && suppliedIDs.contains(
+                        approval.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+            }
+            for approval in pendingApprovals {
+                if gatewayAnnouncesPendingGate { break }
+                guard !merged.contains(where: {
+                    $0.approval?.sessionId == approval.sessionId
+                }) else { continue }
                 let cachedMessage = cached.last { $0.approval?.sessionId == approval.sessionId }
                 merged.append(ChatMessage(
                     id: cachedMessage?.id ?? "approval-\(approval.sessionId)",
@@ -592,21 +609,26 @@ final class SessionPresentationCache {
     /// Durable-owned persistence: once this conversation's durable identity
     /// is positively established, the durable key is its ONLY persistent
     /// presentation key. Moves the conversation's cached presentation from
-    /// its runtime-alias keys into the durable key — on establishment (no
-    /// durable record yet) the FRESHEST alias record migrates so runtime-only
-    /// history is not lost; when a durable record already exists it is the
-    /// live write and stays — then REMOVES every alias key. Retiring the
-    /// mutable runtime keys is the point: a runtime id the gateway later
-    /// re-attributes to a different conversation must not carry this
-    /// conversation's timestamps, attachments, tool metadata, or pending
-    /// decision cards with it.
+    /// its runtime-alias keys into the durable key, then REMOVES every alias
+    /// key. Retiring the mutable runtime keys is the point: a runtime id the
+    /// gateway later re-attributes to a different conversation must not
+    /// carry this conversation's timestamps, attachments, tool metadata, or
+    /// pending decision cards with it.
     ///
-    /// Migrated approval cards have their embedded `sessionId` rewritten from
-    /// a retired runtime alias to the durable id, so answering a restored
-    /// card dispatches to the durable session even after a later rotation —
-    /// never to whatever the old runtime id routes to by then. Clarify
-    /// request ids are relay-minted (`conduit-push-…`), not session ids, and
-    /// are never rewritten.
+    /// Merge semantics when the durable record already exists: the durable
+    /// record stays AUTHORITATIVE for transcript presentation — an alias
+    /// snapshot never overwrites its timestamps, tool metadata, or rows.
+    /// Only NEW pending decision content (approval/clarify/batch by stable
+    /// decision key, deduped) is promoted from alias records — the fresh
+    /// notification-delivered card must survive, the stale alias transcript
+    /// must not leak. On establishment (no durable record yet) the FRESHEST
+    /// alias record migrates whole so runtime-only history is not lost.
+    ///
+    /// Approval cards whose embedded `sessionId` names a retired runtime
+    /// alias are rewritten to the durable id, so answering a restored card
+    /// dispatches to the durable session even after later rotations.
+    /// Clarify request ids are relay-minted (`conduit-push-…`), not session
+    /// ids, and are never rewritten.
     func consolidateUnderDurableKey(
         profile: String,
         durableSessionID: String,
@@ -630,6 +652,14 @@ final class SessionPresentationCache {
                 rewriteRoutingIdentities(in: &freshest, durableSessionID: durableSessionID, runtimeAliases: runtimeAliases)
                 store[durableKey] = freshest
             }
+        } else {
+            promotePendingDecisionsFromAliases(
+                into: &store,
+                durableKey: durableKey,
+                aliasKeys: aliasKeys,
+                durableSessionID: durableSessionID,
+                runtimeAliases: runtimeAliases
+            )
         }
         var changed = store[durableKey] != nil
         for aliasKey in aliasKeys where store.removeValue(forKey: aliasKey) != nil {
@@ -645,6 +675,91 @@ final class SessionPresentationCache {
             store[durableKey] = durableSession
         }
         persist(store)
+    }
+
+    /// Promotes NEW pending decision presentation from alias records into an
+    /// existing durable record. The durable transcript rows, timestamps, and
+    /// tool metadata are never touched: only pending decisions the durable
+    /// record does not already hold (deduped by stable decision key, after
+    /// routing-identity rewrite) are appended, and the bounded
+    /// unconfirmed-expiry marker is adopted when the durable record has none.
+    private func promotePendingDecisionsFromAliases(
+        into store: inout [String: CachedSession],
+        durableKey: String,
+        aliasKeys: Set<String>,
+        durableSessionID: String,
+        runtimeAliases: [String]
+    ) {
+        guard var durableSession = store[durableKey] else { return }
+        let aliases = Set(runtimeAliases.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        })
+        var knownKeys = Set(durableSession.messages.compactMap(decisionKey(for:)))
+        var promoted = false
+        // The freshest unconfirmed marker among aliases that actually
+        // contributed a card. Markers from cardless aliases are ignored:
+        // adopting one could expire the just-promoted card immediately.
+        var freshestContributedMarker: Date?
+        for aliasKey in aliasKeys {
+            guard let aliasEntry = store[aliasKey] else { continue }
+            var aliasContributed = false
+            for message in aliasEntry.messages {
+                guard pendingDecisionKey(for: message) != nil else { continue }
+                var candidate = message
+                // Rewrite BEFORE dedup so a runtime-keyed card cannot
+                // duplicate a decision the durable record already holds
+                // under the durable id.
+                if let approval = candidate.approval,
+                   aliases.contains(approval.sessionId) {
+                    candidate.approval?.sessionId = durableSessionID
+                }
+                let key = decisionKey(for: candidate)
+                guard let key else { continue }
+                if let existingIndex = durableSession.messages.firstIndex(where: {
+                    decisionKey(for: $0) == key
+                }) {
+                    // Same decision already persisted. The durable row stays
+                    // authoritative unless its unconfirmed marker has
+                    // expired — a dead durable card is replaced by the fresh
+                    // alias copy rather than duplicated or silently dropped.
+                    if isUnconfirmedPendingDecisionExpired(
+                        since: durableSession.unconfirmedPendingDecisionAt
+                    ) {
+                        durableSession.messages[existingIndex] = candidate
+                        aliasContributed = true
+                    }
+                    continue
+                }
+                durableSession.messages.append(candidate)
+                knownKeys.insert(key)
+                promoted = true
+                aliasContributed = true
+            }
+            // Replacement (the duplicate branch above) counts as promotion:
+            // without it a fresh alias copy of an expired durable card would
+            // be discarded and the marker refresh skipped.
+            if aliasContributed { promoted = true }
+            guard aliasContributed,
+                  let aliasMarker = aliasEntry.unconfirmedPendingDecisionAt else { continue }
+            if freshestContributedMarker == nil || aliasMarker > freshestContributedMarker! {
+                freshestContributedMarker = aliasMarker
+            }
+        }
+        guard promoted else { return }
+        // Expiry semantics: only touch the marker when cards were promoted.
+        // Adopt the freshest contributing marker when the durable record has
+        // none, and REFRESH an expired durable marker — a stale marker would
+        // make merge strip the freshly promoted card on the next read,
+        // silently losing it after successful promotion. A live durable
+        // marker is left alone: legitimately-expired durable cards without
+        // fresh arrivals stay expired.
+        if let freshestContributedMarker,
+           durableSession.unconfirmedPendingDecisionAt == nil
+            || isUnconfirmedPendingDecisionExpired(since: durableSession.unconfirmedPendingDecisionAt) {
+            durableSession.unconfirmedPendingDecisionAt = freshestContributedMarker
+        }
+        durableSession.updatedAt = now()
+        store[durableKey] = durableSession
     }
 
     /// Points migrated approval cards at the durable session id when they

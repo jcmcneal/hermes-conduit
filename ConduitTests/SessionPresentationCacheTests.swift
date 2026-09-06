@@ -384,6 +384,290 @@ final class SessionPresentationCacheTests: XCTestCase {
         )
     }
 
+    func testConsolidationPromotesNewPendingApprovalIntoExistingDurableRecord() throws {
+        // The notification-promotion case: the durable record already holds
+        // normal presentation when a fresh pending approval arrives under a
+        // runtime alias. Consolidation must promote the CARD (deduped,
+        // routing id rewritten to the durable session) while keeping the
+        // durable transcript authoritative — and retire the alias key.
+        let (cache, _, tickClock, _) = try makeIsolatedCache()
+        let profile = "promote"
+        cache.save(
+            [ChatMessage(id: "d1", role: .assistant, content: "Durable transcript", timestamp: "durable-ts")],
+            profile: profile,
+            sessionIDs: ["stored-a"]
+        )
+        tickClock()
+        let approval = ApprovalActivity(
+            sessionId: "runtime-x",
+            command: "",
+            description: "Fresh push approval",
+            choices: ["once", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        cache.save(
+            [
+                ChatMessage(
+                    id: "approval-runtime-x",
+                    role: .approval,
+                    content: "Fresh push approval",
+                    timestamp: "push-ts",
+                    approval: approval
+                )
+            ],
+            profile: profile,
+            sessionIDs: ["runtime-old"]
+        )
+
+        cache.consolidateUnderDurableKey(
+            profile: profile,
+            durableSessionID: "stored-a",
+            // Production unions every runtime the admitted resume knows: the
+            // push-named key (runtime-old) AND the card's own embedded
+            // session key (runtime-x) — both are retired by promotion.
+            runtimeAliases: ["runtime-old", "runtime-x"]
+        )
+
+        let probe = [
+            ChatMessage(id: "d1", role: .assistant, content: "Durable transcript", timestamp: ""),
+            ChatMessage(id: "approval-runtime-x", role: .approval, content: "Fresh push approval", timestamp: ""),
+        ]
+        let merged = cache.merge(
+            probe,
+            profile: profile,
+            sessionIDs: ["stored-a"],
+            includePendingApprovals: true
+        )
+        XCTAssertEqual(merged[0].timestamp, "durable-ts", "The durable transcript stays authoritative")
+        XCTAssertEqual(
+            merged[1].approval?.sessionId, "stored-a",
+            "The promoted card answers against the durable session"
+        )
+        XCTAssertEqual(merged[1].approval?.status, .pending)
+        // No duplicates, no runtime key: consolidating again must not add a
+        // second card, and the runtime-old copy is gone.
+        cache.consolidateUnderDurableKey(
+            profile: profile,
+            durableSessionID: "stored-a",
+            runtimeAliases: ["runtime-old", "runtime-x"]
+        )
+        let mergedAgain = cache.merge(
+            probe,
+            profile: profile,
+            sessionIDs: ["stored-a"],
+            includePendingApprovals: true
+        )
+        XCTAssertEqual(mergedAgain.filter { $0.role == .approval }.count, 1)
+        XCTAssertNil(
+            cache.merge([probe[1]], profile: profile, sessionIDs: ["runtime-old"], includePendingApprovals: true)
+                .first?.approval,
+            "The runtime alias key is retired — no card answers from it"
+        )
+    }
+
+    func testConsolidationPromotesPendingClarifyIntoExistingDurableRecordWithoutRewritingRequestId() throws {
+        // Clarify request ids are request identity (relay-minted), not
+        // session routing identity: promotion must preserve them verbatim,
+        // dedupe on a second pass, and retire the alias key.
+        let (cache, _, tickClock, _) = try makeIsolatedCache()
+        let profile = "promote-clarify"
+        cache.save(
+            [ChatMessage(id: "d1", role: .assistant, content: "Durable transcript", timestamp: "durable-ts")],
+            profile: profile,
+            sessionIDs: ["stored-a"]
+        )
+        tickClock()
+        cache.save(
+            [
+                ChatMessage(
+                    id: "clarify-conduit-push-q1",
+                    role: .clarify,
+                    content: "Which env?",
+                    timestamp: "push-ts",
+                    clarify: ClarifyActivity(
+                        requestId: "conduit-push-q1",
+                        question: "Which env?",
+                        choices: [ClarifyChoice(label: "staging", value: "staging")],
+                        status: .pending,
+                        answer: nil,
+                        error: nil
+                    )
+                )
+            ],
+            profile: profile,
+            sessionIDs: ["runtime-old"]
+        )
+
+        cache.consolidateUnderDurableKey(
+            profile: profile,
+            durableSessionID: "stored-a",
+            runtimeAliases: ["runtime-old"]
+        )
+
+        let probe = [ChatMessage(id: "p", role: .assistant, content: "probe", timestamp: "")]
+        let merged = cache.merge(probe, profile: profile, sessionIDs: ["stored-a"], includePendingClarifications: true)
+        let cards = merged.filter { $0.clarify?.requestId == "conduit-push-q1" }
+        XCTAssertEqual(cards.count, 1, "Exactly one promoted clarify card")
+        XCTAssertEqual(cards.first?.clarify?.requestId, "conduit-push-q1", "Request ids are never rewritten")
+        cache.consolidateUnderDurableKey(
+            profile: profile,
+            durableSessionID: "stored-a",
+            runtimeAliases: ["runtime-old"]
+        )
+        let mergedAgain = cache.merge(probe, profile: profile, sessionIDs: ["stored-a"], includePendingClarifications: true)
+        XCTAssertEqual(
+            mergedAgain.filter { $0.clarify?.requestId == "conduit-push-q1" }.count, 1,
+            "Promotion dedupes by decision key"
+        )
+        XCTAssertTrue(
+            cache.merge(probe, profile: profile, sessionIDs: ["runtime-old"], includePendingClarifications: true)
+                .filter { $0.clarify?.requestId == "conduit-push-q1" }.isEmpty,
+            "The runtime alias key is retired"
+        )
+    }
+
+    func testConsolidationRefreshesExpiredDurableMarkerSoPromotedCardStaysVisible() throws {
+        // A durable record whose unconfirmed marker has expired must not
+        // kill a freshly promoted card: promotion refreshes the marker from
+        // the contributing alias so the card renders after the promotion.
+        let (cache, cacheDefaults, tickClock, _) = try makeIsolatedCache()
+        let profile = "expired-marker"
+        let expiredApproval = ApprovalActivity(
+            sessionId: "stored-a",
+            command: "",
+            description: "Old durable card",
+            choices: ["once", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        cache.save(
+            [
+                ChatMessage(
+                    id: "approval-old",
+                    role: .approval,
+                    content: "Old durable card",
+                    timestamp: "old-ts",
+                    approval: expiredApproval
+                )
+            ],
+            profile: profile,
+            sessionIDs: ["stored-a"],
+            unconfirmedPendingDecisionKeys: ["approval:stored-a"]
+        )
+        // Age the durable record's marker past the 24h unconfirmed window.
+        for _ in 0..<8_700 { tickClock() }
+        let freshApproval = ApprovalActivity(
+            sessionId: "runtime-x",
+            command: "",
+            description: "Fresh push approval",
+            choices: ["once", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        cache.recordPendingDecision(
+            ChatMessage(
+                id: "approval-fresh",
+                role: .approval,
+                content: "Fresh push approval",
+                timestamp: "fresh-ts",
+                approval: freshApproval
+            ),
+            profile: profile,
+            sessionIDs: ["runtime-x"]
+        )
+        XCTAssertEqual(
+            cache.storedPendingDecisionKeys(profile: profile, sessionIDs: ["runtime-x"]),
+            ["approval:runtime-x"],
+            "Fixture check: the fresh card is staged under the runtime key"
+        )
+        XCTAssertTrue(
+            cache.unconfirmedPendingDecisionDate(profile: profile, sessionIDs: ["stored-a"]).map {
+                cache.isUnconfirmedPendingDecisionExpired(since: $0)
+            } ?? false,
+            "Fixture check: the durable marker is expired at consolidation time"
+        )
+
+        cache.consolidateUnderDurableKey(
+            profile: profile,
+            durableSessionID: "stored-a",
+            runtimeAliases: ["runtime-x"]
+        )
+
+        XCTAssertEqual(
+            cache.storedPendingDecisionKeys(profile: profile, sessionIDs: ["stored-a"]),
+            ["approval:stored-a"],
+            "Promotion must land the fresh card in the durable record"
+        )
+
+        let probe = [
+            ChatMessage(id: "approval-fresh", role: .approval, content: "Fresh push approval", timestamp: "")
+        ]
+        let merged = cache.merge(
+            probe,
+            profile: profile,
+            sessionIDs: ["stored-a"],
+            includePendingApprovals: true
+        )
+        XCTAssertEqual(
+            merged.first?.approval?.description, "Fresh push approval",
+            "The freshly promoted card must not be killed by the durable record's expired marker"
+        )
+        XCTAssertEqual(merged.first?.approval?.sessionId, "stored-a")
+    }
+
+    func testConsolidationStaleAliasNeverOverwritesDurableTranscript() throws {
+        // Inverse protection: a stale alias snapshot with NO new pending
+        // decision must not touch the durable transcript presentation at
+        // all — the alias key is simply retired.
+        let (cache, _, tickClock, _) = try makeIsolatedCache()
+        let profile = "stale-alias"
+        let durableMessages = [
+            ChatMessage(id: "d1", role: .assistant, content: "Fresh row", timestamp: "fresh-ts"),
+            ChatMessage(id: "d2", role: .user, content: "Second", timestamp: "fresh-ts-2"),
+        ]
+        cache.save(durableMessages, profile: profile, sessionIDs: ["stored-a"])
+        tickClock()
+        let staleMessages = [
+            ChatMessage(id: "s1", role: .assistant, content: "Stale row", timestamp: "stale-ts"),
+        ]
+        cache.save(staleMessages, profile: profile, sessionIDs: ["runtime-x"])
+
+        cache.consolidateUnderDurableKey(
+            profile: profile,
+            durableSessionID: "stored-a",
+            runtimeAliases: ["runtime-x"]
+        )
+
+        let probe = durableMessages.map { message in
+            ChatMessage(id: message.id, role: message.role, content: message.content, timestamp: "")
+        }
+        XCTAssertEqual(
+            cache.merge(probe, profile: profile, sessionIDs: ["stored-a"]).map(\.timestamp),
+            ["fresh-ts", "fresh-ts-2"],
+            "The durable transcript presentation is unchanged"
+        )
+        XCTAssertTrue(
+            cache.merge(
+                staleMessages.map { message in
+                    ChatMessage(id: message.id, role: message.role, content: message.content, timestamp: "")
+                },
+                profile: profile,
+                sessionIDs: ["runtime-x"]
+            ).allSatisfy { $0.timestamp.isEmpty },
+            "The stale alias key is retired"
+        )
+    }
+
     func testConsolidationPreservesPendingClarifyThroughEstablishment() throws {
         // A pending clarify recorded under a runtime-only identity survives
         // the runtime→durable establishment migration.
