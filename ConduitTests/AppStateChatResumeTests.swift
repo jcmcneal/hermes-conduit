@@ -337,7 +337,7 @@ final class AppStateChatResumeTests: XCTestCase {
         // contradiction.
         let scheduler = ControlledReconnectScheduler()
         let harness = makeHarness(
-            reconnectScheduler: scheduler,
+            reconnectScheduler: scheduler.schedule(after:operation:),
             lifecycleOperations: ChatResumeLifecycleOperations(
                 loadCatalog: { _, _ in [self.session("stored-a")] },
                 openSession: { _, _, _ in
