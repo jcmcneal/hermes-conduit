@@ -66,6 +66,9 @@ enum ResumeIdentityRejection: Error, Equatable {
     case durableContradiction(selected: String, returned: String)
     /// The returned runtime id positively belongs to another catalog row.
     case foreignRuntimeOwnership(returned: String, ownerSessionID: String)
+    /// The durable key the response wants to establish is positively labeled
+    /// as another catalog row's stored id.
+    case foreignDurableOwnership(returned: String, ownerSessionID: String)
 }
 
 /// Admission gate for adopting a resume result into the selected
@@ -99,8 +102,18 @@ enum ConversationIdentityGate {
             }
             // No established durable id (runtime-only conversation): the
             // response's stored key ESTABLISHES the durable identity — the
-            // same adoption the create path performs. The runtime id is
-            // still validated below.
+            // same adoption the create path performs. Unless the claimed key
+            // is positively labeled as another row's stored id; the gateway
+            // is trusted for runtime→durable mapping, not for renaming a
+            // known foreign conversation into this one.
+            if let owner = catalog.first(where: { $0.storedSessionId == returnedDurable }),
+               !selected.acceptedSessionIDs.contains(owner.id),
+               !selected.acceptedSessionIDs.contains(returnedDurable) {
+                return .failure(.foreignDurableOwnership(
+                    returned: returnedDurable,
+                    ownerSessionID: owner.id
+                ))
+            }
         }
         // 2. A returned runtime id the conversation already answers to.
         if selected.acceptedSessionIDs.contains(claim.runtimeSessionID) {

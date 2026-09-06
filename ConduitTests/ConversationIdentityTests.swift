@@ -243,6 +243,34 @@ final class ConversationIdentityTests: XCTestCase {
         )
     }
 
+    func testGateRejectsEstablishmentClaimingAnotherRowsStoredKey() {
+        // A runtime-only selection cannot contradict a durable claim, but a
+        // claim that names a key POSITIVELY labeled as another row's stored
+        // id is a renaming attempt, not an establishment.
+        let selected = identity(durable: nil, runtime: "runtime-solo")
+        let catalog = [session("stored-other", storedSessionID: "stored-other-key")]
+        let claim = ResumeIdentityClaim(runtimeSessionID: "runtime-solo", durableSessionID: "stored-other-key")
+
+        XCTAssertEqual(
+            ConversationIdentityGate.admit(claim: claim, selected: selected, catalog: catalog),
+            .failure(.foreignDurableOwnership(returned: "stored-other-key", ownerSessionID: "stored-other"))
+        )
+    }
+
+    func testGateAcceptsAliasWhenOwnerRowIsLabeledWithSelectedDurable() {
+        // The refreshed catalog kept the conversation under a row whose
+        // stored label matches the selection's durable id: confirmation, not
+        // foreign ownership.
+        let selected = identity(durable: "stored-a", runtime: "runtime-old")
+        let catalog = [session("runtime-a", storedSessionID: "stored-a", alternates: ["runtime-old", "runtime-new"])]
+        let claim = ResumeIdentityClaim(runtimeSessionID: "runtime-new", durableSessionID: nil)
+
+        XCTAssertEqual(
+            ConversationIdentityGate.admit(claim: claim, selected: selected, catalog: catalog),
+            .success(.knownAlias)
+        )
+    }
+
     // MARK: - Fixtures
 
     private func identity(
@@ -263,10 +291,12 @@ final class ConversationIdentityTests: XCTestCase {
 
     private func session(
         _ id: String,
-        alternates: [String] = []
+        alternates: [String] = [],
+        storedSessionID: String? = nil
     ) -> SessionSummary {
         SessionSummary(
             id: id,
+            storedSessionId: storedSessionID,
             alternateIds: alternates,
             title: id,
             model: "Hermes",

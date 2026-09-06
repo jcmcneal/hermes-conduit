@@ -2769,12 +2769,21 @@ final class AppState: ObservableObject {
                 // preserve-current hit, keep the PRE-captured aliases too —
                 // the refreshed row can keep the conversation while dropping
                 // a runtime alias, and in-flight events for that alias must
-                // stay associated with this reconciliation.
+                // stay associated with this reconciliation. The union is
+                // durably anchored: a row sharing only a colliding runtime
+                // alias must not absorb the selected conversation's aliases.
                 let targetIDs = Set([target.id] + target.alternateIds)
                 var acceptedTargetIDs = targetIDs
                 if let preservedIdentity,
                    !targetIDs.isDisjoint(with: preservedIdentity.acceptedSessionIDs) {
-                    acceptedTargetIDs.formUnion(preservedIdentity.acceptedSessionIDs)
+                    let targetStored = target.storedSessionId
+                    let durablyAnchored = targetStored == nil
+                        || preservedIdentity.durableSessionID == nil
+                        || targetStored == preservedIdentity.durableSessionID
+                        || preservedIdentity.acceptedSessionIDs.contains(targetStored)
+                    if durablyAnchored {
+                        acceptedTargetIDs.formUnion(preservedIdentity.acceptedSessionIDs)
+                    }
                 }
                 let targetIdentity = ConversationIdentity(
                     profile: profile,
