@@ -440,22 +440,22 @@ final class ConnectionSetupTestTests: XCTestCase {
     }
 
     func testProbeFullSuccessEmitsTheExactStagedSequence() async {
-        let events = await runProbe("http://probe-success.example")
+        let events = await runProbe("https://probe-success.example")
         XCTAssertEqual(events, StagedTestDriver.successEvents)
     }
 
     func testProbeDNSFailureMapsToHostNotFoundAtServerStage() async {
-        let events = await runProbe("http://probe-dns.example")
+        let events = await runProbe("https://probe-dns.example")
         XCTAssertEqual(events, [.started(.server), .failed(.server, .hostNotFound)])
     }
 
     func testProbeRefusedMapsToConnectionRefusedAtServerStage() async {
-        let events = await runProbe("http://probe-refused.example")
+        let events = await runProbe("https://probe-refused.example")
         XCTAssertEqual(events, [.started(.server), .failed(.server, .connectionRefused)])
     }
 
     func testProbeTimeoutMapsToTimedOutAtServerStage() async {
-        let events = await runProbe("http://probe-timeout.example")
+        let events = await runProbe("https://probe-timeout.example")
         XCTAssertEqual(events, [.started(.server), .failed(.server, .timedOut)])
     }
 
@@ -475,7 +475,7 @@ final class ConnectionSetupTestTests: XCTestCase {
     }
 
     func testProbeDashboard5xxMapsToDashboardUnavailableAfterTransportSuccess() async {
-        let events = await runProbe("http://probe-5xx.example")
+        let events = await runProbe("https://probe-5xx.example")
         XCTAssertEqual(events, [
             .started(.server),
             .succeeded(.server),
@@ -487,7 +487,7 @@ final class ConnectionSetupTestTests: XCTestCase {
     func testProbeNonHermesWebsiteMapsToUnexpectedServerResponse() async {
         // A 200 response without a password-capable provider is never a
         // Hermes dashboard, and never success.
-        let events = await runProbe("http://probe-foreign.example")
+        let events = await runProbe("https://probe-foreign.example")
         XCTAssertEqual(events, [
             .started(.server),
             .succeeded(.server),
@@ -497,14 +497,14 @@ final class ConnectionSetupTestTests: XCTestCase {
     }
 
     func testProbeRejectedCredentialsMapToAuthenticationRejected() async {
-        let events = await runProbe("http://probe-auth401.example")
+        let events = await runProbe("https://probe-auth401.example")
         XCTAssertEqual(events, Array(StagedTestDriver.successEvents.prefix(5)) + [
             .failed(.authentication, .authenticationRejected)
         ])
     }
 
     func testProbeLogin429MapsToRateLimited() async {
-        let events = await runProbe("http://probe-auth429.example")
+        let events = await runProbe("https://probe-auth429.example")
         XCTAssertEqual(events, Array(StagedTestDriver.successEvents.prefix(5)) + [
             .failed(.authentication, .rateLimited)
         ])
@@ -513,7 +513,7 @@ final class ConnectionSetupTestTests: XCTestCase {
     func testProbeTicketFailureMapsToSessionTicketFailure() async {
         // Password accepted, but no host-scoped session cookie survived —
         // the existing session-ticket semantics, not "wrong password".
-        let events = await runProbe("http://probe-cookieless.example")
+        let events = await runProbe("https://probe-cookieless.example")
         XCTAssertEqual(events, Array(StagedTestDriver.successEvents.prefix(5)) + [
             .failed(.authentication, .sessionTicketFailure)
         ])
@@ -543,7 +543,7 @@ final class ConnectionSetupTestTests: XCTestCase {
         let task = Task { @MainActor in
             await probe.runTest(
                 result: ConnectionSetupResult(
-                    serverURL: "http://probe-hang.example",
+                    serverURL: "https://probe-hang.example",
                     username: "probe-user",
                     password: "probe-password-fixture"
                 ),
@@ -561,8 +561,8 @@ final class ConnectionSetupTestTests: XCTestCase {
 
     @MainActor
     func testSuccessfulProbePersistsNothingAndMakesExactlyOneAuthAttempt() async {
-        let fixtureURL = URL(string: "http://probe-success.example/")!
-        _ = await runProbe("http://probe-success.example")
+        let fixtureURL = URL(string: "https://probe-success.example/")!
+        _ = await runProbe("https://probe-success.example")
 
         let jarCookies = HTTPCookieStorage.shared.cookies(for: fixtureURL) ?? []
         XCTAssertTrue(
