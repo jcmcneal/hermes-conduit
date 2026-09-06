@@ -530,6 +530,7 @@ enum ChatScrollSessionIdentityResolver {
         catalog: [ChatScrollSessionCatalogIdentity],
         requestedSessionID: String? = nil,
         resolvedSessionID: String? = nil,
+        resolvedDurableSessionID: String? = nil,
         previousIdentity current: ChatScrollSessionIdentity,
         isReconciling: Bool,
         advanceSettledRevision: Bool = false
@@ -575,6 +576,12 @@ enum ChatScrollSessionIdentityResolver {
         let canonicalSessionID: String?
         if let matchedSession {
             canonicalSessionID = matchedSession.canonicalSessionID
+        } else if let resolvedDurable = ChatScrollIdentityNormalization.sessionID(resolvedDurableSessionID) {
+            // An admitted resume explicitly established the conversation's
+            // durable identity (a runtime-only conversation whose stored key
+            // was revealed). The catalog had no row to resolve through, so
+            // the positive claim wins over the raw runtime ids.
+            canonicalSessionID = resolvedDurable
         } else if continuesPreviousIdentity {
             canonicalSessionID = previous.canonicalSessionID
         } else if !reconciliationIDs.isEmpty {
@@ -588,6 +595,9 @@ enum ChatScrollSessionIdentityResolver {
         var equivalentSessionIDs = candidates
         if let matchedSession {
             equivalentSessionIDs.formUnion(matchedSession.identifiers)
+        }
+        if let resolvedDurable = ChatScrollIdentityNormalization.sessionID(resolvedDurableSessionID) {
+            equivalentSessionIDs.insert(resolvedDurable)
         }
         if continuesPreviousIdentity {
             equivalentSessionIDs.formUnion(previous.equivalentSessionIDs)
