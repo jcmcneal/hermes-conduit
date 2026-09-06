@@ -332,7 +332,7 @@ struct ConnectionSetupStageRow: View {
         // One VoiceOver element per stage: the objective name plus a state
         // word, so success/failure never rides on icon or color alone.
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(state.accessibilityLabel(for: stage))
+        .accessibilityLabel("\(stage.objectiveLabel), \(stageState.accessibilityState)")
         .accessibilityIdentifier("setup.test.stage.\(stage.identifierName)")
     }
 
