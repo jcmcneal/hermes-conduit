@@ -187,6 +187,44 @@ final class SessionPresentationCacheTests: XCTestCase {
         XCTAssertEqual(merged.count, 1)
     }
 
+    func testRemoveSessionsDropsEveryAliasRecordButLeavesSiblings() {
+        let (cache, _, _, _) = makeIsolatedCache()
+        let profile = "remove-test"
+        let deletedPrimary = "remove-deleted-primary"
+        let deletedAlias = "remove-deleted-alias"
+        let sibling = "remove-sibling"
+
+        let messages = [
+            ChatMessage(id: "msg-1", role: .user, content: "Remove me", timestamp: "2024-01-01"),
+        ]
+        cache.save(messages, profile: profile, sessionIDs: [deletedPrimary, deletedAlias])
+        cache.save(
+            [ChatMessage(id: "msg-2", role: .user, content: "Keep me", timestamp: "2024-01-02")],
+            profile: profile,
+            sessionIDs: [sibling]
+        )
+
+        cache.removeSessions(profile: profile, sessionIDs: [deletedPrimary, deletedAlias])
+
+        let probe = ChatMessage(id: "msg-1", role: .user, content: "Remove me", timestamp: "")
+        for alias in [deletedPrimary, deletedAlias] {
+            XCTAssertEqual(
+                cache.merge([probe], profile: profile, sessionIDs: [alias]).first?.timestamp,
+                "",
+                "A deleted conversation's cached presentation must not survive under any alias"
+            )
+        }
+        XCTAssertEqual(
+            cache.merge(
+                [ChatMessage(id: "msg-2", role: .user, content: "Keep me", timestamp: "")],
+                profile: profile,
+                sessionIDs: [sibling]
+            ).first?.timestamp,
+            "2024-01-02",
+            "Sibling conversations keep their cached presentation"
+        )
+    }
+
     // MARK: - Multiple session IDs
 
     func testSaveAndMergeAcrossLineageSessionIds() {

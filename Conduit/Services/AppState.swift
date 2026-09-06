@@ -1025,6 +1025,7 @@ final class AppState: ObservableObject {
     private var projectsRequestGeneration = 0
     private let sessionPresentationCache: SessionPresentationCache
     private let sessionYoloStore: SessionYoloStore
+    private let conversationIdentityIndex: ConversationIdentityIndex
     private var sessionYoloWriteRevision: UInt64 = 0
     private var sessionYoloWriteRevisions: [ChatScrollSessionKey: UInt64] = [:]
     /// Sessions whose user-initiated YOLO write is awaiting its RPC, tracked
@@ -1267,6 +1268,7 @@ final class AppState: ObservableObject {
         chatResumeLifecycleOperations: ChatResumeLifecycleOperations = .live,
         sessionPresentationCache: SessionPresentationCache = .shared,
         sessionYoloStore: SessionYoloStore? = nil,
+        conversationIdentityIndex: ConversationIdentityIndex? = nil,
         presentationCacheDebounceSuspension: (@Sendable (Duration) async throws -> Void)? = nil
     ) {
         self.presentationCacheDebounceSuspension =
@@ -1275,6 +1277,7 @@ final class AppState: ObservableObject {
         self.defaults = defaults
         self.sessionPresentationCache = sessionPresentationCache
         self.sessionYoloStore = sessionYoloStore ?? SessionYoloStore(defaults: defaults)
+        self.conversationIdentityIndex = conversationIdentityIndex ?? ConversationIdentityIndex()
         self.chatResumeCoordinator = chatResumeCoordinator
             ?? ChatResumeCoordinator(store: ChatResumeStore(defaults: defaults))
         self.recoverySequence = recoverySequence
@@ -1995,6 +1998,12 @@ final class AppState: ObservableObject {
         defaults.removeObject(forKey: reviewSummaryCacheKey)
         defaults.removeObject(forKey: knownProfilesKey)
         clearSessionPresentationCache()
+        // Identity evidence and per-session overrides are keyed only by
+        // (profile, session id); without this clear they would leak between
+        // Hermes servers whose strings collide. Same boundary that clears
+        // the resume store, titles, pins, and review cache.
+        conversationIdentityIndex.removeAll()
+        sessionYoloStore.clearAllOverrides()
         return true
     }
 
@@ -2767,6 +2776,9 @@ final class AppState: ObservableObject {
             }
             sessions = allSessions.filter { $0.source != .cron }
             cronSessions = allSessions.filter { $0.source == .cron }
+            // Labeled rows are positive identity evidence; commit them so
+            // notification routing survives a later catalog omission.
+            conversationIdentityIndex.recordCatalogIdentity(allSessions, profile: profile)
 
             guard automaticChatResumeWorkIsCurrent(
                 automaticWorkToken,
@@ -3277,6 +3289,31 @@ final class AppState: ObservableObject {
                     || referenceIdentity.durableSessionID == established {
                     context?.resolvedDurableSessionId = established
                 }
+                // Commit the admitted result as positive evidence in the
+                // shared identity index: the returned runtime id (and the
+                // requested id, when it differs) positively route to the
+                // conversation's durable identity.
+                let admittedDurable = context?.resolvedDurableSessionId
+                    ?? referenceIdentity.durableSessionID
+                if let admittedDurable, !admittedDurable.isEmpty {
+                    for admittedRuntimeID in [result.sessionId, sessionId] {
+                        conversationIdentityIndex.record(
+                            runtimeID: admittedRuntimeID,
+                            durableID: admittedDurable,
+                            profile: profile,
+                            source: .resume
+                        )
+                    }
+                }
+                // A live voice turn captured the pre-rebind runtime; the
+                // admitted alias keeps its assistant stream flowing — but
+                // only when the reconciled conversation IS the voice turn's
+                // conversation (positive id overlap), never another one.
+                voiceConversationController.extendAssistantSessionIDs(
+                    [result.sessionId],
+                    ofConversationContaining: referenceIdentity.acceptedSessionIDs
+                        .union([sessionId])
+                )
             }
             reconciliation = context
             refreshActiveChatScrollSessionIdentity(isReconciling: true)
@@ -3676,6 +3713,19 @@ final class AppState: ObservableObject {
             }
 
             let storedID = created.storedSessionId ?? runtimeSessionID
+            // The create response's runtime/stored semantics are verified
+            // here (the summary is built from the same response), so the
+            // pair is positive identity evidence.
+            if let runtime = ChatScrollIdentityNormalization.sessionID(runtimeSessionID),
+               let durable = ChatScrollIdentityNormalization.sessionID(storedID),
+               runtime != durable {
+                conversationIdentityIndex.record(
+                    runtimeID: runtime,
+                    durableID: durable,
+                    profile: activeProfile,
+                    source: .create
+                )
+            }
             let summary = SessionSummary(
                 id: storedID,
                 alternateIds: [runtimeSessionID, created.storedSessionId]
@@ -5973,6 +6023,9 @@ final class AppState: ObservableObject {
             )
             sessions = allSessions.filter { $0.source != .cron }
             cronSessions = allSessions.filter { $0.source == .cron }
+            // Labeled rows are positive identity evidence; commit them so
+            // notification routing survives a later catalog omission.
+            conversationIdentityIndex.recordCatalogIdentity(allSessions, profile: profile)
             if let activeSessionId { updateActiveSessionTitle(for: activeSessionId) }
             if let activeClient {
                 Task { [weak self] in
@@ -6168,9 +6221,14 @@ final class AppState: ObservableObject {
                 method: "DELETE"
             )
             guard profile == activeProfile else { return false }
+            let deletedSessionIDs = Set([session.id] + session.alternateIds)
             sessionYoloStore.clearOverride(
                 for: profile,
                 sessionIDs: [session.id] + session.alternateIds
+            )
+            revokeDeletedConversationIdentity(
+                sessionIDs: deletedSessionIDs,
+                profile: profile
             )
             removeSessionFromLiveCatalog(session)
             archivedSessions.removeAll { sessionMatches($0, session) }
@@ -6186,6 +6244,21 @@ final class AppState: ObservableObject {
 
     func isSessionMutationInFlight(_ session: SessionSummary) -> Bool {
         sessionMutationID == session.id
+    }
+
+    /// Explicit deletion revokes the conversation's identity: index
+    /// mappings, scroll/resume state, and cached presentation (with any
+    /// pending cards) must not survive under any of its aliases.
+    func revokeDeletedConversationIdentity(sessionIDs: Set<String>, profile: String) {
+        conversationIdentityIndex.removeSessionIDs(sessionIDs, profile: profile)
+        chatResumeCoordinator.removeSessions(
+            profile: profile,
+            sessionIDs: Array(sessionIDs)
+        )
+        sessionPresentationCache.removeSessions(
+            profile: profile,
+            sessionIDs: Array(sessionIDs)
+        )
     }
 
     private func encodedSessionID(_ sessionID: String) -> String {
@@ -6435,9 +6508,17 @@ final class AppState: ObservableObject {
             return false
         }
         let requestedID = target.sessionId
-        let resumableID = NotificationSessionResolver.resumableSessionID(
-            for: requestedID,
-            in: sessions + cronSessions
+        // The fresh catalog was just published (its labeled rows are already
+        // committed to the identity index), so resolution runs through the
+        // evidence hierarchy: explicit durable id from the payload, catalog
+        // alias, confirmed index alias — and only then the legacy raw
+        // runtime resume. An unknown runtime id is never reinterpreted as
+        // some other conversation's durable id.
+        let route = NotificationSessionResolver.route(
+            target: target,
+            catalog: sessions + cronSessions,
+            identityIndex: conversationIdentityIndex,
+            profile: activeProfile
         )
         // A decision raised while the app was backgrounded is delivered as a
         // structured payload on the notification (the one-shot gateway stream
@@ -6445,12 +6526,32 @@ final class AppState: ObservableObject {
         // stored IDs so the upcoming resume's `merge` restores the card
         // regardless of which identity the gateway resumes against.
         if let decision = target.decision {
-            recordNotificationDecision(decision, sessionIDs: [resumableID, requestedID])
+            var routedIDs = [route.resumeTargetID, requestedID]
+            if let durable = route.durableSessionID {
+                routedIDs.append(durable)
+            }
+            recordNotificationDecision(decision, sessionIDs: routedIDs)
         }
         let opened = await openSession(
-            resumableID,
+            route.resumeTargetID,
             reusing: transitionGeneration
         )
+        // Commit the payload's dual identity as positive evidence only once
+        // the open actually succeeded — a failed resume (e.g. the durable
+        // conversation was deleted server-side) must not leave a mapping
+        // that dead-routes future notifications.
+        if opened, let durable = route.durableSessionID {
+            if let conflict = conversationIdentityIndex.record(
+                runtimeID: requestedID,
+                durableID: durable,
+                profile: activeProfile,
+                source: .notification
+            ) {
+                sessionCatalogLog.fault(
+                    "Notification identity conflict: runtime \(requestedID, privacy: .public) keeps confirmed durable \(conflict.confirmedDurableID, privacy: .public); payload claimed \(durable, privacy: .public)"
+                )
+            }
+        }
         guard notificationOpenAttemptIsCurrent(
             id: notificationAttemptID,
             transitionGeneration: transitionGeneration
@@ -6704,6 +6805,21 @@ final class AppState: ObservableObject {
                 isArchived: false,
                 lineageRootId: parentSessionId
             )
+            // A branch is its own durable conversation: its response ids are
+            // positive evidence for the BRANCH only. They must never alias
+            // the source conversation, and the source keeps its own mappings.
+            if let runtime = ChatScrollIdentityNormalization.sessionID(branched.sessionId),
+               let durable = ChatScrollIdentityNormalization.sessionID(
+                   branched.storedSessionId ?? branched.sessionId
+               ),
+               runtime != durable {
+                conversationIdentityIndex.record(
+                    runtimeID: runtime,
+                    durableID: durable,
+                    profile: activeProfile,
+                    source: .branch
+                )
+            }
             sessions = [summary] + sessions.map { existing in
                 var updated = existing
                 updated.isActive = false

@@ -237,6 +237,10 @@ final class ChatResumeCoordinator {
         store.clearResumeState()
     }
 
+    func removeSessions(profile: String, sessionIDs: [String]) {
+        store.removeSessions(profile: profile, sessionIDs: sessionIDs)
+    }
+
     func flush() {
         pendingFlushTask?.cancel()
         pendingFlushTask = nil

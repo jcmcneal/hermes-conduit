@@ -566,6 +566,28 @@ final class SessionPresentationCache {
         persist(store)
     }
 
+    /// Removes the cached records for the given sessions inside `profile`,
+    /// across every identity they were written under. The delete path calls
+    /// this so a deleted conversation cannot resurrect its presentation
+    /// (including any pending decision cards) from a stale alias.
+    func removeSessions(profile: String, sessionIDs: [String]) {
+        let prefix = normalized(profile) + "|"
+        let ids = Set(sessionIDs.compactMap {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        })
+        guard !ids.isEmpty else { return }
+        var store = load()
+        var changed = false
+        for sessionID in ids {
+            let cacheKey = prefix + sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+            if store.removeValue(forKey: cacheKey) != nil {
+                changed = true
+            }
+        }
+        guard changed else { return }
+        persist(store)
+    }
+
     private func load() -> [String: CachedSession] {
         guard let data = defaults.data(forKey: storageKey),
               let decoded = try? JSONDecoder().decode([String: CachedSession].self, from: data) else {

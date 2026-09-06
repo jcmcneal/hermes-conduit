@@ -349,7 +349,10 @@ enum ChatMessageScrollTargets {
     }
 }
 
-private enum ChatScrollIdentityNormalization {
+/// Canonical identity normalization shared by every session-keyed store:
+/// profiles trim and case-fold, session ids trim. Internal so the resume
+/// store, identity index, and AppState speak the same normalized language.
+enum ChatScrollIdentityNormalization {
     static func profile(_ profile: String?) -> String? {
         guard let value = profile?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else { return nil }

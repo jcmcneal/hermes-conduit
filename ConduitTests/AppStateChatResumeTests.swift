@@ -2034,6 +2034,298 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertEqual(harness.appState.sessions.map(\.id), [sessionA.id, sessionC.id])
     }
 
+    func testNotificationWithExplicitDurableIdentityOpensDurableConversationWithoutCatalog() async {
+        // A payload that carries both identities must route by the durable
+        // id without needing the catalog to rediscover it — a stale or empty
+        // catalog may never block explicit identity.
+        var requests: [String] = []
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [] },
+                openSession: { _, sessionID, _ in
+                    requests.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: "runtime-a",
+                        storedSessionId: "stored-a",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(
+                profile: nil,
+                sessionId: "runtime-a",
+                durableSessionID: "stored-a",
+                type: nil
+            )
+        )
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(requests, ["stored-a"], "The explicit durable id is the resume target")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+    }
+
+    func testRuntimeOnlyNotificationUsesConfirmedIndexAliasWhenCatalogOmitsRuntime() async {
+        // Older payload (runtime id only), and the refreshed catalog does not
+        // contain runtime-a. The confirmed runtime→durable mapping recorded
+        // by an earlier admitted resume must still route to stored-a.
+        var requests: [String] = []
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-a",
+            durableID: "stored-a",
+            profile: "default",
+            source: .resume
+        )
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [] },
+                openSession: { _, sessionID, _ in
+                    requests.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: "runtime-a",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            conversationIdentityIndex: index
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: nil, sessionId: "runtime-a", type: nil)
+        )
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(requests, ["stored-a"], "The confirmed alias routes without the catalog")
+    }
+
+    func testUnknownRuntimeNotificationDoesNotReinterpretAsDurableConversation() async {
+        // A runtime id with no positive durable evidence resumes ITSELF.
+        // It must never fall through to another catalog row — there is no
+        // newest-chat, ordering, or similarity fallback in notification
+        // routing.
+        var requests: [String] = []
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.session("stored-z")] },
+                openSession: { _, sessionID, _ in
+                    requests.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: sessionID,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: nil, sessionId: "runtime-unknown", type: nil)
+        )
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(requests, ["runtime-unknown"], "Only the named id may be resumed")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-unknown")
+    }
+
+    func testNotificationOpenCommitsAdmittedRuntimeDurableEvidenceToSharedIndex() async {
+        // After a notification open establishes the runtime→durable mapping,
+        // the shared index answers later lookups even when the catalog then
+        // omits the runtime alias.
+        let index = ConversationIdentityIndex()
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.session("stored-a")] },
+                openSession: { _, sessionID, _ in
+                    SessionResumeResult(
+                        sessionId: "runtime-new",
+                        storedSessionId: "stored-a",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            conversationIdentityIndex: index
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: nil, sessionId: "runtime-new", type: nil)
+        )
+        XCTAssertTrue(opened)
+
+        // Catalog row stored-a carries no runtime-new alias; only the
+        // admitted resume result could have established the mapping.
+        harness.appState.sessions = [self.session("stored-a")]
+        XCTAssertEqual(
+            index.durableID(forRuntime: "runtime-new", profile: "default"),
+            "stored-a",
+            "The admitted resume must commit its evidence to the shared index"
+        )
+        // A different profile must not see it.
+        XCTAssertNil(index.durableID(forRuntime: "runtime-new", profile: "work"))
+    }
+
+    func testServerChangeClearsIdentityIndexAndSessionScopedOverrides() async {
+        // Server A and server B both know profile "default" with the same
+        // session strings. Nothing confirmed against A may answer lookups
+        // after the connection moves to B.
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-a",
+            durableID: "stored-a",
+            profile: "default",
+            source: .resume
+        )
+        let yoloDefaultsSuite = "AppStateChatResumeTests.yolo.\(UUID().uuidString)"
+        guard let yoloDefaults = UserDefaults(suiteName: yoloDefaultsSuite) else {
+            XCTFail("Could not create yolo defaults suite")
+            return
+        }
+        addTeardownBlock { yoloDefaults.removePersistentDomain(forName: yoloDefaultsSuite) }
+        let yoloStore = SessionYoloStore(defaults: yoloDefaults)
+        yoloStore.setOverride(true, for: "default", sessionID: "stored-a")
+
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.session("stored-a", alternateIDs: ["runtime-a"])] },
+                openSession: { _, sessionID, _ in
+                    SessionResumeResult(
+                        sessionId: "runtime-a",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            conversationIdentityIndex: index,
+            sessionYoloStore: yoloStore
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "runtime-a"
+        harness.store.setLastSessionID("stored-a", for: "default")
+        harness.defaults.set("https://a.example", forKey: "conduit.chatResumeServerIdentity.v1")
+
+        let changed = harness.appState.prepareChatResumeForConnection(to: "https://b.example")
+        XCTAssertTrue(changed)
+
+        XCTAssertNil(
+            index.durableID(forRuntime: "runtime-a", profile: "default"),
+            "Identity evidence from server A must not survive the server change"
+        )
+        XCTAssertNil(
+            yoloStore.storedOverride(for: "default", sessionID: "stored-a"),
+            "Session-scoped overrides must not leak between servers"
+        )
+        XCTAssertNil(harness.appState.activeSessionId)
+        XCTAssertNil(harness.store.lastSessionID(for: "default"))
+    }
+
+    func testDeleteRevokesIdentityIndexMappingsAndPersistedConversationState() async {
+        // Explicit deletion revokes identity: the index mapping, the scroll
+        // snapshot, the last-selected pointer, and the cached presentation
+        // (with any pending card) must all go.
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-a",
+            durableID: "stored-a",
+            profile: "default",
+            source: .resume
+        )
+        let cacheSuite = "conduit.tests.identity-delete-\(UUID().uuidString)"
+        guard let cacheDefaults = UserDefaults(suiteName: cacheSuite) else {
+            XCTFail("Could not create cache defaults suite")
+            return
+        }
+        let cache = SessionPresentationCache(defaults: cacheDefaults)
+        defer {
+            cache.clear()
+            cacheDefaults.removePersistentDomain(forName: cacheSuite)
+        }
+        cache.recordPendingDecision(
+            ChatMessage(
+                id: "approval-stored-a",
+                role: .approval,
+                content: "Approve?",
+                timestamp: "1",
+                approval: ApprovalActivity(
+                    sessionId: "stored-a",
+                    command: "",
+                    description: "Approve?",
+                    choices: ["once", "deny"],
+                    allowPermanent: false,
+                    smartDenied: false,
+                    status: .pending,
+                    choice: nil,
+                    error: nil
+                )
+            ),
+            profile: "default",
+            sessionIDs: ["stored-a", "runtime-a"]
+        )
+        let harness = makeHarness(
+            sessionPresentationCache: cache,
+            conversationIdentityIndex: index
+        )
+        harness.coordinator.rememberSessionID("stored-a", for: "default")
+        harness.store.save(
+            ChatScrollSnapshot(anchorMessageID: "anchor", followsLatest: false),
+            for: ChatScrollSessionKey(profile: "default", sessionID: "stored-a"),
+            at: Date()
+        )
+
+        harness.appState.revokeDeletedConversationIdentity(
+            sessionIDs: ["stored-a", "runtime-a"],
+            profile: "default"
+        )
+
+        XCTAssertNil(
+            index.durableID(forRuntime: "runtime-a", profile: "default"),
+            "A deleted conversation's aliases must not route anything afterward"
+        )
+        XCTAssertNil(
+            harness.store.snapshot(for: ChatScrollSessionKey(profile: "default", sessionID: "stored-a")),
+            "The deleted conversation's scroll snapshot is removed"
+        )
+        XCTAssertNil(
+            harness.store.lastSessionID(for: "default"),
+            "The deleted conversation cannot stay the last-selected conversation"
+        )
+        let remainingCards = cache.merge(
+            [ChatMessage(id: "probe", role: .assistant, content: "Probe", timestamp: "")],
+            profile: "default",
+            sessionIDs: ["stored-a"],
+            includePendingApprovals: true
+        )
+        XCTAssertNil(
+            remainingCards.first?.approval,
+            "The deleted conversation's cached pending card is removed"
+        )
+    }
+
     func testCancelledAutomaticSyncRestoresComposerStateAfterCatalogReturns() async {
         let gate = ControlledSuspension()
         let catalog = [session("stored-b"), session("stored-a")]
@@ -4441,7 +4733,9 @@ final class AppStateChatResumeTests: XCTestCase {
         reconnectScheduler: ChatResumeReconnectScheduler? = nil,
         reconnectExecutor: ChatResumeReconnectExecutor? = nil,
         lifecycleOperations: ChatResumeLifecycleOperations = .live,
-        sessionPresentationCache: SessionPresentationCache = .shared
+        sessionPresentationCache: SessionPresentationCache = .shared,
+        conversationIdentityIndex: ConversationIdentityIndex? = nil,
+        sessionYoloStore: SessionYoloStore? = nil
     ) -> (
         appState: AppState,
         coordinator: ChatResumeCoordinator,
@@ -4473,7 +4767,9 @@ final class AppStateChatResumeTests: XCTestCase {
             reconnectScheduler: reconnectScheduler,
             reconnectExecutor: reconnectExecutor,
             chatResumeLifecycleOperations: lifecycleOperations,
-            sessionPresentationCache: sessionPresentationCache
+            sessionPresentationCache: sessionPresentationCache,
+            sessionYoloStore: sessionYoloStore,
+            conversationIdentityIndex: conversationIdentityIndex
         )
         return (appState, coordinator, store, recoverySequence, cacheClearSpy, defaults, suite)
     }
