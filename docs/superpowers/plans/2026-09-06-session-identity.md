@@ -19,6 +19,7 @@
 - [x] Regression matrix: #134 second-send debt path, empty catalog, missing runtime alias (with mid-resume event survival), no current identity, legitimate rotation, contradictory resume, foreign runtime, composer rebind, composer handoff, automatic-return pins, delete/no-resurrection.
 - [x] Run focused red/green checks, existing lifecycle/handoff suites, full unit suite, UI suite, CI planner/inventory validation, script tests, `git diff --check` (results below).
 - [x] Review the final diff (three-model review) and document actual results, remaining limitations and PR readiness.
+- [x] Round 2 (post-CI hardening, same architecture): migrate runtime-keyed scroll/resume persistence to an admitted durable key without requiring a catalog row (admission-evidence path through `migrateSessionIdentity`); extend the durable composer fence to exact session-ID matches (strict proven ownership); restate the rejection invariant precisely (conversation adoption blocked, catalog discovery state not rolled back); regression tests for migration (plain and rotating), exact-ID/durable-mismatch rejection, fresh-context controls on both composer paths.
 
 ## Verification results
 

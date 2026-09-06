@@ -143,6 +143,14 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
 
         XCTAssertFalse(submitted, "Suspended work from before the handoff must not send after returning to A")
         XCTAssertTrue(sends.isEmpty)
+
+        // Positive control: a FRESH context captured after reopening A sends
+        // normally — proving the rejection above comes from the ownership
+        // generation fence, not from a broken composer path.
+        let freshContext = harness.appState.composerSubmissionContext()
+        let freshSubmitted = await harness.appState.submitComposer(text: "Fresh after return", context: freshContext)
+        XCTAssertTrue(freshSubmitted)
+        XCTAssertEqual(sends, ["runtime-stored-a"])
     }
 
 

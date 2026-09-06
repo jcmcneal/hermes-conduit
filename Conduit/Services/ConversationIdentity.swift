@@ -72,10 +72,13 @@ enum ResumeIdentityRejection: Error, Equatable {
 }
 
 /// Admission gate for adopting a resume result into the selected
-/// conversation. A rejected claim must not mutate `activeSessionId`,
-/// conversation identity, transcript, scroll identity, presentation cache,
-/// or draft/composer ownership — callers settle the reconciliation and fail
-/// the resume instead.
+/// conversation. A rejected claim must not be adopted into
+/// conversation-owned state — `activeSessionId`, selected conversation
+/// identity, transcript, scroll canonical identity, conversation persistence
+/// key, composer ownership, presentation cache, or resume-store selected
+/// identity — and callers settle the reconciliation and fail the resume.
+/// The refreshed session catalog itself is independent discovery state and
+/// needs no rollback: a rejection blocks adoption, not discovery.
 enum ConversationIdentityGate {
     static func admit(
         claim: ResumeIdentityClaim,

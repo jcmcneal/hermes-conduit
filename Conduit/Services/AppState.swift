@@ -2051,40 +2051,64 @@ final class AppState: ObservableObject {
         to updated: ChatScrollSessionIdentity,
         catalog: [SessionSummary]
     ) {
-        guard let canonicalKey = updated.canonicalSessionKey,
-              let canonicalSession = catalog.first(where: { session in
-                  let profile = session.profile ?? canonicalKey.profile
-                  return ChatScrollSessionKey(
-                      profile: profile,
-                      sessionID: session.id
-                  ) == canonicalKey
-              }) else { return }
+        guard let canonicalKey = updated.canonicalSessionKey else { return }
 
-        let equivalentSessionIDs = Set(
-            ([canonicalSession.id] + canonicalSession.alternateIds).compactMap { sessionID in
-                let key = ChatScrollSessionKey(
-                    profile: canonicalKey.profile,
-                    sessionID: sessionID
-                )
-                return key.isValid ? key.sessionID : nil
+        // Catalog-confirmed path: the new canonical is a catalog row, so the
+        // row's id set positively establishes the previous runtime-keyed
+        // persistence to migrate.
+        if let canonicalSession = catalog.first(where: { session in
+            let profile = session.profile ?? canonicalKey.profile
+            return ChatScrollSessionKey(
+                profile: profile,
+                sessionID: session.id
+            ) == canonicalKey
+        }) {
+            let equivalentSessionIDs = Set(
+                ([canonicalSession.id] + canonicalSession.alternateIds).compactMap { sessionID in
+                    let key = ChatScrollSessionKey(
+                        profile: canonicalKey.profile,
+                        sessionID: sessionID
+                    )
+                    return key.isValid ? key.sessionID : nil
+                }
+            )
+
+            let persistedKey = chatResumeCoordinator
+                .lastSessionID(for: canonicalKey.profile)
+                .map { ChatScrollSessionKey(profile: canonicalKey.profile, sessionID: $0) }
+            let activeKey = activeSessionId.map {
+                ChatScrollSessionKey(profile: canonicalKey.profile, sessionID: $0)
             }
-        )
+            let candidates = [persistedKey, current.canonicalSessionKey, activeKey]
+                .compactMap { $0 }
+            guard let runtimeKey = candidates.first(where: {
+                $0 != canonicalKey
+                    && $0.profile == canonicalKey.profile
+                    && equivalentSessionIDs.contains($0.sessionID)
+            }) else { return }
 
-        let persistedKey = chatResumeCoordinator
-            .lastSessionID(for: canonicalKey.profile)
-            .map { ChatScrollSessionKey(profile: canonicalKey.profile, sessionID: $0) }
-        let activeKey = activeSessionId.map {
-            ChatScrollSessionKey(profile: canonicalKey.profile, sessionID: $0)
+            chatResumeCoordinator.migrateSessionIdentity(from: runtimeKey, to: canonicalKey)
+            return
         }
-        let candidates = [persistedKey, current.canonicalSessionKey, activeKey]
-            .compactMap { $0 }
-        guard let runtimeKey = candidates.first(where: {
-            $0 != canonicalKey
-                && $0.profile == canonicalKey.profile
-                && equivalentSessionIDs.contains($0.sessionID)
-        }) else { return }
 
-        chatResumeCoordinator.migrateSessionIdentity(from: runtimeKey, to: canonicalKey)
+        // Admission-confirmed path: the canonical just moved to a durable id
+        // that the resume response POSITIVELY admitted (establishment for a
+        // runtime-only conversation) and that has no catalog row yet. The
+        // reconciliation's accepted set is positive evidence of which
+        // previous conversation keys belong to this same conversation, so the
+        // runtime-keyed snapshot and resume-store entry can migrate without
+        // catalog confirmation. Conversation-scoped: only the previous
+        // canonical key of THIS conversation migrates; profile-scoped: the
+        // coordinator migration requires a same-profile key pair.
+        guard let admittedDurable = reconciliation?.resolvedDurableSessionId,
+              canonicalKey.sessionID == admittedDurable,
+              let previousKey = current.canonicalSessionKey,
+              previousKey != canonicalKey,
+              previousKey.profile == canonicalKey.profile,
+              reconciliation?.acceptedSessionIDs.contains(previousKey.sessionID) == true else {
+            return
+        }
+        chatResumeCoordinator.migrateSessionIdentity(from: previousKey, to: canonicalKey)
     }
 
     func makeSettingsSnapshot() -> SettingsSnapshot {
@@ -3196,8 +3220,13 @@ final class AppState: ObservableObject {
 
             // Admission gate: validate what the resume response claims about
             // this conversation BEFORE adopting anything. A rejected claim
-            // must not mutate the active id, identity, transcript, scroll
-            // state, presentation cache, or composer ownership.
+            // must not be adopted into conversation-owned state: no
+            // `activeSessionId`, selected conversation identity, transcript,
+            // scroll canonical identity, conversation persistence key,
+            // composer ownership, presentation cache, or resume-store
+            // selected identity may change. The refreshed session catalog is
+            // independent discovery state and is NOT rolled back on
+            // rejection.
             let referenceIdentity = conversationIdentity ?? ConversationIdentity(
                 profile: profile,
                 durableSessionID: nil,
@@ -3218,8 +3247,11 @@ final class AppState: ObservableObject {
                 sessionCatalogLog.fault(
                     "Rejected contradictory resume: \(String(describing: rejection), privacy: .public); requested=\(sessionId, privacy: .public), returned=\(result.sessionId, privacy: .public)"
                 )
-                // Restore the ordering evidence the reconcile entry cleared;
-                // nothing user-visible may change on rejection.
+                // Restore the ordering evidence the reconcile entry cleared:
+                // ordering evidence is conversation-owned state, so a
+                // rejection may not consume it. (The already-published
+                // catalog refresh stays — discovery state is independent of
+                // the rejected claim.)
                 durablePersistedRowIDs = savedDurablePersistedRowIDs
                 reconciliationWasIdentityRejected = true
                 // Unstick the synchronizing wait without clobbering a live
@@ -6739,7 +6771,15 @@ final class AppState: ObservableObject {
             return activeSessionId == nil
         }
         guard let activeSessionId else { return false }
-        if capturedSessionID == activeSessionId { return true }
+        if capturedSessionID == activeSessionId {
+            // Exact routing-string equality alone is not proof the suspended
+            // work still belongs to the same durable conversation — catalog
+            // re-attribution can hand the same runtime string to a different
+            // conversation. The exact path therefore requires durable
+            // ownership proven strictly (see
+            // composerExactMatchDurableIdentityMatches).
+            return composerExactMatchDurableIdentityMatches(context)
+        }
         return currentComposerSubmissionContextIfOwnedAndAliased(context) != nil
     }
 
@@ -6810,6 +6850,27 @@ final class AppState: ObservableObject {
         }
         return capturedDurable == currentDurable
             || composerSessionIDsAreEquivalent(capturedDurable, currentDurable)
+    }
+
+    /// Durable fence for the EXACT session-ID path. Strict on purpose: when
+    /// the routing strings still match, the only way the durable ownership
+    /// could have drifted is catalog re-attribution (the same runtime string
+    /// now resolving to a different row), so the comparison must not bridge
+    /// through scroll-identity alias history — that history is precisely
+    /// what the re-attribution pollutes. Either the durable ids are equal,
+    /// or one catalog row POSITIVELY contains both ids (confirming the same
+    /// conversation under its refreshed identity).
+    private func composerExactMatchDurableIdentityMatches(_ context: ComposerSubmissionContext) -> Bool {
+        guard let capturedDurable = context.durableSessionID else { return true }
+        guard let activeSessionId,
+              let currentDurable = canonicalSessionID(for: activeSessionId) else {
+            return true
+        }
+        if capturedDurable == currentDurable { return true }
+        guard let row = (sessions + cronSessions).first(where: {
+            $0.id == capturedDurable || $0.alternateIds.contains(capturedDurable)
+        }) else { return false }
+        return Set([row.id] + row.alternateIds).contains(currentDurable)
     }
 
     private func recoverComposerSubmission(

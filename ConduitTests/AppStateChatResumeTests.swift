@@ -394,6 +394,128 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertEqual(harness.appState.activeSessionId, "stored-remaining")
     }
 
+    func testRuntimeToDurableEstablishmentMigratesScrollPersistence() async {
+        // A runtime-only conversation's first durable-establishing resume
+        // moves the canonical key from runtime-solo to stored-solo. The
+        // stored-solo id has NO catalog row yet — the persistence migration
+        // must still happen, because the admitted durable id is positive
+        // identity evidence and the store's lookup is exact-keyed.
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(sessionId: id, storedSessionId: "stored-solo", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        installComposerClient(in: harness)
+        let soloKey = ChatScrollSessionKey(profile: "default", sessionID: "runtime-solo")
+        let soloSnapshot = ChatScrollSnapshot(anchorMessageID: "anchor-solo", followsLatest: false)
+        harness.coordinator.recordViewport(soloSnapshot, for: soloKey)
+        let otherKey = ChatScrollSessionKey(profile: "default", sessionID: "stored-other")
+        let otherSnapshot = ChatScrollSnapshot(anchorMessageID: "anchor-other", followsLatest: false)
+        harness.coordinator.recordViewport(otherSnapshot, for: otherKey)
+        harness.coordinator.flush()
+
+        harness.appState.activeSessionId = "runtime-solo"
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo")
+        XCTAssertEqual(
+            harness.store.snapshot(for: ChatScrollSessionKey(profile: "default", sessionID: "stored-solo")),
+            soloSnapshot,
+            "The runtime-keyed viewport snapshot follows the established durable key"
+        )
+        XCTAssertNil(harness.store.snapshot(for: soloKey), "The old runtime key entry is migrated, not copied")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-solo")
+        XCTAssertEqual(harness.store.snapshot(for: otherKey), otherSnapshot, "Unrelated session persistence is untouched")
+    }
+
+    func testRuntimeToDurableEstablishmentMigratesScrollPersistenceThroughRotation() async {
+        // Same establishment, with the runtime id rotating at the same time:
+        // runtime-solo → runtime-new while stored-solo is established. The
+        // previously selected runtime key is positive evidence (accepted
+        // alias), so its persistence migrates to the new durable key.
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(
+                    sessionId: id == "runtime-solo" ? "runtime-new" : id,
+                    storedSessionId: id == "runtime-solo" ? "stored-solo" : nil,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        installComposerClient(in: harness)
+        let soloKey = ChatScrollSessionKey(profile: "default", sessionID: "runtime-solo")
+        let soloSnapshot = ChatScrollSnapshot(anchorMessageID: "anchor-solo", followsLatest: false)
+        harness.coordinator.recordViewport(soloSnapshot, for: soloKey)
+        harness.coordinator.flush()
+
+        harness.appState.activeSessionId = "runtime-solo"
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-new", "The runtime id follows the rotation")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo")
+        XCTAssertTrue(
+            harness.appState.activeChatScrollSessionIdentity.areEquivalent("runtime-solo", "stored-solo")
+        )
+        XCTAssertEqual(
+            harness.store.snapshot(for: ChatScrollSessionKey(profile: "default", sessionID: "stored-solo")),
+            soloSnapshot,
+            "The pre-rotation runtime-keyed snapshot is available under the durable key"
+        )
+        XCTAssertNil(harness.store.snapshot(for: soloKey))
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-solo")
+    }
+
+    func testComposerExactSessionIDMatchStillRequiresDurableIdentity() async {
+        // Exact routing-string equality cannot bypass the durable fence: the
+        // catalog can re-attribute the same runtime string to a different
+        // conversation (discovery state), and a context captured before that
+        // must not keep sending rights into the re-attributed conversation.
+        var sends: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("stored-b", alternateIDs: ["shared-runtime"])] },
+            openSession: { _, _, _ in
+                SessionResumeResult(sessionId: "shared-runtime", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted }
+        ))
+        installComposerClient(in: harness)
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["shared-runtime"])]
+        harness.appState.activeSessionId = "shared-runtime"
+        let staleContext = harness.appState.composerSubmissionContext()
+
+        // Discovery re-attribution: the refreshed catalog resolves the
+        // shared runtime id under stored-b. The resume identity gate admits
+        // it (the runtime string is a confirmed alias), so only the durable
+        // fence can tell the captured context apart.
+        await harness.appState.syncSession()
+        XCTAssertEqual(
+            harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-b",
+            "Setup: the catalog re-attribution took effect"
+        )
+
+        let staleSubmitted = await harness.appState.submitComposer(text: "Stale", context: staleContext)
+
+        XCTAssertFalse(
+            staleSubmitted,
+            "Exact-ID equality with a re-attributed durable identity must be rejected"
+        )
+        XCTAssertTrue(sends.isEmpty, "The stale context must not reach the gateway")
+
+        let freshContext = harness.appState.composerSubmissionContext()
+        let freshSubmitted = await harness.appState.submitComposer(text: "Fresh", context: freshContext)
+
+        XCTAssertTrue(freshSubmitted, "A fresh context on the re-attributed conversation sends normally")
+        XCTAssertEqual(sends, ["shared-runtime"])
+    }
+
     func testSupersededBranchWaitingForTitleCannotMutateNewerSession() async {
         let titleGate = ControlledSuspension()
         let newerMessages = [
