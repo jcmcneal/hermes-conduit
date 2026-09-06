@@ -6858,8 +6858,12 @@ final class AppState: ObservableObject {
     /// now resolving to a different row), so the comparison must not bridge
     /// through scroll-identity alias history — that history is precisely
     /// what the re-attribution pollutes. Either the durable ids are equal,
-    /// or one catalog row POSITIVELY contains both ids (confirming the same
-    /// conversation under its refreshed identity).
+    /// one catalog row POSITIVELY contains both ids (confirming the same
+    /// conversation under its refreshed identity), or the catalog is silent
+    /// on the captured durable id (the expected state of a just-established
+    /// row-less durable key — no positive separation evidence, so no
+    /// rejection). A row that knows the current durable but not the captured
+    /// one is positive separation and fails the fence.
     private func composerExactMatchDurableIdentityMatches(_ context: ComposerSubmissionContext) -> Bool {
         guard let capturedDurable = context.durableSessionID else { return true }
         guard let activeSessionId,
@@ -6867,10 +6871,15 @@ final class AppState: ObservableObject {
             return true
         }
         if capturedDurable == currentDurable { return true }
-        guard let row = (sessions + cronSessions).first(where: {
+        let rows = sessions + cronSessions
+        if let row = rows.first(where: {
             $0.id == capturedDurable || $0.alternateIds.contains(capturedDurable)
-        }) else { return false }
-        return Set([row.id] + row.alternateIds).contains(currentDurable)
+        }) {
+            return Set([row.id] + row.alternateIds).contains(currentDurable)
+        }
+        return !rows.contains(where: {
+            $0.id == currentDurable || $0.alternateIds.contains(currentDurable)
+        })
     }
 
     private func recoverComposerSubmission(

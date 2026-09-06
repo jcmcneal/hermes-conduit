@@ -516,6 +516,35 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertEqual(sends, ["shared-runtime"])
     }
 
+    func testComposerExactMatchSurvivesRowLessDurableEstablishment() async {
+        // Catalog silence is not separation: a context captured on a
+        // runtime-only conversation (durable falls back to the runtime
+        // string) stays owned across the first durable-establishing resume —
+        // the new durable key has no catalog row yet, so there is no
+        // positive re-attribution evidence to fail the fence on.
+        var sends: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(sessionId: id, storedSessionId: "stored-solo", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted }
+        ))
+        installComposerClient(in: harness)
+        harness.appState.activeSessionId = "runtime-solo"
+        let context = harness.appState.composerSubmissionContext()
+
+        await harness.appState.syncSession()
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo")
+
+        let submitted = await harness.appState.submitComposer(text: "Established", context: context)
+
+        XCTAssertTrue(submitted, "A row-less durable establishment must not orphan an owned submission")
+        XCTAssertEqual(sends, ["runtime-solo"])
+    }
+
     func testSupersededBranchWaitingForTitleCannotMutateNewerSession() async {
         let titleGate = ControlledSuspension()
         let newerMessages = [
