@@ -128,7 +128,7 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
             refreshContext: { _, _ in },
             sendPrompt: { _, id, _ in sends.append(id); return .accepted }
         ))
-        installConnectedClient(into: harness)
+        _ = await installConnectedClient(into: harness)
         harness.appState.sessions = [a, b]
         let openedA = await harness.appState.openSession("stored-a")
         XCTAssertTrue(openedA)
