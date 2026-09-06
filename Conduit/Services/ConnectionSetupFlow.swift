@@ -44,11 +44,13 @@ enum ConnectionSetupStep: Equatable {
     case credentials
     case accessMethod
 
-    // Access-method branch screens (informational shells this round).
+    // Access-method guidance followed by real form entry.
     case lan
     case tailscale
     case reverseProxy
-    case detailsReady
+    case connectionDetails
+    case loginCredentials
+    case review
 
     // Direct troubleshooting surfaces (failure-driven entries).
     case tlsTroubleshooting
@@ -95,8 +97,11 @@ enum ConnectionSetupPrompt: CaseIterable {
             return "Does my Hermes dashboard require authentication? If so, tell me what username and password I should "
                 + "use with Hermes Conduit. If authentication is not configured, set it up securely. Do not disable authentication."
         case .lanDetails:
+            // LAN entry is IP-address-only today: canonical transport policy
+            // admits localhost, literal private LAN addresses, and Tailscale —
+            // not local hostnames. The prompt must not promise them.
             return "Please make sure the Hermes dashboard is reachable from other devices on my local network, then tell me "
-                + "the local IP address or hostname and the dashboard port I should use with Hermes Conduit. "
+                + "the machine's local IP address and the dashboard port I should use with Hermes Conduit. "
                 + "Keep dashboard authentication enabled."
         case .tailscaleServe:
             return "Please check whether the Hermes dashboard is running. Make sure Tailscale is available on this machine, "
@@ -117,7 +122,11 @@ struct ConnectionSetupFlow: Equatable {
     private(set) var path: [ConnectionSetupStep]
     private(set) var dashboardAnswer: ConnectionSetupAnswer?
     private(set) var credentialsAnswer: ConnectionSetupAnswer?
-    private(set) var accessMethod: ConnectionAccessMethod?
+    var draft: ConnectionSetupDraft
+    private(set) var validationError: ConnectionSetupValidationError?
+    private let entry: ConnectionHelpDestination
+
+    var accessMethod: ConnectionAccessMethod? { draft.accessMethod }
 
     /// The screen currently presented.
     var step: ConnectionSetupStep { path.last ?? .dashboard }
@@ -131,13 +140,15 @@ struct ConnectionSetupFlow: Equatable {
         case .dashboard: return "Step 1 of 3"
         case .credentials: return "Step 2 of 3"
         case .accessMethod: return "Step 3 of 3"
-        case .lan, .tailscale, .reverseProxy, .detailsReady,
+        case .lan, .tailscale, .reverseProxy, .connectionDetails, .loginCredentials, .review,
              .tlsTroubleshooting, .cloudflareTroubleshooting:
             return nil
         }
     }
 
-    init(entry: ConnectionHelpDestination = .start) {
+    init(entry: ConnectionHelpDestination = .start, draft: ConnectionSetupDraft = ConnectionSetupDraft()) {
+        self.entry = entry
+        self.draft = draft
         path = [Self.entryStep(for: entry)]
     }
 
@@ -157,6 +168,7 @@ struct ConnectionSetupFlow: Equatable {
     mutating func back() {
         guard canGoBack else { return }
         path.removeLast()
+        validationError = nil
     }
 
     /// Answering Yes moves on; No / I don't know keep the question on screen
@@ -171,32 +183,94 @@ struct ConnectionSetupFlow: Equatable {
     }
 
     /// The "Dashboard is ready" continuation after the No / I don't know
-    /// guidance.
+    /// guidance. Step-gated like `confirmCredentialsReady()` so a stray call
+    /// from any other step stays a deterministic no-op.
     mutating func confirmDashboardReady() {
+        guard step == .dashboard else { return }
         advance(to: .credentials)
     }
 
     mutating func answerCredentials(_ answer: ConnectionSetupAnswer) {
         credentialsAnswer = answer
         if answer == .yes {
-            advance(to: .accessMethod)
+            confirmCredentialsReady()
         }
     }
 
     /// The continuation after the credentials No / I don't know guidance.
     mutating func confirmCredentialsReady() {
-        advance(to: .accessMethod)
+        guard step == .credentials else { return }
+        // Authentication recovery can reuse the current expert URL without
+        // asking unrelated readiness questions or decomposing it lossily.
+        if entry == .credentials && draft.usesExistingAddress {
+            advance(to: .loginCredentials)
+        } else {
+            advance(to: .accessMethod)
+        }
     }
 
     mutating func selectAccessMethod(_ method: ConnectionAccessMethod) {
-        accessMethod = method
+        draft.accessMethod = method
+        draft.usesExistingAddress = false
         advance(to: Self.step(for: method))
     }
 
-    /// "I have the connection details" on a branch screen. This round lands
-    /// on an honest placeholder; the details form itself is later work.
+    /// "I have the connection details" on a branch screen.
     mutating func confirmDetailsReady() {
-        advance(to: .detailsReady)
+        guard [.lan, .tailscale, .reverseProxy].contains(step) else { return }
+        advance(to: .connectionDetails)
+    }
+
+    mutating func useExistingAddress() {
+        guard step == .accessMethod,
+              !draft.existingServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        draft.usesExistingAddress = true
+        advance(to: .connectionDetails)
+    }
+
+    mutating func submitDetails() {
+        guard step == .connectionDetails else { return }
+        do {
+            _ = try ConnectionSetupAddressBuilder.build(draft)
+            advance(to: .loginCredentials)
+        } catch { record(error) }
+    }
+
+    mutating func submitCredentials() {
+        guard step == .loginCredentials else { return }
+        do {
+            _ = try draft.result()
+            advance(to: .review)
+        } catch let error as ConnectionSetupValidationError {
+            if error != .credentialsRequired {
+                advance(to: draft.usesExistingAddress || draft.accessMethod != nil ? .connectionDetails : .accessMethod)
+            }
+            record(error)
+        } catch { record(error) }
+    }
+
+    /// Revalidate at the handoff boundary; producing values has no side effects.
+    mutating func complete() -> ConnectionSetupResult? {
+        guard step == .review else { return nil }
+        do { return try draft.result() }
+        catch { record(error); return nil }
+    }
+
+    /// Pure revalidation for rendering the Review card: the validated result
+    /// when the draft is still complete, otherwise the typed validation error
+    /// the screen must show. Never mutates the path, so a revalidation
+    /// failure can never silently blank the Review content — the view renders
+    /// the failure branch instead.
+    func reviewState() -> Result<ConnectionSetupResult, ConnectionSetupValidationError> {
+        do { return .success(try draft.result()) }
+        catch {
+            let validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
+            return .failure(validationError)
+        }
+    }
+
+    private mutating func record(_ error: Error) {
+        validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
     }
 
     /// Topic switching on the troubleshooting surfaces (TLS ⇄ Cloudflare).
@@ -225,6 +299,7 @@ struct ConnectionSetupFlow: Equatable {
 
     private mutating func advance(to step: ConnectionSetupStep) {
         guard step != self.step else { return }
+        validationError = nil
         path.append(step)
     }
 }

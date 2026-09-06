@@ -11,6 +11,108 @@ import XCTest
 @testable import Conduit
 
 final class ConnectionSetupFlowTests: XCTestCase {
+    func testBranchConfirmationOpensRealConnectionDetails() {
+        var flow = ConnectionSetupFlow(entry: .network)
+        flow.selectAccessMethod(.lan)
+        flow.confirmDetailsReady()
+        XCTAssertEqual(String(describing: flow.step), "connectionDetails")
+    }
+
+    func testDetailsCredentialsReviewAndTypedResultPreserveBackEdits() throws {
+        var flow = ConnectionSetupFlow(entry: .network)
+        flow.selectAccessMethod(.lan)
+        flow.confirmDetailsReady()
+        flow.submitDetails()
+        XCTAssertEqual(flow.step, .connectionDetails)
+        XCTAssertNotNil(flow.validationError)
+        flow.draft.lan.host = "192.168.1.28"
+        flow.draft.lan.port = "9119"
+        flow.submitDetails()
+        XCTAssertEqual(flow.step, .loginCredentials)
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .loginCredentials)
+        flow.draft.username = "eric"
+        flow.draft.password = "in-memory-fixture"
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .review)
+        flow.back()
+        XCTAssertEqual(flow.step, .loginCredentials)
+        XCTAssertTrue(flow.draft.password == "in-memory-fixture")
+        flow.back()
+        XCTAssertEqual(flow.draft.lan.port, "9119")
+        flow.draft.lan.port = "9120"
+        flow.submitDetails()
+        flow.submitCredentials()
+        let result = try XCTUnwrap(flow.complete())
+        XCTAssertEqual(result.serverURL, "http://192.168.1.28:9120")
+        XCTAssertEqual(result.username, "eric")
+        XCTAssertTrue(result.password == "in-memory-fixture")
+        XCTAssertEqual(flow.step, .review, "Completion only returns values; the caller owns dismissal")
+        flow.draft.lan.port = "0"
+        XCTAssertNil(flow.complete(), "Handoff must revalidate, not return a stale reviewed result")
+    }
+
+    func testRouteChangesKeepIndependentDraftsAndNeverReuseIncompatibleInputs() throws {
+        var flow = ConnectionSetupFlow(entry: .network)
+        flow.selectAccessMethod(.lan)
+        flow.draft.lan.host = "192.168.1.28"
+        flow.draft.lan.port = "9119"
+        flow.back()
+        flow.selectAccessMethod(.reverseProxy)
+        XCTAssertThrowsError(try ConnectionSetupAddressBuilder.build(flow.draft))
+        flow.draft.reverseProxyURL = "https://example.com/hermes"
+        XCTAssertEqual(try ConnectionSetupAddressBuilder.build(flow.draft), "https://example.com/hermes")
+        flow.back()
+        flow.selectAccessMethod(.tailscale)
+        XCTAssertTrue(flow.draft.tailscale.host.isEmpty)
+        XCTAssertTrue(flow.draft.tailscale.port.isEmpty)
+        flow.back()
+        flow.selectAccessMethod(.lan)
+        XCTAssertEqual(try ConnectionSetupAddressBuilder.build(flow.draft), "http://192.168.1.28:9119")
+    }
+
+    func testAuthenticationRecoveryReusesExpertAddressAndSkippedAnswersRemainUnknown() throws {
+        var flow = ConnectionSetupFlow(entry: .credentials, draft: ConnectionSetupDraft(
+            existingServerURL: "https://example.com:9443/hermes", username: "eric", password: "fixture"
+        ))
+        flow.answerCredentials(.yes)
+        XCTAssertEqual(flow.step, .loginCredentials)
+        flow.draft.password = "updated-fixture"
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .review)
+        XCTAssertEqual(try XCTUnwrap(flow.complete()).serverURL, "https://example.com:9443/hermes")
+        XCTAssertNil(flow.dashboardAnswer)
+        XCTAssertNil(flow.accessMethod)
+    }
+
+    func testInvalidSeededAddressRoutesToEditableFullURLAndCanRecover() throws {
+        var flow = ConnectionSetupFlow(entry: .credentials, draft: ConnectionSetupDraft(
+            existingServerURL: "http://remote.example/hermes", username: "eric", password: "fixture"
+        ))
+        flow.answerCredentials(.yes)
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionDetails)
+        XCTAssertTrue(flow.draft.usesExistingAddress)
+        XCTAssertEqual(flow.validationError, .policy(.insecureTransport))
+        flow.draft.existingServerURL = "https://remote.example/hermes"
+        flow.submitDetails()
+        flow.submitCredentials()
+        XCTAssertEqual(try XCTUnwrap(flow.complete()).serverURL, "https://remote.example/hermes")
+    }
+
+    func testNetworkRecoveryCanEditExistingURLOrChooseFreshRoute() throws {
+        var flow = ConnectionSetupFlow(entry: .network, draft: ConnectionSetupDraft(
+            existingServerURL: "https://example.com:9443/prefix", username: "eric", password: "fixture"
+        ))
+        flow.useExistingAddress()
+        XCTAssertEqual(flow.step, .connectionDetails)
+        XCTAssertEqual(try ConnectionSetupAddressBuilder.build(flow.draft), "https://example.com:9443/prefix")
+        flow.back()
+        flow.selectAccessMethod(.lan)
+        XCTAssertFalse(flow.draft.usesExistingAddress)
+        XCTAssertThrowsError(try ConnectionSetupAddressBuilder.build(flow.draft))
+        XCTAssertNil(flow.complete(), "Only Review can hand off a configuration")
+    }
     // MARK: - Entry destinations
 
     func testManualEntryBeginsAtDashboard() {
@@ -105,11 +207,11 @@ final class ConnectionSetupFlowTests: XCTestCase {
         flow.answerCredentials(.yes)
         flow.selectAccessMethod(.lan)
         flow.confirmDetailsReady()
-        XCTAssertEqual(flow.step, .detailsReady)
+        XCTAssertEqual(flow.step, .connectionDetails)
         // Double-taps on a continue/confirm button must not push duplicates.
         flow.confirmDetailsReady()
         flow.confirmDetailsReady()
-        XCTAssertEqual(flow.step, .detailsReady)
+        XCTAssertEqual(flow.step, .connectionDetails)
         XCTAssertEqual(flow.path.count, 5, "Path must stay entry step + one entry per real navigation")
     }
 
@@ -153,7 +255,7 @@ final class ConnectionSetupFlowTests: XCTestCase {
         flow.answerCredentials(.yes)
         flow.selectAccessMethod(.tailscale)
         flow.confirmDetailsReady()
-        XCTAssertEqual(flow.step, .detailsReady)
+        XCTAssertEqual(flow.step, .connectionDetails)
     }
 
     // MARK: - Back navigation
@@ -228,6 +330,57 @@ final class ConnectionSetupFlowTests: XCTestCase {
         XCTAssertNil(detailsFlow.progressLabel)
     }
 
+    // MARK: - Step-gated confirmations
+
+    func testDashboardReadyConfirmationIsStepGated() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .credentials, "The legitimate call from the dashboard step advances")
+        XCTAssertEqual(flow.path.count, 2)
+
+        // A stray call from any other step must be a deterministic no-op.
+        flow.answerCredentials(.yes)
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .accessMethod)
+        XCTAssertEqual(flow.path.count, 3, "Stray confirmDashboardReady calls must not mutate the path")
+
+        flow.selectAccessMethod(.lan)
+        let before = flow.path
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.path, before)
+    }
+
+    func testReviewStateRevalidatesPurelyForRendering() throws {
+        var flow = ConnectionSetupFlow(entry: .network)
+        flow.selectAccessMethod(.lan)
+        flow.confirmDetailsReady()
+        flow.draft.lan.host = "192.168.1.28"
+        flow.draft.lan.port = "9119"
+        flow.submitDetails()
+        flow.draft.username = "eric"
+        flow.draft.password = "fixture"
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .review)
+
+        guard case .success(let result) = flow.reviewState() else {
+            return XCTFail("A complete draft must revalidate at Review")
+        }
+        XCTAssertEqual(result.serverURL, "http://192.168.1.28:9119")
+        XCTAssertEqual(flow.step, .review)
+
+        // A draft that stops validating after reaching Review must surface a
+        // typed failure the Review card can render, not silently blank it.
+        flow.draft.password = " "
+        guard case .failure(let error) = flow.reviewState() else {
+            return XCTFail("An incomplete draft must fail Review revalidation")
+        }
+        XCTAssertEqual(error, .credentialsRequired)
+        XCTAssertEqual(error.message, ConnectionSetupValidationError.credentialsRequired.message)
+        XCTAssertEqual(flow.step, .review)
+        XCTAssertEqual(flow.path.count, 5, "Render-time revalidation must never mutate the path")
+        XCTAssertNil(flow.validationError, "Render-time revalidation is pure and records nothing")
+    }
+
     // MARK: - Ask Hermes prompt safety
 
     func testEveryPromptPreservesDashboardAuthentication() {
@@ -249,6 +402,15 @@ final class ConnectionSetupFlowTests: XCTestCase {
             ConnectionSetupPrompt.tailscaleServe.text.contains("Tailscale Serve"),
             "The Tailscale branch prompt must include the Tailscale Serve configuration path"
         )
+    }
+
+    func testLANPromptRequestsAnIPAddressNotAHostname() {
+        // LAN entry is IP-address-only: canonical transport policy rejects
+        // local hostnames (hermes.local, hermes.home.arpa), so neither the
+        // prompt nor the wizard copy may promise them.
+        let prompt = ConnectionSetupPrompt.lanDetails.text.lowercased()
+        XCTAssertTrue(prompt.contains("ip address"), "The LAN prompt must request the machine's local IP address: \(prompt)")
+        XCTAssertFalse(prompt.contains("hostname"), "The LAN prompt must not promise hostname support: \(prompt)")
     }
 
     func testNoPromptRequestsPublicExposureOrHardCodedPorts() {

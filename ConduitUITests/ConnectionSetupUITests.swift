@@ -22,6 +22,99 @@ final class ConnectionSetupUITests: XCTestCase {
         continueAfterFailure = false
     }
 
+    func testLANDetailsValidationReviewAndHandoffWithoutConnecting() {
+        let app = XCUIApplication()
+        app.launch()
+        openSetup(app)
+        tapVisible(app.buttons[Identity.answerYes], in: app)
+        tapVisible(app.buttons[Identity.answerYes], in: app)
+        tapVisible(app.buttons["setup.method-lan"], in: app)
+        tapVisible(app.buttons["setup.details-ready"], in: app)
+        let host = app.textFields["setup.host"]
+        tapVisible(host, in: app)
+        host.typeText("192.168.1.28")
+        let port = app.textFields["setup.port"]
+        tapVisible(port, in: app)
+        port.typeText("0")
+        // Dismiss the keyboard before tapping Continue: with the number pad
+        // up, the Continue button can sit behind the keyboard window yet
+        // still report hittable, so a synthesized tap hits the keyboard and
+        // the button never fires.
+        dismissKeyboard(app)
+        tapVisible(app.buttons["setup.next"], in: app)
+        XCTAssertTrue(app.staticTexts["Enter a port between 1 and 65535."].waitForExistence(timeout: 3))
+        tapVisible(port, in: app)
+        port.typeText(XCUIKeyboardKey.delete.rawValue + "9119")
+        dismissKeyboard(app)
+        tapVisible(app.buttons["setup.next"], in: app)
+        let username = app.textFields["setup.username"]
+        tapVisible(username, in: app)
+        username.typeText("round3-user")
+        let password = app.secureTextFields["setup.password"]
+        tapVisible(password, in: app)
+        password.typeText("round3-private-fixture")
+        tapVisible(app.buttons["setup.next"], in: app)
+        XCTAssertTrue(app.staticTexts["http://192.168.1.28:9119"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Entered"].exists)
+        XCTAssertFalse(app.staticTexts["round3-private-fixture"].exists)
+        tapVisible(app.buttons[Identity.back], in: app)
+        XCTAssertTrue(password.waitForExistence(timeout: 5))
+        // Retained password permits Review without re-entry; never read its value.
+        tapVisible(app.buttons["setup.next"], in: app)
+        tapVisible(app.buttons["setup.use-settings"], in: app)
+        let server = app.textFields["login.server-url"]
+        XCTAssertTrue(server.waitForExistence(timeout: 5))
+        XCTAssertEqual(server.value as? String, "http://192.168.1.28:9119")
+        XCTAssertEqual(app.textFields["login.username"].value as? String, "round3-user")
+        XCTAssertTrue(app.buttons["Connect"].isEnabled)
+        XCTAssertFalse(app.staticTexts["Connecting..."].exists)
+        // Reopening uses the in-memory login fields, including the password.
+        openSetup(app)
+        tapVisible(app.buttons[Identity.answerYes], in: app)
+        tapVisible(app.buttons[Identity.answerYes], in: app)
+        tapVisible(app.buttons["setup.use-existing"], in: app)
+        XCTAssertEqual(app.textFields["setup.url"].value as? String, "http://192.168.1.28:9119")
+        tapVisible(app.buttons["setup.next"], in: app)
+        tapVisible(app.buttons["setup.next"], in: app)
+        XCTAssertTrue(app.staticTexts["Entered"].waitForExistence(timeout: 3))
+    }
+
+    func testTailscaleServeDetailEntryUsesHTTPSWithoutDefaultPort() {
+        let app = XCUIApplication()
+        app.launch()
+        openSetup(app)
+        tapVisible(app.buttons[Identity.answerYes], in: app)
+        tapVisible(app.buttons[Identity.answerYes], in: app)
+        tapVisible(app.buttons[Identity.methodTailscale], in: app)
+        tapVisible(app.buttons["setup.details-ready"], in: app)
+        let host = app.textFields["setup.host"]
+        tapVisible(host, in: app)
+        host.typeText("machine.tailnet.ts.net")
+        tapVisible(app.buttons["setup.next"], in: app)
+        XCTAssertTrue(app.textFields["setup.username"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons[Identity.back], in: app)
+        XCTAssertEqual(host.value as? String, "machine.tailnet.ts.net")
+        XCTAssertTrue(app.staticTexts["https://machine.tailnet.ts.net"].exists)
+    }
+
+    private func tapVisible(_ element: XCUIElement, in app: XCUIApplication) {
+        XCTAssertTrue(element.waitForExistence(timeout: 5))
+        for _ in 0..<6 {
+            if element.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(element.isHittable)
+        element.tap()
+    }
+
+    /// Tap the keyboard toolbar's Done control when present, so a Continue
+    /// button that would sit behind the keyboard window is tapped for real.
+    private func dismissKeyboard(_ app: XCUIApplication) {
+        let done = app.buttons["setup.keyboard-done"]
+        guard done.waitForExistence(timeout: 2) else { return }
+        done.tap()
+    }
+
     private func openSetup(_ app: XCUIApplication) {
         let serverField = app.textFields["login.server-url"]
         XCTAssertTrue(serverField.waitForExistence(timeout: 10), "Login screen did not appear. Tree:\n\(app.debugDescription)")
