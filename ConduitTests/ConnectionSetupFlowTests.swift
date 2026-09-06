@@ -1,0 +1,279 @@
+//
+//  ConnectionSetupFlowTests.swift
+//  Conduit
+//
+//  Routing and safety coverage for the guided Connection Setup wizard model:
+//  destination entry points, question transitions, access-method branches,
+//  back navigation, and the Ask Hermes prompt safety phrases.
+//
+
+import XCTest
+@testable import Conduit
+
+final class ConnectionSetupFlowTests: XCTestCase {
+    // MARK: - Entry destinations
+
+    func testManualEntryBeginsAtDashboard() {
+        XCTAssertEqual(ConnectionSetupFlow(entry: .start).step, .dashboard)
+    }
+
+    func testFailureDestinationsMapToSensibleWizardEntries() {
+        XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .start), .dashboard)
+        XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .dashboard), .dashboard)
+        XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .credentials), .credentials)
+        XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .network), .accessMethod)
+        XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .tls), .tlsTroubleshooting)
+        XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .cloudflare), .cloudflareTroubleshooting)
+    }
+
+    func testTLSAndCloudflareEntriesOpenTroubleshootingDirectly() {
+        XCTAssertEqual(ConnectionSetupFlow(entry: .tls).step, .tlsTroubleshooting)
+        XCTAssertEqual(ConnectionSetupFlow(entry: .cloudflare).step, .cloudflareTroubleshooting)
+    }
+
+    // MARK: - Core question transitions
+
+    func testDashboardYesAdvancesToCredentials() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.yes)
+        XCTAssertEqual(flow.step, .credentials)
+        XCTAssertEqual(flow.dashboardAnswer, .yes)
+    }
+
+    func testDashboardNoAndUnknownStayWithGuidanceUntilConfirmedReady() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.no)
+        XCTAssertEqual(flow.step, .dashboard, "No must keep the question up with its Ask Hermes guidance")
+        XCTAssertEqual(flow.dashboardAnswer, .no)
+
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .credentials)
+        XCTAssertEqual(
+            flow.dashboardAnswer, .no,
+            "Confirming readiness is navigation — it must not rewrite the recorded answer to Yes"
+        )
+    }
+
+    func testAnswerSurvivesConfirmAndBackRoundTrip() {
+        // Answer No, confirm ready, go Back: the recorded answer and its
+        // Ask Hermes guidance state must be exactly what the user said.
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.no)
+        flow.confirmDashboardReady()
+        flow.back()
+        XCTAssertEqual(flow.step, .dashboard)
+        XCTAssertEqual(flow.dashboardAnswer, .no, "Back must restore the original No answer, not a fabricated Yes")
+
+        // Re-confirming from the restored state advances cleanly again.
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .credentials)
+    }
+
+    func testDashboardUnknownThenConfirmAdvances() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.unknown)
+        XCTAssertEqual(flow.step, .dashboard)
+        flow.confirmDashboardReady()
+        XCTAssertEqual(flow.step, .credentials)
+    }
+
+    func testCredentialsYesAdvancesToAccessMethod() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.yes)
+        flow.answerCredentials(.yes)
+        XCTAssertEqual(flow.step, .accessMethod)
+    }
+
+    func testCredentialsNoAndUnknownStayWithGuidanceUntilConfirmedReady() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.yes)
+        flow.answerCredentials(.no)
+        XCTAssertEqual(flow.step, .credentials)
+        XCTAssertEqual(flow.credentialsAnswer, .no)
+
+        flow.confirmCredentialsReady()
+        XCTAssertEqual(flow.step, .accessMethod)
+        XCTAssertEqual(
+            flow.credentialsAnswer, .no,
+            "Confirming readiness is navigation — it must not rewrite the recorded answer to Yes"
+        )
+    }
+
+    func testRepeatedConfirmationsAreIdempotent() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.yes)
+        flow.answerCredentials(.yes)
+        flow.selectAccessMethod(.lan)
+        flow.confirmDetailsReady()
+        XCTAssertEqual(flow.step, .detailsReady)
+        // Double-taps on a continue/confirm button must not push duplicates.
+        flow.confirmDetailsReady()
+        flow.confirmDetailsReady()
+        XCTAssertEqual(flow.step, .detailsReady)
+        XCTAssertEqual(flow.path.count, 5, "Path must stay entry step + one entry per real navigation")
+    }
+
+    func testEntryAtCredentialsSkipsDashboardQuestion() {
+        var flow = ConnectionSetupFlow(entry: .credentials)
+        XCTAssertEqual(flow.step, .credentials)
+        flow.answerCredentials(.yes)
+        XCTAssertEqual(flow.step, .accessMethod)
+        XCTAssertNil(flow.dashboardAnswer, "Entering mid-wizard must not invent answers for skipped questions")
+    }
+
+    // MARK: - Access methods
+
+    func testAccessMethodChoicesRouteToTheirBranches() {
+        for (method, expectedStep) in [
+            (ConnectionAccessMethod.lan, ConnectionSetupStep.lan),
+            (ConnectionAccessMethod.tailscale, ConnectionSetupStep.tailscale),
+            (ConnectionAccessMethod.reverseProxy, ConnectionSetupStep.reverseProxy)
+        ] {
+            var flow = ConnectionSetupFlow(entry: .start)
+            flow.answerDashboard(.yes)
+            flow.answerCredentials(.yes)
+            flow.selectAccessMethod(method)
+            XCTAssertEqual(flow.step, expectedStep, "\(method) must route to \(expectedStep)")
+            XCTAssertEqual(flow.accessMethod, method)
+        }
+    }
+
+    func testSupportedMethodSetIsExactlyTheSafeThree() {
+        // Closed set: LAN, Tailscale, existing reverse proxy. There is no
+        // public-IP/open-port method anywhere in the model.
+        XCTAssertEqual(
+            Set(ConnectionAccessMethod.allCases),
+            [.lan, .tailscale, .reverseProxy]
+        )
+    }
+
+    func testDetailsReadyFollowsBranchConfirmation() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.yes)
+        flow.answerCredentials(.yes)
+        flow.selectAccessMethod(.tailscale)
+        flow.confirmDetailsReady()
+        XCTAssertEqual(flow.step, .detailsReady)
+    }
+
+    // MARK: - Back navigation
+
+    func testBackWalksThePathWithoutLosingEntryStep() {
+        var flow = ConnectionSetupFlow(entry: .start)
+        XCTAssertFalse(flow.canGoBack, "The entry step has nowhere to go back to")
+        flow.back()
+        XCTAssertEqual(flow.step, .dashboard, "Back on the entry step must be a no-op")
+
+        flow.answerDashboard(.yes)
+        flow.answerCredentials(.yes)
+        flow.selectAccessMethod(.tailscale)
+        XCTAssertTrue(flow.canGoBack)
+
+        flow.back()
+        XCTAssertEqual(flow.step, .accessMethod)
+        flow.back()
+        XCTAssertEqual(flow.step, .credentials)
+        flow.back()
+        XCTAssertEqual(flow.step, .dashboard)
+        XCTAssertFalse(flow.canGoBack)
+    }
+
+    // MARK: - Troubleshooting topic switching
+
+    func testTroubleshootingTopicsReplaceEachOtherInsteadOfStacking() {
+        // A topic switch is replacement, not navigation: flipping TLS ⇄
+        // Cloudflare repeatedly must never grow the back path.
+        var flow = ConnectionSetupFlow(entry: .tls)
+        flow.showTroubleshooting(.cloudflare)
+        XCTAssertEqual(flow.step, .cloudflareTroubleshooting)
+        XCTAssertEqual(flow.path.count, 1)
+        XCTAssertFalse(flow.canGoBack, "Back after a topic replacement leaves troubleshooting entirely")
+        flow.showTroubleshooting(.tls)
+        XCTAssertEqual(flow.step, .tlsTroubleshooting)
+        XCTAssertEqual(flow.path.count, 1)
+        flow.showTroubleshooting(.tls)
+        XCTAssertEqual(flow.step, .tlsTroubleshooting, "Same-topic switch is a no-op")
+    }
+
+    func testWizardDestinationsDoNotJumpOutOfTheQuestionSequence() {
+        // The troubleshooting switch is only for the tls/cloudflare surfaces;
+        // it must not be usable to skip straight to branches.
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.showTroubleshooting(.network)
+        XCTAssertEqual(flow.step, .dashboard)
+    }
+
+    // MARK: - Progress labeling
+
+    func testProgressLabelsCoverTheThreeCoreQuestions() {
+        XCTAssertEqual(ConnectionSetupFlow(entry: .start).progressLabel, "Step 1 of 3")
+
+        var flow = ConnectionSetupFlow(entry: .start)
+        flow.answerDashboard(.yes)
+        XCTAssertEqual(flow.progressLabel, "Step 2 of 3")
+        flow.answerCredentials(.yes)
+        XCTAssertEqual(flow.progressLabel, "Step 3 of 3")
+
+        flow.selectAccessMethod(.lan)
+        XCTAssertNil(flow.progressLabel, "Branch screens sit outside the numbered question sequence")
+
+        // Non-question entries are unnumbered too.
+        XCTAssertNil(ConnectionSetupFlow(entry: .tls).progressLabel)
+        XCTAssertNil(ConnectionSetupFlow(entry: .cloudflare).progressLabel)
+        var detailsFlow = ConnectionSetupFlow(entry: .start)
+        detailsFlow.answerDashboard(.yes)
+        detailsFlow.answerCredentials(.yes)
+        detailsFlow.selectAccessMethod(.lan)
+        detailsFlow.confirmDetailsReady()
+        XCTAssertNil(detailsFlow.progressLabel)
+    }
+
+    // MARK: - Ask Hermes prompt safety
+
+    func testEveryPromptPreservesDashboardAuthentication() {
+        for prompt in ConnectionSetupPrompt.allCases {
+            let text = prompt.text.lowercased()
+            XCTAssertTrue(
+                text.contains("authentication"),
+                "\(prompt) prompt never mentions authentication: \(prompt.text)"
+            )
+            XCTAssertTrue(
+                text.contains("enabled") || text.contains("disable") || text.contains("requires authentication"),
+                "\(prompt) prompt must explicitly ask Hermes to keep authentication on: \(prompt.text)"
+            )
+        }
+    }
+
+    func testTailscalePromptReferencesTailscaleServe() {
+        XCTAssertTrue(
+            ConnectionSetupPrompt.tailscaleServe.text.contains("Tailscale Serve"),
+            "The Tailscale branch prompt must include the Tailscale Serve configuration path"
+        )
+    }
+
+    func testNoPromptRequestsPublicExposureOrHardCodedPorts() {
+        let forbidden = ["public internet", "port forward", "port-forward", "firewall", "expose", "8080", "9119", "443"]
+        for prompt in ConnectionSetupPrompt.allCases {
+            let text = prompt.text.lowercased()
+            for phrase in forbidden {
+                XCTAssertFalse(
+                    text.contains(phrase),
+                    "\(prompt) prompt must not contain '\(phrase)': \(prompt.text)"
+                )
+            }
+        }
+    }
+
+    func testGuidanceMethodLabelsContainNoExposureLanguage() {
+        // The shipped card titles come from the model's displayTitle — the
+        // same strings the wizard renders — so this guards real copy, not
+        // local literals.
+        let labels = ConnectionAccessMethod.allCases.map { $0.displayTitle }
+        XCTAssertEqual(labels.count, 3)
+        for label in labels {
+            let lowered = label.lowercased()
+            XCTAssertFalse(lowered.contains("public"))
+            XCTAssertFalse(lowered.contains("open port"))
+        }
+    }
+}
