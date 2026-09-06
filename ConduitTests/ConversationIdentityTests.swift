@@ -262,7 +262,7 @@ final class ConversationIdentityTests: XCTestCase {
         // stored label matches the selection's durable id: confirmation, not
         // foreign ownership.
         let selected = identity(durable: "stored-a", runtime: "runtime-old")
-        let catalog = [session("runtime-a", storedSessionID: "stored-a", alternates: ["runtime-old", "runtime-new"])]
+        let catalog = [session("runtime-a", alternates: ["runtime-old", "runtime-new"], storedSessionID: "stored-a")]
         let claim = ResumeIdentityClaim(runtimeSessionID: "runtime-new", durableSessionID: nil)
 
         XCTAssertEqual(
