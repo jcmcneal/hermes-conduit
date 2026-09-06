@@ -126,6 +126,48 @@ final class NativeAuthClientTests: XCTestCase {
         XCTAssertEqual(discovery, .unrecognized)
     }
 
+    func testProviderDiscoveryWrongElementShapeIsUnrecognized() async throws {
+        let client = NativeAuthClient(
+            baseURL: "https://wrongshape.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        let discovery = try await client.authProviderDiscovery()
+
+        XCTAssertEqual(discovery, .unrecognized)
+    }
+
+    func testProviderDiscoveryNonDictionaryRootIsUnrecognized() async throws {
+        let client = NativeAuthClient(
+            baseURL: "https://arrayroot.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        let discovery = try await client.authProviderDiscovery()
+
+        XCTAssertEqual(discovery, .unrecognized)
+    }
+
+    func testProviderDiscoveryRedirectWithoutLocationIsDiscoveryFailure() async throws {
+        // A 3xx without a Location header cannot drive a browser login: it
+        // is a broken server response, never the interactive-auth signal.
+        let client = NativeAuthClient(
+            baseURL: "https://locationless.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        do {
+            _ = try await client.authProviderDiscovery()
+            return XCTFail("Expected a Location-less redirect to fail discovery")
+        } catch let error as AuthClientError {
+            guard case .providerDiscoveryFailed(let status, let detail) = error else {
+                return XCTFail("Expected providerDiscoveryFailed, got \(error)")
+            }
+            XCTAssertEqual(status, 302)
+            XCTAssertEqual(detail, "Redirect without Location")
+        }
+    }
+
     func testProviderDiscoveryPreservesNonRedirect3xxResponses() async throws {
         let client = NativeAuthClient(
             baseURL: "https://multiple.example",
@@ -532,7 +574,10 @@ private final class NativeAuthURLProtocol: URLProtocol {
             "cftoken.example",
             "empty-providers.example",
             "malformed.example",
-            "nokey.example"
+            "nokey.example",
+            "wrongshape.example",
+            "arrayroot.example",
+            "locationless.example"
         ].contains(host)
     }
 
@@ -766,6 +811,15 @@ private final class NativeAuthURLProtocol: URLProtocol {
         case "nokey.example":
             // JSON without a providers array.
             return Fixture(statusCode: 200, headers: [:], body: Data(#"{"ok":true}"#.utf8))
+        case "wrongshape.example":
+            // A providers key whose elements are not dictionaries.
+            return Fixture(statusCode: 200, headers: [:], body: Data(#"{"providers":["basic"]}"#.utf8))
+        case "arrayroot.example":
+            // A non-dictionary JSON root.
+            return Fixture(statusCode: 200, headers: [:], body: Data("[]".utf8))
+        case "locationless.example":
+            // A redirect-shaped answer with no Location header.
+            return Fixture(statusCode: 302, headers: [:], body: Data())
         case "headers.example":
             let hasExpectedHeaders = request.value(forHTTPHeaderField: "CF-Access-Client-Id") == "test-client-id"
                 && request.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "test-client-secret"

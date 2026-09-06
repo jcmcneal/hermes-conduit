@@ -104,7 +104,9 @@ enum AuthProviderDiscoveryResult {
 
 extension AuthProviderDiscoveryResult: Equatable {
     /// Provider arrays are dictionaries of JSON values, so structural
-    /// equality goes through NSArray/NSDictionary's recursive isEqual.
+    /// equality goes through NSArray/NSDictionary's recursive isEqual. This
+    /// conformance exists for tests and the typed switch above; production
+    /// code never compares provider arrays for equality.
     static func == (lhs: Self, rhs: Self) -> Bool {
         switch (lhs, rhs) {
         case (.interactiveSignInRequired, .interactiveSignInRequired),
@@ -171,9 +173,19 @@ struct NativeAuthClient {
         }
         switch http.statusCode {
         case 301, 302, 303, 307, 308:
-            // The SecureRedirectDelegate cancels cross-origin redirects, so a
-            // 3xx final response here is the edge bouncing us to its sign-in
-            // page. Without a configured token that is the expected
+            // A redirect response without a Location header cannot drive a
+            // browser login — it is a broken server response, not an auth
+            // mode. Classify it as discovery failure like any other
+            // non-Hermes answer.
+            guard http.value(forHTTPHeaderField: "Location") != nil else {
+                throw AuthClientError.providerDiscoveryFailed(
+                    status: http.statusCode,
+                    detail: "Redirect without Location"
+                )
+            }
+            // The SecureRedirectDelegate cancels cross-origin redirects, so
+            // a 3xx final response here is the edge bouncing us to its
+            // sign-in page. Without a configured token that is the expected
             // interactive-auth signal. With an actually configured service
             // token it means Cloudflare rejected that token — say so instead
             // of presenting the same login page that should have been

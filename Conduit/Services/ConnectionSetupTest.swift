@@ -318,9 +318,21 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         // website answering 200 (unrecognized body) and a recognizable
         // provider answer with no password provider are both NOT Hermes
         // password dashboards — and neither is the interactive-auth signal,
-        // which only the redirect classification below may produce.
+        // which only the redirect classification above may produce.
         onEvent(.started(.dashboard))
         switch discovery {
+        case .interactiveSignInRequired:
+            // The dashboard requires interactive (browser) sign-in. The
+            // probe has verified everything it can — transport and dashboard
+            // identity plus the expected auth behavior — and reports the
+            // supported terminal outcome. It stays side-effect-free: no
+            // native login attempt, no ticket mint, no WebView, no
+            // cookie/Keychain writes. The actual sign-in happens in
+            // LoginView over the normal handoff.
+            onEvent(.succeeded(.dashboard))
+            onEvent(.started(.authentication))
+            onEvent(.requiresInteractiveSignIn(.authentication))
+            return
         case .unrecognized:
             Self.reportFailure(.dashboard, .unexpectedServerResponse, to: onEvent)
             return
@@ -329,39 +341,25 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
                 Self.reportFailure(.dashboard, .unexpectedServerResponse, to: onEvent)
                 return
             }
-        case .interactiveSignInRequired:
-            break
         }
         onEvent(.succeeded(.dashboard))
 
-        guard case .interactiveSignInRequired = discovery else {
-            // Stage 3: the full native credential proof — password login
-            // plus the ws-ticket mint that proves the session is actually
-            // usable. This is the exact milestone normal login requires
-            // before it would commit cookies. The transaction (ticket +
-            // transaction cookies) is deliberately discarded: the test
-            // persists nothing and connects nothing.
-            onEvent(.started(.authentication))
-            do {
-                // Deliberately discarded: commitCookies() is never called,
-                // so the transaction never reaches the shared cookie store.
-                _ = try await client.connect(username: result.username, password: result.password)
-                onEvent(.succeeded(.authentication))
-            } catch {
-                guard !Self.wasCancelled(error) else { return }
-                Self.reportFailure(.authentication, ConnectionFailureClassifier.classify(error), to: onEvent)
-            }
-            return
-        }
-
-        // The dashboard requires interactive (browser) sign-in. The probe
-        // has verified everything it can — transport and dashboard identity
-        // plus the expected auth behavior — and reports the supported
-        // terminal outcome. It stays side-effect-free: no native login
-        // attempt, no ticket mint, no WebView, no cookie/Keychain writes.
-        // The actual sign-in happens in LoginView over the normal handoff.
+        // Stage 3: the full native credential proof — password login plus
+        // the ws-ticket mint that proves the session is actually usable.
+        // This is the exact milestone normal login requires before it would
+        // commit cookies. The transaction (ticket + transaction cookies) is
+        // deliberately discarded: the test persists nothing and connects
+        // nothing.
         onEvent(.started(.authentication))
-        onEvent(.requiresInteractiveSignIn(.authentication))
+        do {
+            // Deliberately discarded: commitCookies() is never called, so
+            // the transaction never reaches the shared cookie store.
+            _ = try await client.connect(username: result.username, password: result.password)
+            onEvent(.succeeded(.authentication))
+        } catch {
+            guard !Self.wasCancelled(error) else { return }
+            Self.reportFailure(.authentication, ConnectionFailureClassifier.classify(error), to: onEvent)
+        }
     }
 
     private static func reportFailure(

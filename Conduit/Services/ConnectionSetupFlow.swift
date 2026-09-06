@@ -411,7 +411,9 @@ struct ConnectionSetupFlow: Equatable {
     /// credentials for authentication failures). Falls back to inserting the
     /// details step after credentials for the short auth-recovery route,
     /// which enters the wizard past the details screen. Leaving the test
-    /// step also invalidates any in-flight run's generation.
+    /// step also invalidates any in-flight run's generation and resets the
+    /// staged state, so no leftover failure display or terminal outcome can
+    /// outlive the remediation.
     mutating func editAfterFailedTest(_ target: ConnectionSetupStep) {
         guard step == .connectionTest,
               target == .connectionDetails || target == .loginCredentials else { return }
@@ -425,6 +427,8 @@ struct ConnectionSetupFlow: Equatable {
         }
         validationError = nil
         testGeneration += 1
+        testState = ConnectionSetupTestState()
+        testSucceededAtRevision = nil
     }
 
     /// Continue from the test screen to Review when a current qualifying

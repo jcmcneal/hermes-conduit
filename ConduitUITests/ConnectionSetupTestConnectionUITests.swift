@@ -100,12 +100,14 @@ final class ConnectionSetupTestConnectionUITests: XCTestCase {
 
     func testInteractiveSignInOutcomeShowsBrowserSignInAndHandsOff() {
         // A dashboard whose discovery redirects to a sign-in page ends the
-        // staged test in the supported interactive outcome: server and
-        // dashboard pass, authentication shows "Browser sign-in required"
-        // (never "Login successful"), and Use These Settings performs the
-        // normal Round-3 handoff back to LoginView — where the user taps
-        // Connect and the existing WebView flow runs. No real browser login
-        // is automated here.
+        // staged test in the supported interactive outcome. The terminal
+        // event AUTO-ADVANCES the flow to Review, so the assertions below
+        // run against Review directly: server and dashboard pass,
+        // authentication shows "Browser sign-in required" (never "Login
+        // successful"), and Use These Settings performs the normal Round-3
+        // handoff back to LoginView — where the user taps Connect and the
+        // existing WebView flow runs. No real browser login is automated
+        // here.
         let app = XCUIApplication()
         app.launchArguments += ["-CONNECTION_SETUP_TEST_RESULT", "auth:interactiveSignInRequired"]
         app.launch()
@@ -113,27 +115,35 @@ final class ConnectionSetupTestConnectionUITests: XCTestCase {
         walkToTestScreen(app)
         tapVisible(app.buttons[Identity.testRun], in: app)
 
-        // The staged list shows the two verified stages plus the
-        // interactive outcome on the authentication row.
-        XCTAssertTrue(row(app, Identity.stageServer).waitForExistence(timeout: 5))
-        XCTAssertTrue(row(app, Identity.stageDashboard).exists)
-        XCTAssertTrue(row(app, Identity.stageAuthentication).exists)
-        let authRow = row(app, Identity.stageAuthentication)
-        XCTAssertTrue(authRow.label.contains("Browser sign-in required"), "Got: \(authRow.label)")
-        XCTAssertFalse(
-            authRow.label.contains("Login successful"),
-            "Interactive auth must never claim the user signed in"
-        )
-        XCTAssertFalse(app.staticTexts["setup.test.ready"].exists, "The native ready message must not appear")
-
-        // Review shows the browser-based sign-in explanation.
-        tapVisible(app.buttons[Identity.testContinue], in: app)
+        // Review, reached by auto-advance, shows the browser-based sign-in
+        // explanation and the interactive authentication row.
         let interactiveReady = app.staticTexts["setup.test.interactive-ready"]
         XCTAssertTrue(interactiveReady.waitForExistence(timeout: 5))
         XCTAssertTrue(
             interactiveReady.label.contains("browser-based sign-in"),
             "Got: \(interactiveReady.label)"
         )
+        XCTAssertFalse(
+            app.staticTexts["setup.test.ready"].exists,
+            "The native ready message must not appear for interactive auth"
+        )
+        let authRow = row(app, Identity.stageAuthentication)
+        XCTAssertTrue(authRow.exists)
+        XCTAssertTrue(authRow.label.contains("Browser sign-in required"), "Got: \(authRow.label)")
+        XCTAssertFalse(
+            authRow.label.contains("Login successful"),
+            "Interactive auth must never claim the user signed in"
+        )
+
+        // Back from Review shows the still-current outcome on the test
+        // screen with a Continue action that returns to Review.
+        tapVisible(app.buttons[Identity.back], in: app)
+        XCTAssertTrue(app.buttons[Identity.testContinue].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            row(app, Identity.stageAuthentication).label.contains("Browser sign-in required")
+        )
+        tapVisible(app.buttons[Identity.testContinue], in: app)
+        XCTAssertTrue(app.staticTexts["setup.test.interactive-ready"].waitForExistence(timeout: 5))
 
         // The Round-3 typed handoff is unchanged: fields populate, nothing
         // connects automatically.
