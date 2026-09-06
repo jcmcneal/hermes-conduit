@@ -55,7 +55,7 @@ final class AppStateChatResumeTests: XCTestCase {
         // apply — preserve-current must not silently become session.create.
         var requests: [String] = []
         let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
-            loadCatalog: { _, _ in [self.session("stored-old"), self.session("stored-newest")] },
+            loadCatalog: { _, _ in [self.session("stored-newest"), self.session("stored-older")] },
             openSession: { _, id, _ in
                 requests.append(id)
                 return SessionResumeResult(sessionId: id, messages: [],

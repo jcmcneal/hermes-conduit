@@ -145,10 +145,10 @@ final class ConversationIdentityTests: XCTestCase {
         // (newest ordinary chat) is preserved — it must not turn into
         // session.create.
         let selected = ChatResumeSessionResolver.target(
-            in: [session("stored-old"), session("stored-newest")],
+            in: [session("stored-newest"), session("stored-older")],
             behavior: .latestActivity,
             purpose: .preserveCurrent,
-            savedSessionID: "stored-old",
+            savedSessionID: "stored-older",
             currentSessionID: nil
         )
         XCTAssertEqual(selected?.id, "stored-newest")
