@@ -26,6 +26,19 @@ mkdir -p "$LOG_DIR"
 SIMULATOR_NAME="${SIMULATOR_NAME:-iPhone 17 Pro}"
 build_destination
 
+# Destination readiness gate: absorb the fresh-runner CoreSimulator
+# settlement race before spending the build budget on a guaranteed
+# destination-resolution failure (observed as an empty available-destinations
+# list and "Unable to find a device matching the provided destination
+# specifier", which skips every downstream lane).
+if ! wait_for_destination_device; then
+  build_status_token="failed"
+  printf '{"schema_version": 1, "status": "%s", "duration_s": %d, "started_at": "%s", "finished_at": "%s", "xctestrun": "%s", "shared_artifact": true}\n' \
+    "$build_status_token" 0 "$(now_iso)" "$(now_iso)" "" > "$LOG_DIR/build-result.json"
+  echo "::error::destination device '$SIMULATOR_NAME' never became available; build-for-testing skipped"
+  exit 1
+fi
+
 started_at=$(now_iso)
 start=$(date +%s)
 status=0

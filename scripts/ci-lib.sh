@@ -245,3 +245,44 @@ build_destination() {
     DESTINATION="$DESTINATION,OS=$SIMULATOR_OS"
   fi
 }
+
+# Bounded readiness gate for the pinned destination device. Fresh hosted
+# runners occasionally reach the build step before CoreSimulator has settled
+# its device pairs; xcodebuild then fails destination resolution ("Unable to
+# find a device matching the provided destination specifier") with an EMPTY
+# available-destinations list, and every downstream lane is skipped. Polling
+# `simctl list devices available` observes (and gives CoreSimulator a nudge
+# to finish) that settlement. Happy path: the first probe resolves in
+# seconds. If the device never appears, this fails fast with the full
+# device/runtime inventory instead of a misleading xcodebuild destination
+# error. It is strictly a gate: the pinned name is never substituted with
+# another device.
+wait_for_destination_device() {
+  local budget="${DESTINATION_SETTLE_TIMEOUT_S:-180}"
+  local waited=0 udid
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "::warning::jq not found on runner - skipping destination pre-verification"
+    return 0
+  fi
+  while :; do
+    if udid=$(simulator_udid) && [ -n "$udid" ]; then
+      if [ "$waited" -gt 0 ]; then
+        echo "destination device '$SIMULATOR_NAME' became visible after ${waited}s"
+      fi
+      return 0
+    fi
+    if [ "$waited" -ge "$budget" ]; then
+      echo "::error::destination device '$SIMULATOR_NAME' not available after ${waited}s - destination resolution would fail"
+      if bounded_run 60 xcrun simctl list devices available; then
+        printf '%s\n' "$BOUNDED_OUTPUT"
+      fi
+      if bounded_run 60 xcrun simctl list runtimes available; then
+        printf '%s\n' "$BOUNDED_OUTPUT"
+      fi
+      return 1
+    fi
+    sleep 10
+    waited=$(( waited + 10 ))
+    echo "... waiting for simulator device '$SIMULATOR_NAME' (${waited}s/${budget}s)"
+  done
+}
