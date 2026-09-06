@@ -24,6 +24,9 @@ final class ConnectionSetupUITests: XCTestCase {
 
     func testLANDetailsValidationReviewAndHandoffWithoutConnecting() {
         let app = XCUIApplication()
+        // The staged connection test runs against a deterministic stub probe:
+        // UI tests never depend on a real Hermes server.
+        app.launchArguments += ["-CONNECTION_SETUP_TEST_RESULT", "success"]
         app.launch()
         openSetup(app)
         tapVisible(app.buttons[Identity.answerYes], in: app)
@@ -54,13 +57,25 @@ final class ConnectionSetupUITests: XCTestCase {
         tapVisible(password, in: app)
         password.typeText("round3-private-fixture")
         tapVisible(app.buttons["setup.next"], in: app)
+        // The staged test screen sits between credentials and Review.
+        XCTAssertTrue(app.buttons["setup.test.run"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons["setup.test.run"], in: app)
+        XCTAssertTrue(app.staticTexts["setup.test.ready"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["http://192.168.1.28:9119"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["Entered"].exists)
         XCTAssertFalse(app.staticTexts["round3-private-fixture"].exists)
         tapVisible(app.buttons[Identity.back], in: app)
+        // Back from Review lands on the test screen, which still shows the
+        // passing result.
+        XCTAssertTrue(app.buttons["setup.test.continue"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons[Identity.back], in: app)
         XCTAssertTrue(password.waitForExistence(timeout: 5))
-        // Retained password permits Review without re-entry; never read its value.
+        // Retained password permits the test screen without re-entry; never
+        // read its value. No edits happened, so the success stays current.
         tapVisible(app.buttons["setup.next"], in: app)
+        XCTAssertTrue(app.buttons["setup.test.continue"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons["setup.test.continue"], in: app)
+        XCTAssertTrue(app.staticTexts["setup.test.ready"].waitForExistence(timeout: 5))
         tapVisible(app.buttons["setup.use-settings"], in: app)
         let server = app.textFields["login.server-url"]
         XCTAssertTrue(server.waitForExistence(timeout: 5))
@@ -76,7 +91,9 @@ final class ConnectionSetupUITests: XCTestCase {
         XCTAssertEqual(app.textFields["setup.url"].value as? String, "http://192.168.1.28:9119")
         tapVisible(app.buttons["setup.next"], in: app)
         tapVisible(app.buttons["setup.next"], in: app)
-        XCTAssertTrue(app.staticTexts["Entered"].waitForExistence(timeout: 3))
+        XCTAssertTrue(app.buttons["setup.test.run"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons["setup.test.run"], in: app)
+        XCTAssertTrue(app.staticTexts["Entered"].waitForExistence(timeout: 5))
     }
 
     func testTailscaleServeDetailEntryUsesHTTPSWithoutDefaultPort() {
