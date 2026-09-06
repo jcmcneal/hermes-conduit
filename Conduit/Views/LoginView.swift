@@ -106,7 +106,16 @@ struct LoginView: View {
             appState.pendingLoginFailure = nil
         }
         .sheet(item: $connectionSetupDestination) { destination in
-            ConnectionSetupView(initialDestination: destination)
+            ConnectionSetupView(
+                initialDestination: destination,
+                initialDraft: ConnectionSetupDraft(existingServerURL: serverUrl, username: username, password: password)
+            ) { result in
+                serverUrl = result.serverURL
+                username = result.username
+                password = result.password
+                failure = nil
+                focusedField = nil
+            }
         }
         .sheet(isPresented: $showWebView) {
             AuthWebView(

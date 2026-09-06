@@ -2,7 +2,7 @@
 //  ConnectionSetupView.swift
 //  Conduit
 //
-//  Round-2 guided Connection Setup wizard. The routing lives in
+//  Guided Connection Setup wizard. The routing lives in
 //  ConnectionSetupFlow (unit-tested); this view renders the model's current
 //  step and forwards taps as model transitions. Round 1's TLS and Cloudflare
 //  quick checks remain available as direct troubleshooting surfaces, reachable
@@ -19,17 +19,31 @@ struct ConnectionSetupView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var flow: ConnectionSetupFlow
     @State private var showNotSureGuidance = false
+    private let onComplete: (ConnectionSetupResult) -> Void
 
-    init(initialDestination: ConnectionHelpDestination) {
-        _flow = State(initialValue: ConnectionSetupFlow(entry: initialDestination))
+    init(initialDestination: ConnectionHelpDestination,
+         initialDraft: ConnectionSetupDraft = ConnectionSetupDraft(),
+         onComplete: @escaping (ConnectionSetupResult) -> Void) {
+        _flow = State(initialValue: ConnectionSetupFlow(entry: initialDestination, draft: initialDraft))
+        self.onComplete = onComplete
     }
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                content
-                    .padding(20)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            Group {
+                switch flow.step {
+                case .connectionDetails, .loginCredentials, .review:
+                    ConnectionSetupForm(flow: $flow) { result in
+                        onComplete(result)
+                        dismiss()
+                    }
+                default:
+                    ScrollView {
+                        content
+                            .padding(20)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
             }
             .accessibilityIdentifier("connection-setup.content")
             .navigationTitle("Connection Setup")
@@ -64,7 +78,7 @@ struct ConnectionSetupView: View {
         case .lan: lanBranch
         case .tailscale: tailscaleBranch
         case .reverseProxy: reverseProxyBranch
-        case .detailsReady: detailsReadyStep
+        case .connectionDetails, .loginCredentials, .review: EmptyView()
         case .tlsTroubleshooting: troubleshootingStep(.tls)
         case .cloudflareTroubleshooting: troubleshootingStep(.cloudflare)
         }
@@ -143,6 +157,11 @@ struct ConnectionSetupView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            if !flow.draft.existingServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                continueButton("Use or edit current dashboard address") { flow.useExistingAddress() }
+                    .accessibilityIdentifier("setup.use-existing")
+            }
 
             methodCard(
                 title: ConnectionAccessMethod.lan.displayTitle,
@@ -285,22 +304,6 @@ struct ConnectionSetupView: View {
             AskHermesPromptView(title: ConnectionSetupPrompt.reverseProxyDetails.title, prompt: ConnectionSetupPrompt.reverseProxyDetails.text)
             continueButton("I have the connection details") { flow.confirmDetailsReady() }
                 .accessibilityIdentifier("setup.details-ready")
-        }
-    }
-
-    // MARK: - Details-ready placeholder
-
-    private var detailsReadyStep: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Details ready")
-                .font(.title3.weight(.semibold))
-            Text("Collecting your Hermes address and port inside this assistant arrives in a future update.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Meanwhile, tap Done and enter your dashboard address directly in the login form — the guidance above covers exactly what to enter, and Conduit accepts custom ports and path prefixes there.")
-                .font(.subheadline)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
