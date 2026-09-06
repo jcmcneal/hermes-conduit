@@ -109,6 +109,41 @@ final class ConversationIdentityTests: XCTestCase {
         )
     }
 
+    func testGateRejectsForeignRuntimeWhenBothRowsAreUnlabeled() {
+        // Two absent stored labels are "unknown", never "equal": a runtime-only
+        // selection must not adopt a runtime id that positively belongs to a
+        // different (unlabeled) catalog row.
+        let selected = identity(durable: nil, runtime: "runtime-a")
+        let catalog = [session("stored-b", alternates: ["runtime-b"])]
+        let claim = ResumeIdentityClaim(runtimeSessionID: "runtime-b", durableSessionID: nil)
+
+        XCTAssertEqual(
+            ConversationIdentityGate.admit(claim: claim, selected: selected, catalog: catalog),
+            .failure(.foreignRuntimeOwnership(returned: "runtime-b", ownerSessionID: "stored-b"))
+        )
+    }
+
+    func testGateChecksEveryOwnerRowBeforeDecidingForeignOwnership() {
+        // Rows can share a runtime id after rotation. The FIRST matching row
+        // must not decide: a foreign row ahead of the selected row in the
+        // catalog must not reject a legitimate rebind.
+        let selected = identity(
+            durable: "stored-a",
+            runtime: "runtime-old",
+            accepted: ["stored-a", "runtime-old"]
+        )
+        let catalog = [
+            session("stored-b", alternates: ["runtime-new"]),
+            session("stored-a", alternates: ["runtime-old", "runtime-new"])
+        ]
+        let claim = ResumeIdentityClaim(runtimeSessionID: "runtime-new", durableSessionID: nil)
+
+        XCTAssertEqual(
+            ConversationIdentityGate.admit(claim: claim, selected: selected, catalog: catalog),
+            .success(.knownAlias)
+        )
+    }
+
     func testGateAcceptsRuntimeIDOwnedByACatalogRowThatIsTheSelectedConversation() {
         // The refreshed catalog still holds the selected conversation but
         // under an id the capture knew only as an alias: that is confirmation,

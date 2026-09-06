@@ -95,6 +95,13 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertTrue(requests.isEmpty, "No conversation exists to resume; the create path is the historical behavior")
         XCTAssertNil(harness.appState.activeSessionId)
         XCTAssertEqual(harness.appState.turnState, .idle)
+        // The create path itself ran (and failed on the unconnected test
+        // client) — proving the empty-catalog/no-identity boundary really
+        // reaches session.create rather than silently doing nothing.
+        XCTAssertTrue(
+            harness.appState.errorMessage?.hasPrefix("Failed to create session:") == true,
+            "Expected the create path's failure, got: \(harness.appState.errorMessage ?? "nil")"
+        )
     }
 
     func testPreserveCurrentRecoveryBuffersStreamEventsForForgottenRuntimeAlias() async {
@@ -250,6 +257,113 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-a")
         XCTAssertEqual(harness.appState.turnState, .idle)
         XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testRuntimeOnlyConversationEstablishesDurableKeyFromResume() async {
+        // A runtime-only conversation (no catalog row, no established
+        // durable id) whose resume response names its stored key: the key is
+        // established as the durable identity — routing adoption, not
+        // navigation.
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-solo",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.activeSessionId = "runtime-solo"
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-solo")
+        XCTAssertEqual(
+            harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo",
+            "The response's stored key becomes the durable identity"
+        )
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-solo")
+        XCTAssertTrue(
+            harness.appState.activeChatScrollSessionIdentity.areEquivalent("runtime-solo", "stored-solo")
+        )
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testTargetResumeKeepsBufferedEventsForAliasDroppedFromRefreshedRow() async {
+        // The refreshed catalog still contains the selected row (matched via
+        // the durable id) but dropped its runtime alias: the target branch
+        // must keep the pre-captured alias accepted so in-flight events for
+        // it stay buffered and survive the transcript replacement.
+        let openGate = ControlledSuspension()
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, _, _ in
+                await openGate.suspend()
+                return SessionResumeResult(sessionId: "runtime-a", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "stored-a"
+
+        let sync = Task { @MainActor in
+            await harness.appState.syncSession()
+        }
+        await openGate.waitUntilSuspended()
+        harness.appState.handleStreamEvent(
+            .messageDelta(sessionId: "runtime-a", text: "Alias survives")
+        )
+        openGate.resume()
+        await sync.value
+        harness.appState.showSidebar = true
+        harness.appState.showSidebar = false
+
+        XCTAssertEqual(harness.appState.streamingText, "Alias survives")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+    }
+
+    func testAutomaticReturnRejectionDoesNotScheduleReconnect() async {
+        // A rejected identity is deterministic; automatic-return recovery
+        // must not treat it as a retryable failure and loop on the same
+        // contradiction.
+        let scheduler = ControlledReconnectScheduler()
+        let harness = makeHarness(
+            reconnectScheduler: scheduler,
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.session("stored-a")] },
+                openSession: { _, _, _ in
+                    SessionResumeResult(
+                        sessionId: "runtime-b",
+                        storedSessionId: "stored-b",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.store.setLastSessionID("stored-a", for: "default")
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(scheduler.scheduledCount, 0, "A contradictory resume is not a reconnect candidate")
+        XCTAssertNotNil(harness.appState.errorMessage)
+        XCTAssertNil(harness.appState.activeSessionId, "No navigation happened")
     }
 
     func testDeletedActiveSessionIsNotResurrectedByPreserveCurrentRecovery() async {
