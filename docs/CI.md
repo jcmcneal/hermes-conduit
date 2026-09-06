@@ -143,7 +143,14 @@ of `simctl list devices available` that absorbs the settlement race and, if
 the pinned device never appears, fails fast with the full device/runtime
 inventory instead of a misleading xcodebuild error. The gate never
 substitutes another device for the pinned name - an image refresh that
-renames devices still fails, with an explicit diagnostic.
+renames devices still fails, with an explicit diagnostic. The lookup behind
+the gate (`simulator_udid`) is also OS-qualified: when `SIMULATOR_OS` is
+set, only a device with the pinned name on that exact runtime satisfies it
+(exact numeric-component match, so `26.1` never matches `26.10`), with no
+fallback to another runtime - the resolved UDID always belongs to the
+destination xcodebuild will use. `SIMULATOR_OS` must be numeric dotted
+components (e.g. `26.0`); xcodebuild-only values such as `latest` are not
+supported by the pin and fail the gate.
 
 ## Watchdogs
 

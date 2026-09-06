@@ -174,10 +174,52 @@ bounded_run() {
   return "$status"
 }
 
+# Exact numeric-component OS version match. $1 = wanted version (the
+# SIMULATOR_OS pin), $2 = actual runtime version ("26.0" style). Components
+# are compared one at a time, so "26.1" never matches "26.10", a shorter
+# form ("26") never silently matches "26.0", and malformed input (empty,
+# non-numeric, dot-only, leading/trailing/double dots) never matches.
+os_version_matches() {
+  local wanted="${1:-}" actual="${2:-}" wc ac
+  case "$wanted" in ''|.*|*.|*..*|*[!0-9.]*) return 1 ;; esac
+  case "$actual" in ''|.*|*.|*..*|*[!0-9.]*) return 1 ;; esac
+  while :; do
+    wc="${wanted%%.*}"
+    ac="${actual%%.*}"
+    [ "$wc" = "$ac" ] || return 1
+    if [ "$wanted" = "$wc" ] || [ "$actual" = "$ac" ]; then
+      if [ "$wanted" = "$wc" ] && [ "$actual" = "$ac" ]; then
+        return 0
+      fi
+      return 1
+    fi
+    wanted="${wanted#*.}"
+    actual="${actual#*.}"
+  done
+}
+
+# CoreSimulator runtime key -> dotted version, e.g.
+# "com.apple.CoreSimulator.SimRuntime.iOS-26-0" -> "26.0". Non-iOS runtime
+# keys and keys with an empty version fail.
+simruntime_version() {
+  case "${1:-}" in
+    *.iOS-*)
+      local v="${1##*.iOS-}"
+      [ -n "$v" ] || return 1
+      printf '%s\n' "$v" | tr '-' '.'
+      ;;
+    *) return 1 ;;
+  esac
+}
+
 # Resolve the UDID of the device the destination names (newest iOS runtime
 # wins). Numeric MAJOR.MINOR comparison so iOS-26-10 ranks above iOS-26-9.
+# When SIMULATOR_OS is set, the lookup is OS-qualified: only a device with
+# the pinned name on that exact runtime satisfies the lookup (exact numeric
+# component match), and there is no silent fallback to another runtime - so
+# the resolved UDID always belongs to the destination xcodebuild will use.
 simulator_udid() {
-  local json runtime udid
+  local json runtime udid runtime_version
   if ! command -v jq >/dev/null 2>&1; then
     echo "::warning::jq not found on runner - cannot resolve simulator UDID for the targeted erase/boot; degrading to xcodebuild-managed boot"
     return 1
@@ -187,6 +229,12 @@ simulator_udid() {
   fi
   json="$BOUNDED_OUTPUT"
   for runtime in $(printf '%s\n' "$json" | jq -r '.devices | keys[]' | grep 'SimRuntime\.iOS' | awk -F'iOS-' '{split($2, a, "-"); printf "%04d.%03d %s\n", a[1] + 0, a[2] + 0, $0}' | sort -rn | awk '{print $2}'); do
+    if [ -n "${SIMULATOR_OS:-}" ]; then
+      if ! runtime_version="$(simruntime_version "$runtime")" \
+         || ! os_version_matches "$SIMULATOR_OS" "$runtime_version"; then
+        continue
+      fi
+    fi
     udid=$(printf '%s\n' "$json" | jq -r --arg rt "$runtime" --arg n "$SIMULATOR_NAME" \
       '.devices[$rt][]? | select(.name == $n) | .udid' | head -n 1)
     if [ -n "$udid" ]; then
