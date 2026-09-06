@@ -54,6 +54,7 @@ Known limits, documented deliberately:
 
 - A runtime rotation that completes AFTER the prompt RPC is already dispatched still targets the old runtime id; delivery then flows through the existing ambiguous-submission recovery rather than pre-send re-addressing.
 - Rebound runtime ids are not written back into catalog rows; the scroll identity and accepted sets carry them until the next catalog refresh confirms the row.
+- An unlabeled catalog row's primary id is treated as its durable identity (the legacy catalog shape exposes the durable ID as `id`). For the rare hybrid skew — a `session_id`-only row that later receives a labeled resume — that manufactured durable turns a legitimate first labeling into a rejection. The reverse choice (durable only when labeled) was considered and declined: it would make preserve-current resume the runtime alias for the common legacy shape, resurfacing issue #134. A self-referential scroll canonical (canonical == selected id) is explicitly NOT durable evidence, so runtime-only conversations keep the establishment path.
 - The live Feishu/Caddy/Tailscale deployment from issue #134 was unavailable; verification is deterministic-harness based.
 
 No commits, pushes, PR creation or release steps are authorized by this task's repository instructions.
