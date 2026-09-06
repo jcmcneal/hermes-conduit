@@ -93,11 +93,11 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNotNil(flow.complete(), "A current successful test authorizes acceptance")
     }
 
-    func testReachabilityFailureKeepsLaterStagesPending() {
+    func testReachabilityFailureKeepsLaterStagesPending() throws {
         var flow = makeFlowAtTestStep()
-        let generation = flow.beginTest()
-        flow.applyTestEvent(.started(.server), generation: generation!)
-        flow.applyTestEvent(.failed(.server, .connectionRefused), generation: generation!)
+        let generation = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: generation)
+        flow.applyTestEvent(.failed(.server, .connectionRefused), generation: generation)
 
         XCTAssertEqual(flow.testState.server, .failed(.connectionRefused))
         XCTAssertEqual(flow.testState.dashboard, .pending)
@@ -108,13 +108,13 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNil(flow.complete())
     }
 
-    func testDashboardFailureKeepsAuthenticationPendingAndServerSuccess() {
+    func testDashboardFailureKeepsAuthenticationPendingAndServerSuccess() throws {
         var flow = makeFlowAtTestStep()
-        let generation = flow.beginTest()
-        flow.applyTestEvent(.started(.server), generation: generation!)
-        flow.applyTestEvent(.succeeded(.server), generation: generation!)
-        flow.applyTestEvent(.started(.dashboard), generation: generation!)
-        flow.applyTestEvent(.failed(.dashboard, .unexpectedServerResponse), generation: generation!)
+        let generation = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: generation)
+        flow.applyTestEvent(.succeeded(.server), generation: generation)
+        flow.applyTestEvent(.started(.dashboard), generation: generation)
+        flow.applyTestEvent(.failed(.dashboard, .unexpectedServerResponse), generation: generation)
 
         XCTAssertEqual(flow.testState.server, .succeeded, "Prior success must remain visible")
         XCTAssertEqual(flow.testState.dashboard, .failed(.unexpectedServerResponse))
@@ -122,13 +122,13 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(flow.testState.failedStage, .dashboard)
     }
 
-    func testAuthenticationFailurePreservesPriorSuccesses() {
+    func testAuthenticationFailurePreservesPriorSuccesses() throws {
         var flow = makeFlowAtTestStep()
-        let generation = flow.beginTest()
+        let generation = try XCTUnwrap(flow.beginTest())
         for event in StagedTestDriver.successEvents.prefix(4) {
-            flow.applyTestEvent(event, generation: generation!)
+            flow.applyTestEvent(event, generation: generation)
         }
-        flow.applyTestEvent(.failed(.authentication, .authenticationRejected), generation: generation!)
+        flow.applyTestEvent(.failed(.authentication, .authenticationRejected), generation: generation)
 
         XCTAssertEqual(flow.testState.server, .succeeded)
         XCTAssertEqual(flow.testState.dashboard, .succeeded)
@@ -137,11 +137,11 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNil(flow.complete())
     }
 
-    func testRetryRestartsCleanAndIgnoresTheOldGeneration() {
+    func testRetryRestartsCleanAndIgnoresTheOldGeneration() throws {
         var flow = makeFlowAtTestStep()
-        let firstGeneration = flow.beginTest()
-        flow.applyTestEvent(.started(.server), generation: firstGeneration!)
-        flow.applyTestEvent(.failed(.server, .timedOut), generation: firstGeneration!)
+        let firstGeneration = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: firstGeneration)
+        flow.applyTestEvent(.failed(.server, .timedOut), generation: firstGeneration)
 
         // Retry: a clean staged rerun with a fresh generation.
         let secondGeneration = flow.beginTest()
@@ -150,7 +150,7 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(flow.testState, ConnectionSetupTestState(), "Retry must reset every stage to untested")
 
         // A late event from the abandoned run is dropped.
-        flow.applyTestEvent(.succeeded(.server), generation: firstGeneration!)
+        flow.applyTestEvent(.succeeded(.server), generation: firstGeneration)
         XCTAssertEqual(flow.testState.server, .pending)
     }
 
@@ -164,22 +164,21 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNil(fresh.beginTest())
     }
 
-    func testBeginTestRejectsConcurrentRuns() {
+    func testBeginTestRejectsConcurrentRuns() throws {
         var flow = makeFlowAtTestStep()
-        let first = flow.beginTest()
-        XCTAssertNotNil(first)
-        flow.applyTestEvent(.started(.server), generation: first!)
+        let first = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: first)
         XCTAssertNil(flow.beginTest(), "Tests never queue: one run at a time")
     }
 
-    func testCancellationResetsRunningStagesAndDropsLateEvents() {
+    func testCancellationResetsRunningStagesAndDropsLateEvents() throws {
         var flow = makeFlowAtTestStep()
-        let generation = flow.beginTest()
-        flow.applyTestEvent(.started(.server), generation: generation!)
+        let generation = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: generation)
 
         flow.cancelTest()
         XCTAssertEqual(flow.testState, ConnectionSetupTestState(), "A cancelled run resets to untested")
-        flow.applyTestEvent(.succeeded(.server), generation: generation!)
+        flow.applyTestEvent(.succeeded(.server), generation: generation)
         XCTAssertEqual(flow.testState.server, .pending, "Late events from the cancelled run are dropped")
 
         // A completed (non-running) state survives cancelTest untouched.
@@ -229,34 +228,33 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNil(flow.complete())
     }
 
-    func testStaleLateFailureCannotOverwriteNewerSuccessfulRun() {
+    func testStaleLateFailureCannotOverwriteNewerSuccessfulRun() throws {
         var flow = makeFlowAtTestStep()
         // Test A begins with the old credentials.
-        let generationA = flow.beginTest()
-        flow.applyTestEvent(.started(.server), generation: generationA!)
+        let generationA = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: generationA)
 
         // The user edits credentials and starts Test B.
         flow.back()
         flow.draft.password = "newer-fixture"
         flow.submitCredentials()
-        let generationB = flow.beginTest()
-        XCTAssertNotNil(generationB)
+        let generationB = try XCTUnwrap(flow.beginTest())
         XCTAssertNotEqual(generationA, generationB)
 
         // Test A finishes late with a rejection — dropped.
-        flow.applyTestEvent(.failed(.authentication, .authenticationRejected), generation: generationA!)
+        flow.applyTestEvent(.failed(.authentication, .authenticationRejected), generation: generationA)
         XCTAssertEqual(flow.testState.failedStage, nil)
 
         // Test B succeeds; the final state remains successful.
         for event in StagedTestDriver.successEvents {
-            flow.applyTestEvent(event, generation: generationB!)
+            flow.applyTestEvent(event, generation: generationB)
         }
         XCTAssertEqual(flow.step, .review)
         XCTAssertTrue(flow.hasCurrentSuccessfulTest)
 
         // Even a later stale event cannot corrupt the finished run.
         flow.back()
-        flow.applyTestEvent(.failed(.server, .hostNotFound), generation: generationA!)
+        flow.applyTestEvent(.failed(.server, .hostNotFound), generation: generationA)
         XCTAssertTrue(flow.hasCurrentSuccessfulTest)
         XCTAssertNil(flow.testState.failedStage)
     }
@@ -312,7 +310,7 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertTrue(interactive.hasCurrentInteractiveAuthOutcome)
     }
 
-    func testUntestedAndFailedConfigurationsCannotUseSettings() {
+    func testUntestedAndFailedConfigurationsCannotUseSettings() throws {
         var untested = makeFlowAtTestStep()
         XCTAssertFalse(untested.canUseSettings)
         XCTAssertFalse(untested.fullyAuthenticated)
@@ -320,9 +318,9 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNil(untested.complete())
 
         var failed = makeFlowAtTestStep()
-        let generation = failed.beginTest()
-        failed.applyTestEvent(.started(.server), generation: generation!)
-        failed.applyTestEvent(.failed(.server, .hostNotFound), generation: generation!)
+        let generation = try XCTUnwrap(failed.beginTest())
+        failed.applyTestEvent(.started(.server), generation: generation)
+        failed.applyTestEvent(.failed(.server, .hostNotFound), generation: generation)
         XCTAssertFalse(failed.canUseSettings)
         XCTAssertNil(failed.complete())
     }
@@ -344,12 +342,12 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNil(flow.complete())
     }
 
-    func testStaleInteractiveCompletionCannotOverwriteNewerNativeSuccess() {
+    func testStaleInteractiveCompletionCannotOverwriteNewerNativeSuccess() throws {
         var flow = makeFlowAtTestStep()
         // Run A starts and reaches the authentication stage.
-        let generationA = flow.beginTest()
+        let generationA = try XCTUnwrap(flow.beginTest())
         for event in ConnectionSetupTestTests.interactiveAuthEvents.prefix(5) {
-            flow.applyTestEvent(event, generation: generationA!)
+            flow.applyTestEvent(event, generation: generationA)
         }
         // The user edits the server address; Run B tests natively and wins.
         flow.back()
@@ -357,10 +355,10 @@ final class ConnectionSetupTestTests: XCTestCase {
         flow.draft.lan.host = "192.168.1.29"
         flow.submitDetails()
         flow.submitCredentials()
-        let generationB = flow.beginTest()
+        let generationB = try XCTUnwrap(flow.beginTest())
         XCTAssertNotEqual(generationA, generationB)
         for event in StagedTestDriver.successEvents {
-            flow.applyTestEvent(event, generation: generationB!)
+            flow.applyTestEvent(event, generation: generationB)
         }
         XCTAssertEqual(flow.step, .review)
         XCTAssertTrue(flow.hasCurrentSuccessfulTest)
@@ -368,7 +366,7 @@ final class ConnectionSetupTestTests: XCTestCase {
         // Run A's interactive completion arrives late: dropped.
         flow.back()
         let applied = flow.applyTestEvent(
-            .requiresInteractiveSignIn(.authentication), generation: generationA!
+            .requiresInteractiveSignIn(.authentication), generation: generationA
         )
         XCTAssertFalse(applied, "A stale interactive completion must never apply")
         XCTAssertTrue(flow.hasCurrentSuccessfulTest, "Run B stays authoritative")
@@ -376,12 +374,12 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertTrue(flow.canUseSettings)
     }
 
-    func testStaleNativeSuccessCannotOverwriteNewerInteractiveOutcome() {
+    func testStaleNativeSuccessCannotOverwriteNewerInteractiveOutcome() throws {
         var flow = makeFlowAtTestStep()
         // Run A (native) gets partway, then the user edits and Run B ends in
         // the interactive outcome.
-        let generationA = flow.beginTest()
-        flow.applyTestEvent(.started(.server), generation: generationA!)
+        let generationA = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: generationA)
         flow.back()
         flow.back()
         flow.draft.lan.host = "192.168.1.29"
@@ -395,7 +393,7 @@ final class ConnectionSetupTestTests: XCTestCase {
         // outcome stays authoritative.
         flow.back()
         for event in StagedTestDriver.successEvents {
-            let applied = flow.applyTestEvent(event, generation: generationA!)
+            let applied = flow.applyTestEvent(event, generation: generationA)
             XCTAssertFalse(applied)
         }
         XCTAssertTrue(flow.hasCurrentInteractiveAuthOutcome)
@@ -418,10 +416,10 @@ final class ConnectionSetupTestTests: XCTestCase {
 
     // MARK: - Recovery routing (spec 11/12/17)
 
-    func testEditAfterFailedTestPopsToConnectionDetails() {
+    func testEditAfterFailedTestPopsToConnectionDetails() throws {
         var flow = makeFlowAtTestStep()
-        let generation = flow.beginTest()
-        flow.applyTestEvent(.failed(.server, .hostNotFound), generation: generation!)
+        let generation = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.failed(.server, .hostNotFound), generation: generation)
         let pathCount = flow.path.count
 
         flow.editAfterFailedTest(.connectionDetails)
@@ -429,10 +427,10 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(flow.path.count, pathCount - 2, "The path truncates back to details")
     }
 
-    func testEditAfterFailedTestInsertsDetailsOnTheShortcutRoute() {
+    func testEditAfterFailedTestInsertsDetailsOnTheShortcutRoute() throws {
         var flow = makeAuthRecoveryFlowAtTestStep()
-        let generation = flow.beginTest()
-        flow.applyTestEvent(.failed(.dashboard, .dashboardUnavailable), generation: generation!)
+        let generation = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.failed(.dashboard, .dashboardUnavailable), generation: generation)
 
         flow.editAfterFailedTest(.connectionDetails)
         XCTAssertEqual(flow.step, .connectionDetails)
@@ -440,10 +438,10 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(flow.step, .loginCredentials, "The inserted details step walks back to credentials")
     }
 
-    func testEditAfterFailedTestTargetsCredentials() {
+    func testEditAfterFailedTestTargetsCredentials() throws {
         var flow = makeFlowAtTestStep()
-        let generation = flow.beginTest()
-        flow.applyTestEvent(.failed(.authentication, .authenticationRejected), generation: generation!)
+        let generation = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.failed(.authentication, .authenticationRejected), generation: generation)
 
         flow.editAfterFailedTest(.loginCredentials)
         XCTAssertEqual(flow.step, .loginCredentials)
