@@ -921,7 +921,7 @@ final class HermesClient: ObservableObject {
         // The durable stored key is parsed separately from the runtime id and
         // stays nil when the gateway omits it (legacy gateways). Callers must
         // not treat the runtime `session_id` as durable identity evidence.
-        let storedId = ["stored_session_id", "session_key"]
+        let storedId = ["stored_session_id", "storedSessionId", "session_key"]
             .compactMap { object[$0]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
         let messages = MessageNormalizer.normalizeMessages(

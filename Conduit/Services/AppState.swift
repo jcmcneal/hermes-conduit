@@ -886,6 +886,12 @@ final class AppState: ObservableObject {
         var content: String
     }
     private var reconciliationToken = UUID()
+    /// Set by the resume admission gate when it rejects a contradictory or
+    /// foreign-owned identity. Automatic-return recovery treats ordinary
+    /// resume failures as retryable; a rejected identity is deterministic,
+    /// so reconnect scheduling skips it instead of looping on the same
+    /// contradiction. Main-actor state, valid for the current reconcile only.
+    private var reconciliationWasIdentityRejected = false
     private var reconciliation: Reconciliation?
     private var activeClientEpoch = UUID()
     private var activeAssistantMessageId: String?
@@ -2759,18 +2765,28 @@ final class AppState: ObservableObject {
             if let target {
                 // A freshly selected catalog row positively establishes the
                 // target's identity: the row's ids are the accepted set, and
-                // its stored id (when labeled) is the durable one.
+                // its stored id (when labeled) is the durable one. For a
+                // preserve-current hit, keep the PRE-captured aliases too —
+                // the refreshed row can keep the conversation while dropping
+                // a runtime alias, and in-flight events for that alias must
+                // stay associated with this reconciliation.
+                let targetIDs = Set([target.id] + target.alternateIds)
+                var acceptedTargetIDs = targetIDs
+                if let preservedIdentity,
+                   !targetIDs.isDisjoint(with: preservedIdentity.acceptedSessionIDs) {
+                    acceptedTargetIDs.formUnion(preservedIdentity.acceptedSessionIDs)
+                }
                 let targetIdentity = ConversationIdentity(
                     profile: profile,
                     durableSessionID: target.storedSessionId ?? target.id,
                     runtimeSessionID: target.storedSessionId != nil ? target.id : nil,
-                    acceptedSessionIDs: Set([target.id] + target.alternateIds)
+                    acceptedSessionIDs: acceptedTargetIDs
                 )
                 let succeeded = await reconcile(
                     sessionId: target.id,
                     using: client,
                     token: token,
-                    acceptedSessionIDs: Set([target.id] + target.alternateIds),
+                    acceptedSessionIDs: acceptedTargetIDs,
                     conversationIdentity: targetIdentity,
                     automaticWorkToken: automaticWorkToken,
                     automaticSyncOperationID: automaticOperationID,
@@ -2779,6 +2795,7 @@ final class AppState: ObservableObject {
                 )
                 if !succeeded,
                    purpose == .automaticReturn,
+                   !reconciliationWasIdentityRejected,
                    automaticChatResumeWorkIsCurrent(
                     automaticWorkToken,
                     syncOperationID: automaticOperationID
@@ -3061,8 +3078,11 @@ final class AppState: ObservableObject {
         )
         // Any previously held durable anchors belong to a different reconcile
         // transaction; they are re-adopted below only from a transcript this
-        // reconcile actually validated and accepted.
+        // reconcile actually validated and accepted. A rejected identity
+        // restores them — the rejection must not consume ordering evidence.
+        let savedDurablePersistedRowIDs = durablePersistedRowIDs
         durablePersistedRowIDs = []
+        reconciliationWasIdentityRejected = false
         refreshActiveChatScrollSessionIdentity(isReconciling: true)
         turnState = .synchronizing
         let profile = activeProfile
@@ -3189,6 +3209,10 @@ final class AppState: ObservableObject {
                 sessionCatalogLog.fault(
                     "Rejected contradictory resume: \(String(describing: rejection), privacy: .public); requested=\(sessionId, privacy: .public), returned=\(result.sessionId, privacy: .public)"
                 )
+                // Restore the ordering evidence the reconcile entry cleared;
+                // nothing user-visible may change on rejection.
+                durablePersistedRowIDs = savedDurablePersistedRowIDs
+                reconciliationWasIdentityRejected = true
                 // Unstick the synchronizing wait without clobbering a live
                 // running turn; the transcript and identity above are left
                 // exactly as they were.
@@ -3291,6 +3315,7 @@ final class AppState: ObservableObject {
                 )
                 presentationResult = SessionResumeResult(
                     sessionId: result.sessionId,
+                    storedSessionId: result.storedSessionId,
                     messages: grafted.messages,
                     snapshot: result.snapshot
                 )
@@ -3389,7 +3414,7 @@ final class AppState: ObservableObject {
                     acceptedSessionIDs = boundary.acceptedSessionIDs
                     if !acceptedSessionIDs.contains(result.sessionId) {
                         sessionCatalogLog.debug(
-                            "Skipping buffered delta dedup because resumed session \(result.sessionId, privacy: .public) is not a catalog-confirmed alias of the reconciliation boundary (boundary=\(boundarySessionID, privacy: .public))"
+                            "Skipping buffered delta dedup because resumed session \(result.sessionId, privacy: .public) is not a boundary-confirmed alias (boundary=\(boundarySessionID, privacy: .public))"
                         )
                     }
                 } else {
@@ -6163,6 +6188,12 @@ final class AppState: ObservableObject {
             // Not in the catalog anymore, but the scroll identity still holds
             // positively confirmed aliases for it (mid-refresh windows).
             accepted.formUnion(activeChatScrollSessionIdentity.equivalentSessionIDs)
+            // A canonical that DIFFERS from the selected id is positive
+            // durable evidence (the row resolved the alias). A canonical that
+            // EQUALS the selected id is self-referential (runtime-only
+            // conversation) — treating it as durable would turn the first
+            // labeled resume into a false contradiction, so leave durable
+            // unset and let the response establish it.
             if let canonical = activeChatScrollSessionIdentity.canonicalSessionID,
                canonical != selectedID {
                 durableSessionID = canonical

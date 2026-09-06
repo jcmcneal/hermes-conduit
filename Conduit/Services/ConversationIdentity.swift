@@ -3,6 +3,11 @@ import Foundation
 /// One conversation's identity inside a profile, separating the two kinds of
 /// session identifier the app handles.
 ///
+/// - `profile` is capture metadata for the owning workspace. `admit` does not
+///   compare it: AppState's reconciliation guards (`profile == activeProfile`
+///   at every resume await boundary) enforce profile currency before the gate
+///   runs. Profile comparison styles differ across subsystems, so the fence
+///   stays where it is already enforced.
 /// - `durableSessionID` is the stable UI/persistence identity: the catalog
 ///   row's stored id, or the id the resume store persisted. It is present
 ///   only when positively established; a brand-new runtime-only conversation
@@ -102,14 +107,23 @@ enum ConversationIdentityGate {
             return .success(.knownAlias)
         }
         // 3. Foreign ownership: the returned runtime id positively belongs
-        //    to a different catalog conversation.
-        if let owner = catalog.first(where: {
+        //    to a different catalog conversation. Check EVERY matching row —
+        //    the first match must not decide when rows share a runtime id.
+        //    A row's nil stored id is "unknown", never "equal" to the
+        //    selected conversation's (possibly also absent) durable id.
+        let ownerRows = catalog.filter {
             $0.id == claim.runtimeSessionID || $0.alternateIds.contains(claim.runtimeSessionID)
-        }) {
-            if selected.acceptedSessionIDs.contains(owner.id)
-                || owner.storedSessionId == selected.durableSessionID {
+        }
+        for owner in ownerRows {
+            let ownerIsSelected = selected.acceptedSessionIDs.contains(owner.id)
+            let ownerStoredMatches = owner.storedSessionId.map { stored in
+                stored == selected.durableSessionID
+            } ?? false
+            if ownerIsSelected || ownerStoredMatches {
                 return .success(.knownAlias)
             }
+        }
+        if let owner = ownerRows.first {
             return .failure(.foreignRuntimeOwnership(
                 returned: claim.runtimeSessionID,
                 ownerSessionID: owner.id

@@ -53,10 +53,10 @@ enum ChatResumeSessionResolver {
             // Catalog absence of an ESTABLISHED current identity is not
             // navigation authority: the caller retains the request-scoped
             // identity and can resume it directly. With no current identity
-            // there is nothing to preserve, so the historical newest-chat
-            // selection applies unchanged (and an empty catalog still falls
-            // through to session.create).
-            if currentSessionID != nil {
+            // (nil or empty) there is nothing to preserve, so the historical
+            // newest-chat selection applies unchanged (and an empty catalog
+            // still falls through to session.create).
+            if let currentSessionID, !currentSessionID.isEmpty {
                 return nil
             }
         }
