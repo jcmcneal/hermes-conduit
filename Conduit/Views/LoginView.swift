@@ -108,7 +108,12 @@ struct LoginView: View {
         .sheet(item: $connectionSetupDestination) { destination in
             ConnectionSetupView(
                 initialDestination: destination,
-                initialDraft: ConnectionSetupDraft(existingServerURL: serverUrl, username: username, password: password)
+                initialDraft: ConnectionSetupDraft(existingServerURL: serverUrl, username: username, password: password),
+                // The probe may reuse this same-origin service token; the
+                // wizard re-verifies the origin itself before sending it and
+                // never displays, edits, or persists it.
+                initialCloudflareAccess: configuredCloudflareAccess,
+                initialCloudflareOriginURL: serverUrl
             ) { result in
                 // The tested handoff mapping: clears the in-memory Cloudflare
                 // token BEFORE the new address lands whenever the origin

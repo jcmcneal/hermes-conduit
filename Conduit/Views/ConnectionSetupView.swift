@@ -14,26 +14,50 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct ConnectionSetupView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var flow: ConnectionSetupFlow
     @State private var showNotSureGuidance = false
+    /// The in-flight staged-test task. Cancelled on any exit from the test
+    /// screen and on dismissal; late probe events are additionally dropped
+    /// by the flow's generation guard, so correctness never relies on view
+    /// destruction.
+    @State private var testTask: Task<Void, Never>?
     private let onComplete: (ConnectionSetupResult) -> Void
+    private let prober: any ConnectionSetupTesting
 
-    init(initialDestination: ConnectionHelpDestination,
-         initialDraft: ConnectionSetupDraft = ConnectionSetupDraft(),
-         onComplete: @escaping (ConnectionSetupResult) -> Void) {
-        _flow = State(initialValue: ConnectionSetupFlow(entry: initialDestination, draft: initialDraft))
+    init(
+        initialDestination: ConnectionHelpDestination,
+        initialDraft: ConnectionSetupDraft = ConnectionSetupDraft(),
+        initialCloudflareAccess: CloudflareAccessCredentials? = nil,
+        initialCloudflareOriginURL: String = "",
+        onComplete: @escaping (ConnectionSetupResult) -> Void
+    ) {
+        _flow = State(initialValue: ConnectionSetupFlow(
+            entry: initialDestination,
+            draft: initialDraft,
+            inheritedCloudflareAccess: initialCloudflareAccess,
+            inheritedCloudflareOriginURL: initialCloudflareOriginURL
+        ))
         self.onComplete = onComplete
+        self.prober = Self.makeProber()
+    }
+
+    private static func makeProber() -> any ConnectionSetupTesting {
+        #if DEBUG
+        if let stub = ConnectionSetupTestProbeStub.fromLaunchArguments() { return stub }
+        #endif
+        return ConnectionSetupProbe()
     }
 
     var body: some View {
         NavigationStack {
             Group {
                 switch flow.step {
-                case .connectionDetails, .loginCredentials, .review:
-                    ConnectionSetupForm(flow: $flow) { result in
+                case .connectionDetails, .loginCredentials, .connectionTest, .review:
+                    ConnectionSetupForm(flow: $flow, onStartTest: { startTestRun() }) { result in
                         onComplete(result)
                         dismiss()
                     }
@@ -46,6 +70,13 @@ struct ConnectionSetupView: View {
                 }
             }
             .accessibilityIdentifier("connection-setup.content")
+            .onChange(of: flow.step) { _, newStep in
+                // Leaving the test screen for any editable step cancels the
+                // probe; a success advance to Review does not.
+                guard newStep != .connectionTest, newStep != .review else { return }
+                stopTestRun()
+            }
+            .onDisappear { stopTestRun() }
             .navigationTitle("Connection Setup")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -67,6 +98,41 @@ struct ConnectionSetupView: View {
         }
     }
 
+    // MARK: - Staged connection test
+
+    private func startTestRun() {
+        guard let run = try? flow.draft.result(),
+              let generation = flow.beginTest() else { return }
+        let access = flow.cloudflareAccessForDraft()
+        let prober = prober
+        let flow = $flow
+        testTask?.cancel()
+        testTask = Task { @MainActor in
+            await prober.runTest(result: run, cloudflareAccess: access, onEvent: { event in
+                flow.wrappedValue.applyTestEvent(event, generation: generation)
+                // One completion announcement per run; individual stage
+                // transitions stay quiet.
+                switch event {
+                case .succeeded(.authentication):
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ConnectionSetupTestState.readyMessage
+                    )
+                case .failed(_, let failure):
+                    UIAccessibility.post(notification: .announcement, argument: failure.userTitle)
+                default:
+                    break
+                }
+            })
+        }
+    }
+
+    private func stopTestRun() {
+        testTask?.cancel()
+        testTask = nil
+        flow.cancelTest()
+    }
+
     // MARK: - Step routing
 
     @ViewBuilder
@@ -78,7 +144,7 @@ struct ConnectionSetupView: View {
         case .lan: lanBranch
         case .tailscale: tailscaleBranch
         case .reverseProxy: reverseProxyBranch
-        case .connectionDetails, .loginCredentials, .review: EmptyView()
+        case .connectionDetails, .loginCredentials, .connectionTest, .review: EmptyView()
         case .tlsTroubleshooting: troubleshootingStep(.tls)
         case .cloudflareTroubleshooting: troubleshootingStep(.cloudflare)
         }
