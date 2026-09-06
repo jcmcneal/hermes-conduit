@@ -129,9 +129,14 @@ final class ConnectionSetupTestConnectionUITests: XCTestCase {
         )
         let authRow = row(app, Identity.stageAuthentication)
         XCTAssertTrue(authRow.exists)
-        XCTAssertTrue(authRow.label.contains("Browser sign-in required"), "Got: \(authRow.label)")
+        // Stage rows expose their combined accessibility label (objective
+        // name + lowercase state word), so match case-insensitively.
+        XCTAssertTrue(
+            authRow.label.lowercased().contains("browser sign-in required"),
+            "Got: \(authRow.label)"
+        )
         XCTAssertFalse(
-            authRow.label.contains("Login successful"),
+            authRow.label.lowercased().contains("login successful"),
             "Interactive auth must never claim the user signed in"
         )
 
@@ -140,7 +145,7 @@ final class ConnectionSetupTestConnectionUITests: XCTestCase {
         tapVisible(app.buttons[Identity.back], in: app)
         XCTAssertTrue(app.buttons[Identity.testContinue].waitForExistence(timeout: 5))
         XCTAssertTrue(
-            row(app, Identity.stageAuthentication).label.contains("Browser sign-in required")
+            row(app, Identity.stageAuthentication).label.lowercased().contains("browser sign-in required")
         )
         tapVisible(app.buttons[Identity.testContinue], in: app)
         XCTAssertTrue(app.staticTexts["setup.test.interactive-ready"].waitForExistence(timeout: 5))
