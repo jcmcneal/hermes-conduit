@@ -67,4 +67,28 @@ final class LoginCloudflareHandoffTests: XCTestCase {
         XCTAssertEqual(LoginCloudflareHandoff.state(from: "", to: "https://foo.example", keeping: current), cleared)
         XCTAssertEqual(LoginCloudflareHandoff.state(from: "   ", to: "https://foo.example", keeping: current), cleared)
     }
+
+    // MARK: - Full field mapping
+
+    func testApplyMapsFieldsAndClearsCloudflareOnOriginChange() {
+        let handoff = LoginCloudflareHandoff.apply(
+            ConnectionSetupResult(serverURL: "https://bar.example/hermes", username: "eric", password: "fixture"),
+            to: "https://foo.example/hermes",
+            keeping: current
+        )
+        XCTAssertEqual(handoff.serverURL, "https://bar.example/hermes")
+        XCTAssertEqual(handoff.username, "eric")
+        XCTAssertEqual(handoff.password, "fixture")
+        XCTAssertEqual(handoff.cloudflare, cleared, "A cross-origin handoff must not carry the in-memory token")
+    }
+
+    func testApplyKeepsCloudflareOnSameOrigin() {
+        let handoff = LoginCloudflareHandoff.apply(
+            ConnectionSetupResult(serverURL: "https://foo.example/other-path", username: "eric", password: "fixture"),
+            to: "https://foo.example/hermes",
+            keeping: current
+        )
+        XCTAssertEqual(handoff.serverURL, "https://foo.example/other-path")
+        XCTAssertEqual(handoff.cloudflare, current, "A path-only change is same-origin; the retained token stays")
+    }
 }

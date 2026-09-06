@@ -259,30 +259,38 @@ build_destination() {
 # another device.
 wait_for_destination_device() {
   local budget="${DESTINATION_SETTLE_TIMEOUT_S:-180}"
-  local waited=0 udid
+  # A non-numeric override must not defeat the deadline comparison.
+  case "$budget" in ''|*[!0-9]*) budget=180 ;; esac
+  # Wall-clock deadline, not a sleep counter: each simulator_udid probe can
+  # itself block up to its own 60s bound on a wedged CoreSimulatorService,
+  # and the budget must cap total wall time, not just idle time.
+  local started=$(( $(date +%s) ))
+  local deadline=$(( started + budget ))
+  local udid now waited
   if ! command -v jq >/dev/null 2>&1; then
     echo "::warning::jq not found on runner - skipping destination pre-verification"
     return 0
   fi
   while :; do
     if udid=$(simulator_udid) && [ -n "$udid" ]; then
+      waited=$(( $(date +%s) - started ))
       if [ "$waited" -gt 0 ]; then
         echo "destination device '$SIMULATOR_NAME' became visible after ${waited}s"
       fi
       return 0
     fi
-    if [ "$waited" -ge "$budget" ]; then
-      echo "::error::destination device '$SIMULATOR_NAME' not available after ${waited}s - destination resolution would fail"
-      if bounded_run 60 xcrun simctl list devices available; then
-        printf '%s\n' "$BOUNDED_OUTPUT"
-      fi
-      if bounded_run 60 xcrun simctl list runtimes available; then
-        printf '%s\n' "$BOUNDED_OUTPUT"
-      fi
+    now=$(date +%s)
+    if [ "$now" -ge "$deadline" ]; then
+      echo "::error::destination device '$SIMULATOR_NAME' not available within ${budget}s - destination resolution would fail"
+      # Print the inventory even when the bounded probe itself timed out: the
+      # partial output is exactly the wedged-state evidence needed here.
+      bounded_run 60 xcrun simctl list devices available || true
+      printf '%s\n' "$BOUNDED_OUTPUT"
+      bounded_run 60 xcrun simctl list runtimes available || true
+      printf '%s\n' "$BOUNDED_OUTPUT"
       return 1
     fi
+    echo "... waiting for simulator device '$SIMULATOR_NAME' ($(( deadline - now ))s/${budget}s left)"
     sleep 10
-    waited=$(( waited + 10 ))
-    echo "... waiting for simulator device '$SIMULATOR_NAME' (${waited}s/${budget}s)"
   done
 }

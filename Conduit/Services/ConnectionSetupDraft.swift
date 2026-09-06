@@ -168,7 +168,10 @@ enum ConnectionSetupAddressBuilder {
 
     private static func validateHost(_ host: String) throws {
         // This is syntax checking only; no DNS resolution or trust inference.
-        // Bracketed IPv6 literals are accepted by Foundation's URL parser.
+        // Note: bracketed IPv6 literals are NOT accepted here — Foundation's
+        // URL parser strips the brackets from `url.host`, so the equality
+        // probe below can never match a bracketed literal and such input
+        // falls through to label validation, which rejects the brackets.
         if host.hasPrefix("["), host.hasSuffix("]"),
            let url = URL(string: "http://\(host)"), url.host == host {
             return

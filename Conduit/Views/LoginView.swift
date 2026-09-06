@@ -110,24 +110,25 @@ struct LoginView: View {
                 initialDestination: destination,
                 initialDraft: ConnectionSetupDraft(existingServerURL: serverUrl, username: username, password: password)
             ) { result in
-                // Clear the in-memory Cloudflare token BEFORE the new address
-                // lands whenever the origin changes, so a retained token can
-                // never be applied against a dashboard it was not entered for.
-                let cloudflare = LoginCloudflareHandoff.state(
-                    from: serverUrl,
-                    to: result.serverURL,
+                // The tested handoff mapping: clears the in-memory Cloudflare
+                // token BEFORE the new address lands whenever the origin
+                // changes, so a retained token can never be applied against
+                // a dashboard it was not entered for.
+                let handoff = LoginCloudflareHandoff.apply(
+                    result,
+                    to: serverUrl,
                     keeping: LoginCloudflareState(
                         isEnabled: cloudflareEnabled,
                         clientID: cloudflareClientID,
                         clientSecret: cloudflareClientSecret
                     )
                 )
-                cloudflareEnabled = cloudflare.isEnabled
-                cloudflareClientID = cloudflare.clientID
-                cloudflareClientSecret = cloudflare.clientSecret
-                serverUrl = result.serverURL
-                username = result.username
-                password = result.password
+                cloudflareEnabled = handoff.cloudflare.isEnabled
+                cloudflareClientID = handoff.cloudflare.clientID
+                cloudflareClientSecret = handoff.cloudflare.clientSecret
+                serverUrl = handoff.serverURL
+                username = handoff.username
+                password = handoff.password
                 failure = nil
                 focusedField = nil
             }
@@ -548,6 +549,20 @@ enum LoginCloudflareHandoff {
         ConnectionURLPolicy.originMatches(
             URL(string: oldServerURL.trimmingCharacters(in: .whitespacesAndNewlines)),
             expected: URL(string: newServerURL.trimmingCharacters(in: .whitespacesAndNewlines))
+        )
+    }
+
+    /// The complete login-field mapping for a wizard handoff, so the view's
+    /// completion closure stays a single tested call and a refactor cannot
+    /// silently drop the origin check while still assigning the new address.
+    static func apply(_ result: ConnectionSetupResult, to oldServerURL: String,
+                      keeping cloudflare: LoginCloudflareState)
+        -> (serverURL: String, username: String, password: String, cloudflare: LoginCloudflareState) {
+        (
+            result.serverURL,
+            result.username,
+            result.password,
+            state(from: oldServerURL, to: result.serverURL, keeping: cloudflare)
         )
     }
 }

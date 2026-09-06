@@ -36,10 +36,16 @@ final class ConnectionSetupUITests: XCTestCase {
         let port = app.textFields["setup.port"]
         tapVisible(port, in: app)
         port.typeText("0")
+        // Dismiss the keyboard before tapping Continue: with the number pad
+        // up, the Continue button can sit behind the keyboard window yet
+        // still report hittable, so a synthesized tap hits the keyboard and
+        // the button never fires.
+        dismissKeyboard(app)
         tapVisible(app.buttons["setup.next"], in: app)
         XCTAssertTrue(app.staticTexts["Enter a port between 1 and 65535."].waitForExistence(timeout: 3))
         tapVisible(port, in: app)
         port.typeText(XCUIKeyboardKey.delete.rawValue + "9119")
+        dismissKeyboard(app)
         tapVisible(app.buttons["setup.next"], in: app)
         let username = app.textFields["setup.username"]
         tapVisible(username, in: app)
@@ -99,6 +105,14 @@ final class ConnectionSetupUITests: XCTestCase {
         }
         XCTAssertTrue(element.isHittable)
         element.tap()
+    }
+
+    /// Tap the keyboard toolbar's Done control when present, so a Continue
+    /// button that would sit behind the keyboard window is tapped for real.
+    private func dismissKeyboard(_ app: XCUIApplication) {
+        let done = app.buttons["setup.keyboard-done"]
+        guard done.waitForExistence(timeout: 2) else { return }
+        done.tap()
     }
 
     private func openSetup(_ app: XCUIApplication) {

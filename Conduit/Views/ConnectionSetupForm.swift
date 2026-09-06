@@ -61,7 +61,7 @@ struct ConnectionSetupForm: View {
                 }.id(Field.url)
             } else {
                 Text(flow.accessMethod == .lan
-                     ? "Enter the dashboard's local IP address and port Hermes gave you. You don’t need to type http://."
+                     ? "Enter the local IP address and port Hermes gave you. You don’t need to type http://."
                      : "Enter the Tailscale hostname or address Hermes gave you. Tailscale Serve hostnames use HTTPS; leave the port blank unless Hermes supplied one.")
                     .foregroundStyle(.secondary)
                 labeled(flow.accessMethod == .lan ? "Private LAN IP address" : "Tailscale hostname / address") {
@@ -93,6 +93,7 @@ struct ConnectionSetupForm: View {
                             Text("HTTPS").tag(Optional(ConnectionSetupScheme.https))
                         }
                         .accessibilityIdentifier("setup.scheme")
+                        .accessibilityLabel("Connection scheme")
                     }
                 }
             }
