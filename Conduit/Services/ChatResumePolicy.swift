@@ -49,6 +49,12 @@ enum ChatResumeSessionResolver {
            }) {
             return matched
         }
+        if purpose == .preserveCurrent {
+            // Recovery must never reinterpret a missing current row as a
+            // request for the newest conversation. The caller retains the
+            // request-scoped identity and can resume it directly.
+            return nil
+        }
         return scoped.first(where: { $0.source == .chat })
     }
 }

@@ -2668,6 +2668,12 @@ final class AppState: ObservableObject {
         ) else { return .superseded }
         let profile = activeProfile
         let retainedActiveTurn = activeTurnCatalogSession()
+        // Capture the selected conversation before replacing the published
+        // catalog. A preserve-current recovery is allowed to outlive a
+        // transient catalog omission; it must not fall back to another chat.
+        let preservedSessionID = purpose == .preserveCurrent
+            ? (canonicalSessionID(for: activeSessionId) ?? activeSessionId)
+            : nil
         turnState = .synchronizing
 
         do {
@@ -2757,6 +2763,18 @@ final class AppState: ObservableObject {
                 return succeeded
                     ? .completed
                     : chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
+            } else if purpose == .preserveCurrent, let preservedSessionID {
+                let succeeded = await reconcile(
+                    sessionId: preservedSessionID,
+                    using: client,
+                    token: token,
+                    acceptedSessionIDs: knownSessionIDs(for: preservedSessionID),
+                    automaticWorkToken: automaticWorkToken,
+                    automaticSyncOperationID: automaticOperationID,
+                    requiredViewportTransitionGeneration: requiredViewportTransitionGeneration,
+                    historySourceUnavailable: historySourceUnavailable
+                )
+                return succeeded ? .completed : chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
             } else {
                 await createAndReconcileSession(
                     using: client,

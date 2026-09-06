@@ -8,6 +8,51 @@ import XCTest
 /// stale local idle state is corrected before the next submission is routed.
 @MainActor
 final class AppStateForegroundLifecycleTests: XCTestCase {
+    func testFastSecondSendKeepsStoredConversationWhenRefreshedCatalogDropsRuntimeAlias() async {
+        var resumes: [String] = []
+        var sends: [String] = []
+        let rows: [[String: Any]] = [
+            ["id": "100", "role": "user", "content": "Earlier", "timestamp": "1"],
+            ["id": "101", "role": "assistant", "content": "Earlier answer", "timestamp": "2"]
+        ]
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, id, _ in
+                resumes.append(id)
+                return SessionResumeResult(sessionId: id == "stored-a" ? "runtime-a" : id,
+                    messages: [], snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            persistedTranscript: { _, _ in .payload([
+                "session_id": "stored-a", "messages": rows,
+                "pagination": ["limit": 120, "offset": 0, "order": "latest", "returned": 2]
+            ]) },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted },
+            verifyTransportHealth: { _ in }
+        ))
+        let box = await installConnectedClient(into: harness)
+        harness.appState.sessions = [session("stored-a", alternateIDs: ["runtime-a"])]
+        let opened = await harness.appState.openSession("stored-a")
+        XCTAssertTrue(opened)
+        let first = await harness.appState.submitComposer(text: "First")
+        XCTAssertTrue(first)
+        harness.appState.handleStreamEvent(.sessionBusy(sessionId: "runtime-a", busy: true))
+        harness.appState.handleStreamEvent(.messageComplete(sessionId: "runtime-a", messageId: nil,
+            content: "First answer", reasoning: nil))
+        harness.appState.handleStreamEvent(.sessionBusy(sessionId: "runtime-a", busy: false))
+        XCTAssertEqual(harness.appState.turnState, .idle)
+
+        let second = await harness.appState.submitComposer(text: "Second")
+
+        XCTAssertTrue(second)
+        XCTAssertEqual(resumes, ["stored-a", "stored-a"], "Lagging persistence must recover the selected conversation")
+        XCTAssertEqual(sends, ["runtime-a", "runtime-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+        XCTAssertEqual(harness.appState.messages.last?.content, "Second")
+        box.client.disconnect()
+    }
+
 
     // MARK: - A. Healthy socket + active turn
 

@@ -4,6 +4,51 @@ import XCTest
 
 @MainActor
 final class AppStateChatResumeTests: XCTestCase {
+    func testPreserveCurrentUsesEstablishedStoredIdentityWhenCatalogLosesRuntimeAlias() async {
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: "runtime-a", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "runtime-a"
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-a")
+    }
+
+    func testPreserveCurrentResumesSelectedConversationWhenCatalogIsEmpty() async {
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: id, messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.activeSessionId = "selected"
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["selected"])
+        XCTAssertEqual(harness.appState.activeSessionId, "selected")
+    }
+
     func testSupersededBranchWaitingForTitleCannotMutateNewerSession() async {
         let titleGate = ControlledSuspension()
         let newerMessages = [
