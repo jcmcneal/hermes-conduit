@@ -128,6 +128,10 @@ final class AppStateChatResumeTests: XCTestCase {
         )
         openGate.resume()
         await sync.value
+        // Pump the main actor so the replayed delta's scheduled streaming
+        // publish lands before the assertion.
+        harness.appState.showSidebar = true
+        harness.appState.showSidebar = false
 
         XCTAssertEqual(
             harness.appState.streamingText, "Live recovery text",
