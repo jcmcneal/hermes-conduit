@@ -261,6 +261,161 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNil(flow.testState.failedStage)
     }
 
+    // MARK: - Interactive sign-in outcome (flow model)
+
+    /// The staged interactive-auth run: server and dashboard succeed and
+    /// authentication stops at "browser sign-in required".
+    static let interactiveAuthEvents: [ConnectionSetupTestEvent] = [
+        .started(.server), .succeeded(.server),
+        .started(.dashboard), .succeeded(.dashboard),
+        .started(.authentication),
+        .requiresInteractiveSignIn(.authentication)
+    ]
+
+    @discardableResult
+    private static func runInteractiveTest(on flow: inout ConnectionSetupFlow) -> Int? {
+        guard let generation = flow.beginTest() else { return nil }
+        for event in interactiveAuthEvents {
+            flow.applyTestEvent(event, generation: generation)
+        }
+        return generation
+    }
+
+    func testInteractiveOutcomeAdvancesToReviewAsDistinctTerminalState() {
+        var flow = makeFlowAtTestStep()
+        ConnectionSetupTestTests.runInteractiveTest(on: &flow)
+
+        XCTAssertEqual(flow.step, .review, "The supported interactive outcome advances to Review")
+        XCTAssertEqual(flow.testState.server, .succeeded)
+        XCTAssertEqual(flow.testState.dashboard, .succeeded)
+        XCTAssertEqual(flow.testState.authentication, .requiresInteractiveSignIn)
+        XCTAssertNil(flow.testState.failedStage, "Interactive auth is not a failure")
+        XCTAssertFalse(flow.testState.allSucceeded, "Authentication is never marked succeeded")
+        XCTAssertFalse(flow.hasCurrentSuccessfulTest)
+        XCTAssertFalse(flow.fullyAuthenticated, "The user has not authenticated yet")
+        XCTAssertTrue(flow.hasCurrentInteractiveAuthOutcome)
+        XCTAssertTrue(flow.canUseSettings, "The validated configuration may still be handed off")
+        XCTAssertNotNil(flow.complete())
+    }
+
+    func testNativeSuccessIsFullyAuthenticatedWhileInteractiveIsNot() {
+        var native = makeFlowAtTestStep()
+        StagedTestDriver.runSuccessfulTest(on: &native)
+        XCTAssertTrue(native.canUseSettings)
+        XCTAssertTrue(native.fullyAuthenticated)
+        XCTAssertFalse(native.hasCurrentInteractiveAuthOutcome)
+
+        var interactive = makeFlowAtTestStep()
+        ConnectionSetupTestTests.runInteractiveTest(on: &interactive)
+        XCTAssertTrue(interactive.canUseSettings)
+        XCTAssertFalse(interactive.fullyAuthenticated)
+        XCTAssertTrue(interactive.hasCurrentInteractiveAuthOutcome)
+    }
+
+    func testUntestedAndFailedConfigurationsCannotUseSettings() {
+        var untested = makeFlowAtTestStep()
+        XCTAssertFalse(untested.canUseSettings)
+        XCTAssertFalse(untested.fullyAuthenticated)
+        XCTAssertFalse(untested.hasCurrentInteractiveAuthOutcome)
+        XCTAssertNil(untested.complete())
+
+        var failed = makeFlowAtTestStep()
+        let generation = failed.beginTest()
+        failed.applyTestEvent(.started(.server), generation: generation!)
+        failed.applyTestEvent(.failed(.server, .hostNotFound), generation: generation!)
+        XCTAssertFalse(failed.canUseSettings)
+        XCTAssertNil(failed.complete())
+    }
+
+    func testDraftEditInvalidatesInteractiveOutcomeLikeNativeSuccess() {
+        var flow = makeFlowAtTestStep()
+        ConnectionSetupTestTests.runInteractiveTest(on: &flow)
+        XCTAssertTrue(flow.hasCurrentInteractiveAuthOutcome)
+
+        flow.back()
+        flow.back()
+        flow.draft.username = "changed-user"
+        XCTAssertFalse(flow.hasCurrentInteractiveAuthOutcome, "An edit invalidates the interactive authorization")
+        XCTAssertFalse(flow.canUseSettings)
+
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionTest)
+        XCTAssertEqual(flow.testState, ConnectionSetupTestState(), "Re-entry with a stale outcome resets to untested")
+        XCTAssertNil(flow.complete())
+    }
+
+    func testStaleInteractiveCompletionCannotOverwriteNewerNativeSuccess() {
+        var flow = makeFlowAtTestStep()
+        // Run A starts and reaches the authentication stage.
+        let generationA = flow.beginTest()
+        for event in ConnectionSetupTestTests.interactiveAuthEvents.prefix(5) {
+            flow.applyTestEvent(event, generation: generationA!)
+        }
+        // The user edits the server address; Run B tests natively and wins.
+        flow.back()
+        flow.back()
+        flow.draft.lan.host = "192.168.1.29"
+        flow.submitDetails()
+        flow.submitCredentials()
+        let generationB = flow.beginTest()
+        XCTAssertNotEqual(generationA, generationB)
+        for event in StagedTestDriver.successEvents {
+            flow.applyTestEvent(event, generation: generationB!)
+        }
+        XCTAssertEqual(flow.step, .review)
+        XCTAssertTrue(flow.hasCurrentSuccessfulTest)
+
+        // Run A's interactive completion arrives late: dropped.
+        flow.back()
+        let applied = flow.applyTestEvent(
+            .requiresInteractiveSignIn(.authentication), generation: generationA!
+        )
+        XCTAssertFalse(applied, "A stale interactive completion must never apply")
+        XCTAssertTrue(flow.hasCurrentSuccessfulTest, "Run B stays authoritative")
+        XCTAssertFalse(flow.hasCurrentInteractiveAuthOutcome)
+        XCTAssertTrue(flow.canUseSettings)
+    }
+
+    func testStaleNativeSuccessCannotOverwriteNewerInteractiveOutcome() {
+        var flow = makeFlowAtTestStep()
+        // Run A (native) gets partway, then the user edits and Run B ends in
+        // the interactive outcome.
+        let generationA = flow.beginTest()
+        flow.applyTestEvent(.started(.server), generation: generationA!)
+        flow.back()
+        flow.back()
+        flow.draft.lan.host = "192.168.1.29"
+        flow.submitDetails()
+        flow.submitCredentials()
+        ConnectionSetupTestTests.runInteractiveTest(on: &flow)
+        XCTAssertEqual(flow.step, .review)
+        XCTAssertTrue(flow.hasCurrentInteractiveAuthOutcome)
+
+        // Run A's native success arrives late: dropped, the interactive
+        // outcome stays authoritative.
+        flow.back()
+        for event in StagedTestDriver.successEvents {
+            let applied = flow.applyTestEvent(event, generation: generationA!)
+            XCTAssertFalse(applied)
+        }
+        XCTAssertTrue(flow.hasCurrentInteractiveAuthOutcome)
+        XCTAssertFalse(flow.fullyAuthenticated)
+        XCTAssertTrue(flow.canUseSettings)
+    }
+
+    func testReducerKeepsInteractiveOutcomeMonotonic() {
+        var state = ConnectionSetupTestState()
+        state.apply(.started(.authentication))
+        state.apply(.requiresInteractiveSignIn(.authentication))
+        XCTAssertEqual(state.authentication, .requiresInteractiveSignIn)
+        // A terminal stage never reverts, whatever arrives later.
+        state.apply(.failed(.authentication, .authenticationRejected))
+        state.apply(.succeeded(.authentication))
+        state.apply(.started(.authentication))
+        state.apply(.requiresInteractiveSignIn(.authentication))
+        XCTAssertEqual(state.authentication, .requiresInteractiveSignIn)
+    }
+
     // MARK: - Recovery routing (spec 11/12/17)
 
     func testEditAfterFailedTestPopsToConnectionDetails() {
@@ -361,6 +516,25 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(ConnectionSetupTestStage.authentication.runningLabel, "Authenticating…")
         XCTAssertEqual(ConnectionSetupTestStage.authentication.successLabel, "Login successful")
         XCTAssertEqual(ConnectionSetupTestState.readyMessage, "This connection is ready to use.")
+        XCTAssertEqual(
+            ConnectionSetupTestState.interactiveReadyMessage,
+            "This dashboard uses browser-based sign-in. "
+                + "Conduit will open the sign-in page after you return to the login screen."
+        )
+    }
+
+    func testInteractiveOutcomeCopyNeverClaimsAuthentication() {
+        var state = ConnectionSetupTestState()
+        state.apply(.started(.authentication))
+        state.apply(.requiresInteractiveSignIn(.authentication))
+
+        XCTAssertEqual(
+            state.rowLabel(for: .authentication),
+            "Browser sign-in required",
+            "The interactive row must never read as Login successful"
+        )
+        XCTAssertEqual(state.accessibilityLabel(for: .authentication), "Authentication, browser sign-in required")
+        XCTAssertNotEqual(state.rowLabel(for: .authentication), ConnectionSetupTestStage.authentication.successLabel)
     }
 
     func testAccessibilityLabelsCarryStateWordsNotJustIcons() {
@@ -386,7 +560,9 @@ final class ConnectionSetupTestTests: XCTestCase {
 
     func testTestCopyContainsNoExposureOrCredentialLanguage() {
         var allStrings = [
-            ConnectionSetupTestState.readyMessage
+            ConnectionSetupTestState.readyMessage,
+            ConnectionSetupTestState.interactiveReadyMessage,
+            "Browser sign-in required"
         ]
         for stage in ConnectionSetupTestStage.allCases {
             allStrings.append(contentsOf: [stage.objectiveLabel, stage.runningLabel, stage.successLabel])
@@ -557,6 +733,63 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(events, [.started(.server)], "Cancellation must emit no failure events")
     }
 
+    // MARK: - Interactive sign-in outcome
+
+    func testProbeInteractiveSignInEmitsDistinctTerminalOutcomeWithDiscoveryOnlyTraffic() async {
+        // A dashboard whose edge redirects provider discovery to a sign-in
+        // page has proven everything the probe can verify. The run ends in
+        // the supported interactive outcome: server and dashboard succeed,
+        // authentication stops at "browser sign-in required", and the probe
+        // performs EXACTLY ONE request — provider discovery. No native
+        // credential attempt, no ticket mint, no cookie store write.
+        let events = await runProbe("https://probe-interactive.example")
+        XCTAssertEqual(events, [
+            .started(.server),
+            .succeeded(.server),
+            .started(.dashboard),
+            .succeeded(.dashboard),
+            .started(.authentication),
+            .requiresInteractiveSignIn(.authentication)
+        ])
+        let host = "probe-interactive.example"
+        XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/api/auth/providers", host: host), 1)
+        XCTAssertEqual(
+            SetupProbeURLProtocol.requestCount(forPath: "/auth/password-login", host: host), 0,
+            "Interactive-auth discovery must never attempt password login"
+        )
+        XCTAssertEqual(
+            SetupProbeURLProtocol.requestCount(forPath: "/api/auth/ws-ticket", host: host), 0,
+            "Interactive-auth discovery must never mint a ticket"
+        )
+        let jarCookies = HTTPCookieStorage.shared.cookies(for: URL(string: "https://\(host)/")!) ?? []
+        XCTAssertTrue(jarCookies.isEmpty, "The probe commits nothing, interactive outcome included")
+    }
+
+    func testProbeProviderLess200IsUnexpectedServerResponseNotInteractive() async {
+        // A 200 with a valid but empty providers array is recognizable
+        // Hermes structure with no password capability: an unexpected server
+        // response for the probe, never the interactive-auth outcome.
+        let events = await runProbe("https://probe-empty-providers.example")
+        XCTAssertEqual(events, [
+            .started(.server),
+            .succeeded(.server),
+            .started(.dashboard),
+            .failed(.dashboard, .unexpectedServerResponse)
+        ])
+    }
+
+    func testProbeMalformed200IsUnexpectedServerResponseNotInteractive() async {
+        // Arbitrary website content: an unexpected server response, never
+        // the interactive-auth outcome.
+        let events = await runProbe("https://probe-malformed.example")
+        XCTAssertEqual(events, [
+            .started(.server),
+            .succeeded(.server),
+            .started(.dashboard),
+            .failed(.dashboard, .unexpectedServerResponse)
+        ])
+    }
+
     // MARK: - Side-effect freedom (spec 21)
 
     @MainActor
@@ -674,7 +907,10 @@ private final class SetupProbeURLProtocol: URLProtocol {
         "probe-auth429.example",
         "probe-cookieless.example",
         "probe-cfreject.example",
-        "probe-hang.example"
+        "probe-hang.example",
+        "probe-interactive.example",
+        "probe-empty-providers.example",
+        "probe-malformed.example"
     ]
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -860,6 +1096,30 @@ private final class SetupProbeURLProtocol: URLProtocol {
                 statusCode: 302,
                 headers: ["Location": "https://probe-tenant.cloudflareaccess.com/cdn-cgi/access/login"],
                 body: Data()
+            )
+        case "probe-interactive.example":
+            // The unauthenticated interactive-auth signal: the edge bounces
+            // provider discovery to a sign-in page (cross-origin, so the
+            // redirect delegate cancels it and the 302 is the final answer).
+            return Fixture(
+                statusCode: 302,
+                headers: ["Location": "https://sso.probe-interactive.example/signin"],
+                body: Data()
+            )
+        case "probe-empty-providers.example":
+            // Valid Hermes provider JSON with zero providers: recognizable
+            // structure, never the interactive-auth signal.
+            return Fixture(
+                statusCode: 200,
+                headers: ["Content-Type": "application/json"],
+                body: Data(#"{"providers":[]}"#.utf8)
+            )
+        case "probe-malformed.example":
+            // Arbitrary website content answered 200.
+            return Fixture(
+                statusCode: 200,
+                headers: ["Content-Type": "text/html"],
+                body: Data("<html><body>not hermes</body></html>".utf8)
             )
         default:
             return nil

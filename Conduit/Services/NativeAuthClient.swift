@@ -80,6 +80,28 @@ struct NativeAuthConnection {
     }
 }
 
+/// What provider discovery learned about a dashboard's sign-in modes. The
+/// two zero-provider shapes are deliberately different outcomes: an
+/// unauthenticated redirect to a sign-in page is the NORMAL interactive-auth
+/// signal, while a 2xx answer without recognizable Hermes provider structure
+/// is an unexpected server response. Collapsing them back into "an empty
+/// provider list" would re-create the ambiguity that made browser-auth
+/// deployments unclassifiable.
+enum AuthProviderDiscoveryResult: Equatable {
+    /// The dashboard answered `/api/auth/providers` with recognizable Hermes
+    /// provider JSON. The array may be empty (a valid Hermes answer meaning
+    /// "no providers configured") or name non-password providers only.
+    case providers([[String: Any]])
+    /// Discovery was answered by a redirect to a sign-in page — the expected
+    /// unauthenticated behavior of a dashboard/edge that routes to
+    /// interactive (browser) authentication.
+    case interactiveSignInRequired
+    /// A 2xx response arrived, but it carries no recognizable Hermes
+    /// auth/provider structure: malformed JSON, a JSON object without a
+    /// `providers` array, or arbitrary web content.
+    case unrecognized
+}
+
 /// The single definition of "this dashboard offers password login", shared by
 /// the normal login flow and the Connection Setup probe so the compatibility
 /// check can never drift between them.
@@ -125,7 +147,7 @@ struct NativeAuthClient {
         self.session = URLSession(configuration: configuration, delegate: redirectDelegate, delegateQueue: nil)
     }
 
-    func authProviders() async throws -> [[String: Any]] {
+    func authProviderDiscovery() async throws -> AuthProviderDiscoveryResult {
         let request = try request(path: "/api/auth/providers")
         let result = try await perform(request)
         guard let http = result.response as? HTTPURLResponse else {
@@ -136,17 +158,17 @@ struct NativeAuthClient {
             // The SecureRedirectDelegate cancels cross-origin redirects, so a
             // 3xx final response here is the edge bouncing us to its sign-in
             // page. Without a configured token that is the expected
-            // interactive-auth signal (empty list → WebView fallback). With
-            // an actually configured service token it means Cloudflare
-            // rejected that token — say so instead of presenting the same
-            // login page that should have been bypassed. Match
-            // `applying(to:)`'s configuration state: a non-nil but empty
-            // credentials value sends no headers and must fall back too.
+            // interactive-auth signal. With an actually configured service
+            // token it means Cloudflare rejected that token — say so instead
+            // of presenting the same login page that should have been
+            // bypassed. Match `applying(to:)`'s configuration state: a
+            // non-nil but empty credentials value sends no headers and must
+            // fall back too.
             if cloudflareAccess?.isConfigured == true,
                Self.redirectsToCloudflareAccessLogin(http) {
                 throw AuthClientError.cloudflareServiceTokenRejected
             }
-            return []
+            return .interactiveSignInRequired
         default:
             break
         }
@@ -157,10 +179,18 @@ struct NativeAuthClient {
             )
         }
 
-        if let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any] {
-            return json["providers"] as? [[String: Any]] ?? []
+        // A 2xx answer only means "Hermes providers" when the body carries
+        // the provider array. An empty array is a valid Hermes answer; a
+        // body without the array (arbitrary web content, malformed JSON) is
+        // an unrecognized server response and must never read as the
+        // interactive-auth signal.
+        guard let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any] else {
+            return .unrecognized
         }
-        return []
+        guard let providers = json["providers"] as? [[String: Any]] else {
+            return .unrecognized
+        }
+        return .providers(providers)
     }
 
     func login(username: String, password: String) async throws -> [HTTPCookie] {

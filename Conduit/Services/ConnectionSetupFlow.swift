@@ -289,10 +289,12 @@ struct ConnectionSetupFlow: Equatable {
     }
 
     /// Revalidate at the handoff boundary; producing values has no side
-    /// effects. Acceptance requires a connection test that succeeded against
-    /// the CURRENT draft — an untested configuration is never handed off.
+    /// effects. Acceptance requires a connection test that validated the
+    /// CURRENT draft — either fully-tested native auth, or the supported
+    /// interactive sign-in outcome after successful dashboard detection. An
+    /// untested configuration is never handed off.
     mutating func complete() -> ConnectionSetupResult? {
-        guard step == .review, hasCurrentSuccessfulTest else { return nil }
+        guard step == .review, canUseSettings else { return nil }
         do { return try draft.result() }
         catch { record(error); return nil }
     }
@@ -324,6 +326,32 @@ struct ConnectionSetupFlow: Equatable {
         testState.allSucceeded && testSucceededAtRevision == draftRevision
     }
 
+    /// The same fact as `hasCurrentSuccessfulTest`, named for the auth-mode
+    /// distinction the interactive outcome introduced: native password
+    /// authentication fully succeeded (login + ticket) against the current
+    /// draft. Never true for the interactive outcome — there, the user has
+    /// not authenticated yet.
+    var fullyAuthenticated: Bool { hasCurrentSuccessfulTest }
+
+    /// The supported interactive-auth terminal outcome against the CURRENT
+    /// draft: server and dashboard succeeded and authentication stopped at
+    /// "browser sign-in required". Draft edits invalidate it exactly like a
+    /// native success, and it is deliberately not a failure — so the
+    /// recovery-plan machinery never treats it as one.
+    var hasCurrentInteractiveAuthOutcome: Bool {
+        testState.requiresInteractiveSignIn && testSucceededAtRevision == draftRevision
+    }
+
+    /// Review / "Use These Settings" authorization. Exactly two states
+    /// qualify: fully tested native auth, or interactive sign-in required
+    /// after successful dashboard detection. There is deliberately no
+    /// generic "use without testing" bypass — both qualifying states have
+    /// verified transport, dashboard identity, and the expected auth
+    /// behavior; only the user's own auth step can remain.
+    var canUseSettings: Bool {
+        hasCurrentSuccessfulTest || hasCurrentInteractiveAuthOutcome
+    }
+
     /// The inherited Cloudflare token, ONLY when it is same-origin with the
     /// draft's current address. A service token entered for one dashboard is
     /// never sent to a different origin during the test (Round-3 origin
@@ -350,15 +378,19 @@ struct ConnectionSetupFlow: Equatable {
     /// Applies one probe event to the staged state, returning whether it was
     /// applied. Events from an obsolete generation — superseded by
     /// cancellation, a newer run, or a draft reset — are ignored, so a late
-    /// completion can never overwrite newer state. The final success seals
-    /// the result at the current draft revision and advances to Review.
+    /// completion can never overwrite newer state. A terminal event (full
+    /// native success, or the interactive sign-in outcome) seals the result
+    /// at the current draft revision and advances to Review.
     @discardableResult
     mutating func applyTestEvent(_ event: ConnectionSetupTestEvent, generation: Int) -> Bool {
         guard generation == testGeneration, step == .connectionTest else { return false }
         testState.apply(event)
-        if event == .succeeded(.authentication) {
+        switch event {
+        case .succeeded(.authentication), .requiresInteractiveSignIn(.authentication):
             testSucceededAtRevision = draftRevision
             advance(to: .review)
+        default:
+            break
         }
         return true
     }
@@ -395,10 +427,10 @@ struct ConnectionSetupFlow: Equatable {
         testGeneration += 1
     }
 
-    /// Continue from the test screen to Review when a current successful
+    /// Continue from the test screen to Review when a current qualifying
     /// test exists (e.g. after returning Back from Review).
     mutating func continueToReview() {
-        guard step == .connectionTest, hasCurrentSuccessfulTest else { return }
+        guard step == .connectionTest, canUseSettings else { return }
         advance(to: .review)
     }
 

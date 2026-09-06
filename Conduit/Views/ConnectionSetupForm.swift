@@ -155,9 +155,10 @@ struct ConnectionSetupForm: View {
             if let failure = flow.testState.failedFailure,
                let stage = flow.testState.failedStage {
                 failedTestRecovery(stage: stage, failure: failure)
-            } else if flow.hasCurrentSuccessfulTest {
-                // Reachable after returning Back from Review: the passing
-                // result is still current, so continue without re-testing.
+            } else if flow.canUseSettings {
+                // Reachable after returning Back from Review: a passing or
+                // interactive outcome is still current, so continue without
+                // re-testing.
                 Button("Continue") { flow.continueToReview() }
                     .buttonStyle(.borderedProminent)
                     .tint(.conduitAccent)
@@ -204,12 +205,22 @@ struct ConnectionSetupForm: View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Review").font(.title2.weight(.semibold))
             // The staged result that authorizes this screen: a current
-            // successful test, shown with its per-stage outcomes.
-            if flow.hasCurrentSuccessfulTest {
+            // successful test or the interactive-auth outcome, shown with
+            // its per-stage outcomes.
+            if flow.canUseSettings {
                 ConnectionSetupStageList(state: flow.testState)
-                Text(ConnectionSetupTestState.readyMessage)
-                    .font(.headline)
-                    .accessibilityIdentifier("setup.test.ready")
+                if flow.testState.requiresInteractiveSignIn {
+                    // The user has NOT authenticated: say what happens next
+                    // instead of claiming success. Never "Login successful".
+                    Text(ConnectionSetupTestState.interactiveReadyMessage)
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("setup.test.interactive-ready")
+                } else {
+                    Text(ConnectionSetupTestState.readyMessage)
+                        .font(.headline)
+                        .accessibilityIdentifier("setup.test.ready")
+                }
             }
             // Revalidate for rendering only: a draft that stopped validating
             // after reaching Review must never silently blank the card.
@@ -247,7 +258,7 @@ struct ConnectionSetupForm: View {
     }
 
     private var reviewIsValid: Bool {
-        guard flow.hasCurrentSuccessfulTest else { return false }
+        guard flow.canUseSettings else { return false }
         if case .success = flow.reviewState() { return true }
         return false
     }
@@ -354,6 +365,14 @@ struct ConnectionSetupStageRow: View {
             Image(systemName: "checkmark.circle.fill")
                 .font(.footnote)
                 .foregroundStyle(.green)
+                .padding(.top, 2)
+        case .requiresInteractiveSignIn:
+            // An open circle in the accent color: deliberately not a
+            // checkmark (the user has not authenticated) and not an error
+            // mark (nothing failed). Text and VoiceOver carry the meaning.
+            Image(systemName: "circle")
+                .font(.footnote)
+                .foregroundStyle(.conduitAccent)
                 .padding(.top, 2)
         case .failed:
             Image(systemName: "xmark.circle.fill")

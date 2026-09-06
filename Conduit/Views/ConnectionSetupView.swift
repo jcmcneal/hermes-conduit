@@ -120,6 +120,11 @@ struct ConnectionSetupView: View {
                         notification: .announcement,
                         argument: ConnectionSetupTestState.readyMessage
                     )
+                case .requiresInteractiveSignIn(.authentication):
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ConnectionSetupTestState.interactiveReadyMessage
+                    )
                 case .failed(_, let failure):
                     UIAccessibility.post(notification: .announcement, argument: failure.userTitle)
                 default:

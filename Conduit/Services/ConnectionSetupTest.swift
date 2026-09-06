@@ -12,11 +12,16 @@
 //  status classification. Stage 1 (transport) and stage 2 (Hermes dashboard
 //  confirmation) ride on the same provider-discovery request the normal
 //  login flow performs first; stage 3 is the full native connect (password
-//  login + ws-ticket mint). The milestone for "Login successful" is exactly
-//  the milestone normal login reaches before it would commit anything — and
-//  the probe commits nothing: no cookie store write, no Keychain, no
-//  AppState mutation, no websocket, no screen changes. The resulting ticket
-//  and transaction cookies are discarded here.
+//  login + ws-ticket mint) for password-capable dashboards. A dashboard that
+//  answers discovery with an unauthenticated redirect to a sign-in page has
+//  proven everything the probe can test and ends the run in the supported
+//  `requiresInteractiveSignIn` outcome: no native login, no ticket, no
+//  WebView — the actual sign-in happens in LoginView after the handoff.
+//  The milestone for "Login successful" is exactly the milestone normal
+//  login reaches before it would commit anything — and the probe commits
+//  nothing: no cookie store write, no Keychain, no AppState mutation, no
+//  websocket, no screen changes. The resulting ticket and transaction
+//  cookies are discarded here.
 //
 
 import Foundation
@@ -75,6 +80,11 @@ enum ConnectionSetupStageState: Equatable {
     case pending
     case running
     case succeeded
+    /// The dashboard answered, but authentication must continue
+    /// interactively in the browser after the handoff. A supported terminal
+    /// outcome — explicitly NOT a success (the user has not authenticated)
+    /// and NOT a failure (nothing went wrong).
+    case requiresInteractiveSignIn
     case failed(ConnectionFailure)
 
     /// VoiceOver state word, so success/failure is never communicated by
@@ -84,6 +94,7 @@ enum ConnectionSetupStageState: Equatable {
         case .pending: return "waiting"
         case .running: return "checking"
         case .succeeded: return "passed"
+        case .requiresInteractiveSignIn: return "browser sign-in required"
         case .failed: return "failed"
         }
     }
@@ -95,6 +106,11 @@ enum ConnectionSetupStageState: Equatable {
 enum ConnectionSetupTestEvent: Equatable {
     case started(ConnectionSetupTestStage)
     case succeeded(ConnectionSetupTestStage)
+    /// Terminal supported outcome: the dashboard requires interactive
+    /// (browser) sign-in. Emitted once, at the authentication stage, after
+    /// server and dashboard have succeeded. No password login, ticket mint,
+    /// or WebView follows inside the probe.
+    case requiresInteractiveSignIn(ConnectionSetupTestStage)
     case failed(ConnectionSetupTestStage, ConnectionFailure)
 }
 
@@ -109,6 +125,13 @@ struct ConnectionSetupTestState: Equatable {
 
     /// The completion announcement (one per run, not per stage transition).
     static let readyMessage = "This connection is ready to use."
+
+    /// The interactive-auth completion announcement and Review copy. The
+    /// user has NOT authenticated: the message says what happens next
+    /// instead of claiming success. Never may this state render "Login
+    /// successful".
+    static let interactiveReadyMessage = "This dashboard uses browser-based sign-in. "
+        + "Conduit will open the sign-in page after you return to the login screen."
 
     subscript(stage: ConnectionSetupTestStage) -> ConnectionSetupStageState {
         get {
@@ -139,6 +162,9 @@ struct ConnectionSetupTestState: Equatable {
         case .succeeded(let stage):
             guard self[stage] == .running else { return }
             self[stage] = .succeeded
+        case .requiresInteractiveSignIn(let stage):
+            guard self[stage] == .pending || self[stage] == .running else { return }
+            self[stage] = .requiresInteractiveSignIn
         case .failed(let stage, let failure):
             guard self[stage] == .pending || self[stage] == .running else { return }
             self[stage] = .failed(failure)
@@ -151,6 +177,15 @@ struct ConnectionSetupTestState: Equatable {
 
     var isRunning: Bool {
         ConnectionSetupTestStage.allCases.contains { self[$0] == .running }
+    }
+
+    /// The staged test ended in the supported interactive-auth outcome:
+    /// server and dashboard succeeded, and authentication stopped at
+    /// "browser sign-in required" — never a success, never a failure.
+    var requiresInteractiveSignIn: Bool {
+        server == .succeeded
+            && dashboard == .succeeded
+            && authentication == .requiresInteractiveSignIn
     }
 
     /// The first failed stage in run order, if any.
@@ -172,6 +207,7 @@ struct ConnectionSetupTestState: Equatable {
         switch self[stage] {
         case .running: return stage.runningLabel
         case .succeeded: return stage.successLabel
+        case .requiresInteractiveSignIn: return "Browser sign-in required"
         case .pending, .failed: return stage.objectiveLabel
         }
     }
@@ -229,8 +265,10 @@ protocol ConnectionSetupTesting {
 /// The production probe. Reuses `NativeAuthClient` unchanged for every
 /// request — including its redirect policy, Cloudflare header application,
 /// transport policy, and status classification via
-/// `ConnectionFailureClassifier`. One user-requested test equals exactly one
-/// discovery request, one password-login attempt, and one ticket mint.
+/// `ConnectionFailureClassifier`. A password-capable dashboard sees exactly
+/// one discovery request, one password-login attempt, and one ticket mint;
+/// an interactive-auth dashboard sees exactly one discovery request and
+/// nothing else.
 struct ConnectionSetupProbe: ConnectionSetupTesting {
     private static let logger = Logger(subsystem: "com.milim.relay", category: "connection-setup-test")
 
@@ -255,9 +293,9 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         // means an HTTP response DID arrive, so transport is proven and the
         // failure belongs to the dashboard stage.
         onEvent(.started(.server))
-        let providers: [[String: Any]]
+        let discovery: AuthProviderDiscoveryResult
         do {
-            providers = try await client.authProviders()
+            discovery = try await client.authProviderDiscovery()
         } catch {
             guard !Self.wasCancelled(error) else { return }
             if let authError = error as? AuthClientError {
@@ -275,33 +313,55 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         }
         onEvent(.succeeded(.server))
 
-        // Stage 2: the discovery response must name a password-capable
-        // provider — the same compatibility check the login flow applies
-        // before native login. An arbitrary website answering 200 carries no
-        // such provider, and 200 alone is never success.
+        // Stage 2: the discovery answer must identify a Hermes dashboard
+        // with the authentication shape the probe can exercise. An arbitrary
+        // website answering 200 (unrecognized body) and a recognizable
+        // provider answer with no password provider are both NOT Hermes
+        // password dashboards — and neither is the interactive-auth signal,
+        // which only the redirect classification below may produce.
         onEvent(.started(.dashboard))
-        guard HermesProviderCheck.supportsPassword(providers) else {
+        switch discovery {
+        case .unrecognized:
             Self.reportFailure(.dashboard, .unexpectedServerResponse, to: onEvent)
             return
+        case .providers(let providers):
+            guard HermesProviderCheck.supportsPassword(providers) else {
+                Self.reportFailure(.dashboard, .unexpectedServerResponse, to: onEvent)
+                return
+            }
+        case .interactiveSignInRequired:
+            break
         }
         onEvent(.succeeded(.dashboard))
 
-        // Stage 3: the full native credential proof — password login plus the
-        // ws-ticket mint that proves the session is actually usable. This is
-        // the exact milestone normal login requires before it would commit
-        // cookies. The transaction (ticket + transaction cookies) is
-        // deliberately discarded: the test persists nothing and connects
-        // nothing.
-        onEvent(.started(.authentication))
-        do {
-            // Deliberately discarded: commitCookies() is never called, so the
-            // transaction never reaches the shared cookie store.
-            _ = try await client.connect(username: result.username, password: result.password)
-            onEvent(.succeeded(.authentication))
-        } catch {
-            guard !Self.wasCancelled(error) else { return }
-            Self.reportFailure(.authentication, ConnectionFailureClassifier.classify(error), to: onEvent)
+        guard case .interactiveSignInRequired = discovery else {
+            // Stage 3: the full native credential proof — password login
+            // plus the ws-ticket mint that proves the session is actually
+            // usable. This is the exact milestone normal login requires
+            // before it would commit cookies. The transaction (ticket +
+            // transaction cookies) is deliberately discarded: the test
+            // persists nothing and connects nothing.
+            onEvent(.started(.authentication))
+            do {
+                // Deliberately discarded: commitCookies() is never called,
+                // so the transaction never reaches the shared cookie store.
+                _ = try await client.connect(username: result.username, password: result.password)
+                onEvent(.succeeded(.authentication))
+            } catch {
+                guard !Self.wasCancelled(error) else { return }
+                Self.reportFailure(.authentication, ConnectionFailureClassifier.classify(error), to: onEvent)
+            }
+            return
         }
+
+        // The dashboard requires interactive (browser) sign-in. The probe
+        // has verified everything it can — transport and dashboard identity
+        // plus the expected auth behavior — and reports the supported
+        // terminal outcome. It stays side-effect-free: no native login
+        // attempt, no ticket mint, no WebView, no cookie/Keychain writes.
+        // The actual sign-in happens in LoginView over the normal handoff.
+        onEvent(.started(.authentication))
+        onEvent(.requiresInteractiveSignIn(.authentication))
     }
 
     private static func reportFailure(
@@ -330,6 +390,7 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
 struct ConnectionSetupTestProbeStub: ConnectionSetupTesting {
     enum Script: String {
         case success
+        case interactiveSignInRequired = "auth:interactiveSignInRequired"
         case serverHostNotFound = "server:hostNotFound"
         case dashboardUnexpected = "dashboard:unexpectedServerResponse"
         case authRejected = "auth:authenticationRejected"
@@ -344,6 +405,13 @@ struct ConnectionSetupTestProbeStub: ConnectionSetupTesting {
                 onEvent(.succeeded(.dashboard))
                 onEvent(.started(.authentication))
                 onEvent(.succeeded(.authentication))
+            case .interactiveSignInRequired:
+                onEvent(.started(.server))
+                onEvent(.succeeded(.server))
+                onEvent(.started(.dashboard))
+                onEvent(.succeeded(.dashboard))
+                onEvent(.started(.authentication))
+                onEvent(.requiresInteractiveSignIn(.authentication))
             case .serverHostNotFound:
                 onEvent(.started(.server))
                 onEvent(.failed(.server, .hostNotFound))

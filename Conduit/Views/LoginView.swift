@@ -478,8 +478,23 @@ struct LoginView: View {
         do {
             let access = configuredCloudflareAccess
             let client = NativeAuthClient(baseURL: serverUrl, cloudflareAccess: access)
-            let providers = try await client.authProviders()
-            guard HermesProviderCheck.supportsPassword(providers) else {
+            // Provider discovery is typed: only the unauthenticated redirect
+            // is THE interactive sign-in signal. A recognizable Hermes
+            // provider answer without password support (none configured, or
+            // only OAuth providers) intentionally routes to the browser too
+            // — an explicit decision, not the old "empty list" ambiguity. An
+            // unrecognized 2xx body keeps the same browser fallback it
+            // always had.
+            let requiresBrowserSignIn: Bool
+            switch try await client.authProviderDiscovery() {
+            case .interactiveSignInRequired:
+                requiresBrowserSignIn = true
+            case .providers(let providers):
+                requiresBrowserSignIn = !HermesProviderCheck.supportsPassword(providers)
+            case .unrecognized:
+                requiresBrowserSignIn = true
+            }
+            if requiresBrowserSignIn {
                 showWebView = true
                 if let access { KeychainHelper.saveCloudflareAccess(access, origin: serverUrl) }
                 return

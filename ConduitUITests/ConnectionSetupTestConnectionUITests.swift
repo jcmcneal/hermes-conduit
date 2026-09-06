@@ -98,6 +98,54 @@ final class ConnectionSetupTestConnectionUITests: XCTestCase {
         XCTAssertTrue(app.buttons["setup.test.edit-credentials"].exists)
     }
 
+    func testInteractiveSignInOutcomeShowsBrowserSignInAndHandsOff() {
+        // A dashboard whose discovery redirects to a sign-in page ends the
+        // staged test in the supported interactive outcome: server and
+        // dashboard pass, authentication shows "Browser sign-in required"
+        // (never "Login successful"), and Use These Settings performs the
+        // normal Round-3 handoff back to LoginView — where the user taps
+        // Connect and the existing WebView flow runs. No real browser login
+        // is automated here.
+        let app = XCUIApplication()
+        app.launchArguments += ["-CONNECTION_SETUP_TEST_RESULT", "auth:interactiveSignInRequired"]
+        app.launch()
+
+        walkToTestScreen(app)
+        tapVisible(app.buttons[Identity.testRun], in: app)
+
+        // The staged list shows the two verified stages plus the
+        // interactive outcome on the authentication row.
+        XCTAssertTrue(row(app, Identity.stageServer).waitForExistence(timeout: 5))
+        XCTAssertTrue(row(app, Identity.stageDashboard).exists)
+        XCTAssertTrue(row(app, Identity.stageAuthentication).exists)
+        let authRow = row(app, Identity.stageAuthentication)
+        XCTAssertTrue(authRow.label.contains("Browser sign-in required"), "Got: \(authRow.label)")
+        XCTAssertFalse(
+            authRow.label.contains("Login successful"),
+            "Interactive auth must never claim the user signed in"
+        )
+        XCTAssertFalse(app.staticTexts["setup.test.ready"].exists, "The native ready message must not appear")
+
+        // Review shows the browser-based sign-in explanation.
+        tapVisible(app.buttons[Identity.testContinue], in: app)
+        let interactiveReady = app.staticTexts["setup.test.interactive-ready"]
+        XCTAssertTrue(interactiveReady.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            interactiveReady.label.contains("browser-based sign-in"),
+            "Got: \(interactiveReady.label)"
+        )
+
+        // The Round-3 typed handoff is unchanged: fields populate, nothing
+        // connects automatically.
+        tapVisible(app.buttons[Identity.useSettings], in: app)
+        let server = app.textFields["login.server-url"]
+        XCTAssertTrue(server.waitForExistence(timeout: 5))
+        XCTAssertEqual(server.value as? String, "http://192.168.1.28:9119")
+        XCTAssertEqual(app.textFields["login.username"].value as? String, "round4-user")
+        XCTAssertTrue(app.buttons["Connect"].isEnabled)
+        XCTAssertFalse(app.staticTexts["Connecting..."].exists)
+    }
+
     // MARK: - Walk helpers
 
     /// Opens setup and walks Dashboard → Credentials → LAN → details →
