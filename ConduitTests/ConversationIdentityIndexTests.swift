@@ -103,6 +103,93 @@ final class ConversationIdentityIndexTests: XCTestCase {
         XCTAssertEqual(index.durableID(forRuntime: "runtime-x", profile: "default"), "stored-a")
     }
 
+    func testAuthoritativeRecordEstablishesNewMapping() {
+        let index = ConversationIdentityIndex()
+        XCTAssertNil(index.recordAuthoritative(
+            runtimeID: "runtime-x",
+            durableID: "stored-a",
+            profile: "default",
+            source: .activeList
+        ))
+        XCTAssertEqual(index.durableID(forRuntime: "runtime-x", profile: "default"), "stored-a")
+    }
+
+    func testAuthoritativeRecordRebindsStaleConfirmedMapping() {
+        // The exact split-brain case: the index holds a historical
+        // runtime-x → stored-B mapping, but the app just ADMITTED a resume
+        // proving runtime-x now routes to stored-A. Keeping the old mapping
+        // would leave the selected conversation and the index disagreeing,
+        // so the authoritative rebind wins and the displaced mapping is
+        // returned for diagnostics.
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-x",
+            durableID: "stored-b",
+            profile: "default",
+            source: .resume
+        )
+        let conflict = index.recordAuthoritative(
+            runtimeID: "runtime-x",
+            durableID: "stored-a",
+            profile: "default",
+            source: .resume
+        )
+        XCTAssertEqual(
+            conflict,
+            ConversationIdentityIndex.IdentityConflict(
+                runtimeID: "runtime-x",
+                confirmedDurableID: "stored-b",
+                incomingDurableID: "stored-a",
+                source: .resume
+            )
+        )
+        XCTAssertEqual(
+            index.durableID(forRuntime: "runtime-x", profile: "default"),
+            "stored-a",
+            "The app accepted the resume into conversation-owned state; the index must agree"
+        )
+    }
+
+    func testNotificationEvidenceCannotOverwriteAuthoritativeMapping() {
+        // A stale dual-ID push payload must not poison a fresher
+        // authoritative mapping: navigation may attempt the payload's claim,
+        // but the index keeps the live-registry truth.
+        let index = ConversationIdentityIndex()
+        index.recordAuthoritative(
+            runtimeID: "runtime-x",
+            durableID: "stored-b",
+            profile: "default",
+            source: .activeList
+        )
+        let conflict = index.record(
+            runtimeID: "runtime-x",
+            durableID: "stored-a",
+            profile: "default",
+            source: .notification
+        )
+        XCTAssertNotNil(conflict)
+        XCTAssertEqual(index.durableID(forRuntime: "runtime-x", profile: "default"), "stored-b")
+    }
+
+    func testActiveListRowsRebindLikeCatalogTruth() {
+        // session.active_list is the live registry: its re-attribution has
+        // the same authority as a catalog refresh.
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-x",
+            durableID: "stored-a",
+            profile: "default",
+            source: .resume
+        )
+        index.recordAuthoritative(
+            runtimeID: "runtime-x",
+            durableID: "stored-b",
+            profile: "default",
+            source: .activeList
+        )
+        XCTAssertEqual(index.durableID(forRuntime: "runtime-x", profile: "default"), "stored-b")
+    }
+
     func testCatalogReattributionOverwritesStaleConfirmedMapping() {
         // The live registry is the freshest authority on what a runtime id
         // routes to; the row's new stored id is a routing identity change.

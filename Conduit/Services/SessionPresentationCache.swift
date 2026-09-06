@@ -567,9 +567,10 @@ final class SessionPresentationCache {
     }
 
     /// Removes the cached records for the given sessions inside `profile`,
-    /// across every identity they were written under. The delete path calls
-    /// this so a deleted conversation cannot resurrect its presentation
-    /// (including any pending decision cards) from a stale alias.
+    /// for exactly the keys passed (callers must pass every alias — see
+    /// `revokeDeletedConversationIdentity`). The delete path calls this so a
+    /// deleted conversation cannot resurrect its presentation (including any
+    /// pending decision cards) from a stale alias.
     func removeSessions(profile: String, sessionIDs: [String]) {
         let prefix = normalized(profile) + "|"
         let ids = Set(sessionIDs.compactMap {
@@ -586,6 +587,90 @@ final class SessionPresentationCache {
         }
         guard changed else { return }
         persist(store)
+    }
+
+    /// Durable-owned persistence: once this conversation's durable identity
+    /// is positively established, the durable key is its ONLY persistent
+    /// presentation key. Moves the conversation's cached presentation from
+    /// its runtime-alias keys into the durable key — on establishment (no
+    /// durable record yet) the FRESHEST alias record migrates so runtime-only
+    /// history is not lost; when a durable record already exists it is the
+    /// live write and stays — then REMOVES every alias key. Retiring the
+    /// mutable runtime keys is the point: a runtime id the gateway later
+    /// re-attributes to a different conversation must not carry this
+    /// conversation's timestamps, attachments, tool metadata, or pending
+    /// decision cards with it.
+    ///
+    /// Migrated approval cards have their embedded `sessionId` rewritten from
+    /// a retired runtime alias to the durable id, so answering a restored
+    /// card dispatches to the durable session even after a later rotation —
+    /// never to whatever the old runtime id routes to by then. Clarify
+    /// request ids are relay-minted (`conduit-push-…`), not session ids, and
+    /// are never rewritten.
+    func consolidateUnderDurableKey(
+        profile: String,
+        durableSessionID: String,
+        runtimeAliases: [String]
+    ) {
+        let durableKey = key(profile: profile, sessionID: durableSessionID)
+        let aliasKeys = Set(
+            runtimeAliases.map { key(profile: profile, sessionID: $0) }
+        ).subtracting([durableKey])
+        guard !aliasKeys.isEmpty else { return }
+        var store = load()
+        if store[durableKey] == nil {
+            let freshest = aliasKeys
+                .compactMap { store[$0] }
+                .max { lhs, rhs in
+                    lhs.updatedAt == rhs.updatedAt
+                        ? lhs.messages.count < rhs.messages.count
+                        : lhs.updatedAt < rhs.updatedAt
+                }
+            if var freshest {
+                rewriteRoutingIdentities(in: &freshest, durableSessionID: durableSessionID, runtimeAliases: runtimeAliases)
+                store[durableKey] = freshest
+            }
+        }
+        var changed = store[durableKey] != nil
+        for aliasKey in aliasKeys where store.removeValue(forKey: aliasKey) != nil {
+            changed = true
+        }
+        guard changed else { return }
+        if var durableSession = store[durableKey] {
+            rewriteRoutingIdentities(
+                in: &durableSession,
+                durableSessionID: durableSessionID,
+                runtimeAliases: runtimeAliases
+            )
+            store[durableKey] = durableSession
+        }
+        persist(store)
+    }
+
+    /// Points migrated approval cards at the durable session id when they
+    /// were keyed by one of the retired runtime aliases. Clarify request ids
+    /// live in a different namespace and are intentionally untouched.
+    private func rewriteRoutingIdentities(
+        in session: inout CachedSession,
+        durableSessionID: String,
+        runtimeAliases: [String]
+    ) {
+        let aliases = Set(runtimeAliases.map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        })
+        var mutated = false
+        for index in session.messages.indices {
+            var message = session.messages[index]
+            if let approval = message.approval,
+               aliases.contains(approval.sessionId) {
+                message.approval?.sessionId = durableSessionID
+                session.messages[index] = message
+                mutated = true
+            }
+        }
+        if mutated {
+            session.updatedAt = now()
+        }
     }
 
     private func load() -> [String: CachedSession] {

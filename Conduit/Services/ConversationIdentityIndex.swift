@@ -25,15 +25,27 @@ private let conversationIdentityLog = Logger(
 /// timestamps, title equality, string resemblance, and profile co-membership
 /// are NEVER evidence, and no caller may synthesize a mapping from them.
 ///
-/// Conflict policy: when new evidence claims a runtime id for a different
-/// durable conversation than the confirmed mapping, the mapping is not
-/// silently rewritten — the conflict is returned to the caller for its own
-/// policy decision and logged by id only. Catalog refreshes are the one
-/// authoritative exception (`recordCatalogIdentity`): the live registry is
-/// the freshest evidence about what a runtime id currently routes to, and a
-/// re-attribution observed there is a routing identity change, not alias
-/// noise. Suspended operations are unaffected either way: they hold their
-/// own captured alias sets and can never gain ownership through this index.
+/// Authority rules — who may establish, and who may REBIND a mapping that
+/// historical evidence already confirmed. Callers pick the API by authority,
+/// never by convenience:
+///
+///     Evidence                          API                   May establish?  May rebind?
+///     -------------------------------------------------------------------------------------
+///     historical confirmed alias        record(...)           yes             no
+///     dual-ID notification payload      record(...)           yes             no
+///     admitted session.resume           recordAuthoritative() yes             yes
+///     authoritative catalog snapshot    recordCatalogIdentity yes             yes (first claim per snapshot)
+///     session.active_list row           recordAuthoritative() yes             yes
+///     verified create result            recordAuthoritative() yes             yes (created conversation)
+///     verified branch result            recordAuthoritative() yes             yes (branched conversation)
+///
+/// The rule behind the table: when the app has already ACCEPTED fresh
+/// routing evidence into conversation-owned state (an admitted resume, the
+/// live registry, a response the catalog now reflects), the index must not
+/// disagree with it — the app cannot say one thing while its own shared
+/// index says another. Historical observations and unverified payload
+/// claims, by contrast, never overwrite a fresher confirmed mapping; they
+/// surface a conflict for the caller to log and resolve.
 ///
 /// Scope: every mapping is keyed by the normalized profile. Runtime ids from
 /// one profile can never establish or resolve ownership in another, and
@@ -78,6 +90,11 @@ final class ConversationIdentityIndex {
     /// Returns the existing mapping as a conflict when different positive
     /// evidence is already confirmed; the confirmed mapping stays and the
     /// caller decides what the disagreement means for its own flow.
+    ///
+    /// This is the LOW-authority API: historical observations and dual-ID
+    /// notification payloads (see the authority table in the type docs).
+    /// Fresh evidence the app has already adopted into conversation-owned
+    /// state must go through `recordAuthoritative` instead.
     @discardableResult
     func record(
         runtimeID: String,
@@ -105,6 +122,49 @@ final class ConversationIdentityIndex {
             conversationIdentityLog.fault(
                 "Identity conflict: runtime \(normalizedRuntime, privacy: .public) confirmed for \(confirmed, privacy: .public), incoming evidence (\(source.rawValue, privacy: .public)) claims \(normalizedDurable, privacy: .public) — keeping confirmed mapping"
             )
+            return conflict
+        }
+        runtimeToDurable[normalizedProfile, default: [:]][normalizedRuntime] = normalizedDurable
+        conversationIdentityLog.debug(
+            "Confirmed alias: runtime \(normalizedRuntime, privacy: .public) → durable \(normalizedDurable, privacy: .public) (\(source.rawValue, privacy: .public))"
+        )
+        return nil
+    }
+
+    /// Records FRESH authoritative routing evidence the app has already
+    /// accepted into conversation-owned state: an admitted `session.resume`
+    /// result, a `session.active_list` row, a verified create/branch
+    /// response. Where it disagrees with a historical confirmed mapping, the
+    /// rebind WINS — the app cannot act on one answer while its shared index
+    /// holds another — and the displaced mapping is returned and logged as
+    /// the conflict record. Suspended operations are unaffected: they hold
+    /// capture-time alias sets and can never gain ownership through the
+    /// rebind.
+    @discardableResult
+    func recordAuthoritative(
+        runtimeID: String,
+        durableID: String,
+        profile: String,
+        source: EvidenceSource
+    ) -> IdentityConflict? {
+        guard let normalizedProfile = ChatScrollIdentityNormalization.profile(profile),
+              let normalizedRuntime = ChatScrollIdentityNormalization.sessionID(runtimeID),
+              let normalizedDurable = ChatScrollIdentityNormalization.sessionID(durableID),
+              normalizedRuntime != normalizedDurable else {
+            return nil
+        }
+        if let confirmed = runtimeToDurable[normalizedProfile]?[normalizedRuntime] {
+            guard confirmed != normalizedDurable else { return nil }
+            let conflict = IdentityConflict(
+                runtimeID: normalizedRuntime,
+                confirmedDurableID: confirmed,
+                incomingDurableID: normalizedDurable,
+                source: source
+            )
+            conversationIdentityLog.fault(
+                "Authoritative rebind: runtime \(normalizedRuntime, privacy: .public) \(confirmed, privacy: .public) → \(normalizedDurable, privacy: .public) (\(source.rawValue, privacy: .public)); suspended work keeps its captured sets"
+            )
+            runtimeToDurable[normalizedProfile]?[normalizedRuntime] = normalizedDurable
             return conflict
         }
         runtimeToDurable[normalizedProfile, default: [:]][normalizedRuntime] = normalizedDurable

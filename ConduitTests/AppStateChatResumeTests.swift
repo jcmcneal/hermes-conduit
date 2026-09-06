@@ -2326,6 +2326,157 @@ final class AppStateChatResumeTests: XCTestCase {
         )
     }
 
+    func testAdmittedResumeRebindsStaleIndexMappingToSelectedConversation() async {
+        // The exact split-brain repro: the index holds a historical
+        // runtime-x → stored-b mapping, the catalog temporarily omits
+        // runtime-x, and resume(stored-a) is admitted returning runtime-x
+        // with no stored id (legacy rebind). The app adopted runtime-x for
+        // stored-a — the index must agree afterwards, never keep stored-b.
+        var requests: [String] = []
+        let index = ConversationIdentityIndex()
+        index.record(
+            runtimeID: "runtime-x",
+            durableID: "stored-b",
+            profile: "default",
+            source: .resume
+        )
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [] },
+                openSession: { _, sessionID, _ in
+                    requests.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: "runtime-x",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            conversationIdentityIndex: index
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+        harness.appState.activeSessionId = "stored-a"
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-x")
+        XCTAssertEqual(
+            index.durableID(forRuntime: "runtime-x", profile: "default"),
+            "stored-a",
+            "After an admitted resume the index and the selected conversation must agree"
+        )
+    }
+
+    func testStaleDualIdentityNotificationIsRejectedWithoutPoisoningIndex() async {
+        // Live truth: runtime-x belongs to stored-b (authoritative registry
+        // + catalog). A stale push claims runtime-x + stored-a. The routing
+        // attempt follows the payload, resume/admission rejects the
+        // contradiction, the open fails — and the index still says runtime-x
+        // → stored-b.
+        var requests: [String] = []
+        let index = ConversationIdentityIndex()
+        index.recordAuthoritative(
+            runtimeID: "runtime-x",
+            durableID: "stored-b",
+            profile: "default",
+            source: .activeList
+        )
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [
+                    self.session("stored-b", storedID: "stored-b", alternateIDs: ["runtime-x"])
+                ] },
+                openSession: { _, sessionID, _ in
+                    requests.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: "runtime-x",
+                        storedSessionId: "stored-b",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: [:])
+                    )
+                },
+                refreshContext: { _, _ in }
+            ),
+            conversationIdentityIndex: index
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.connection = connection
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+
+        let opened = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(
+                profile: nil,
+                sessionId: "runtime-x",
+                durableSessionID: "stored-a",
+                type: nil
+            )
+        )
+
+        XCTAssertFalse(opened, "The payload's stale durable claim contradicts live truth and must fail")
+        XCTAssertEqual(requests, ["stored-a"], "The attempt followed the payload's explicit durable id")
+        XCTAssertEqual(
+            index.durableID(forRuntime: "runtime-x", profile: "default"),
+            "stored-b",
+            "The rejected navigation must not poison the authoritative mapping"
+        )
+        XCTAssertEqual(
+            harness.appState.activeSessionId, "stored-a",
+            "The rejected open does not navigate to stored-b (foreign durable ownership)"
+        )
+        XCTAssertNotEqual(
+            harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-b",
+            "The rejected claim must not re-home the scroll canonical onto stored-b"
+        )
+    }
+
+    func testActiveListEvidenceIsRecordedAndRemainsObservational() {
+        // The live registry feeds the index (authoritative), and unrelated
+        // rows never change the selected conversation: recording is
+        // observational only.
+        let index = ConversationIdentityIndex()
+        let harness = makeHarness(conversationIdentityIndex: index)
+        harness.appState.sessions = [self.session("kept-selected")]
+        harness.appState.activeSessionId = "kept-selected"
+
+        harness.appState.recordActiveListEvidence(
+            [
+                LiveSessionStatus(
+                    runtimeSessionId: "runtime-x",
+                    storedSessionId: "stored-a",
+                    status: "working"
+                ),
+                LiveSessionStatus(
+                    runtimeSessionId: "runtime-unrelated",
+                    storedSessionId: "stored-unrelated",
+                    status: "idle"
+                ),
+            ],
+            profile: "default"
+        )
+
+        XCTAssertEqual(index.durableID(forRuntime: "runtime-x", profile: "default"), "stored-a")
+        XCTAssertEqual(index.durableID(forRuntime: "runtime-unrelated", profile: "default"), "stored-unrelated")
+        XCTAssertEqual(
+            harness.appState.activeSessionId, "kept-selected",
+            "Registry rows must never navigate or reselect"
+        )
+        // Foreign-profile isolation at the same boundary.
+        index.recordAuthoritative(
+            runtimeID: "runtime-x",
+            durableID: "stored-work",
+            profile: "work",
+            source: .activeList
+        )
+        XCTAssertEqual(
+            index.durableID(forRuntime: "runtime-x", profile: "default"),
+            "stored-a",
+            "Another profile's registry rows cannot reattribute this profile's runtime"
+        )
+    }
+
     func testCancelledAutomaticSyncRestoresComposerStateAfterCatalogReturns() async {
         let gate = ControlledSuspension()
         let catalog = [session("stored-b"), session("stored-a")]
@@ -4847,11 +4998,13 @@ final class AppStateChatResumeTests: XCTestCase {
 
     private func session(
         _ id: String,
+        storedID: String? = nil,
         alternateIDs: [String] = [],
         profile: String = "default"
     ) -> SessionSummary {
         SessionSummary(
             id: id,
+            storedSessionId: storedID,
             alternateIds: alternateIDs,
             title: id,
             model: "Hermes",

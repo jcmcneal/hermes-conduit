@@ -1060,14 +1060,36 @@ final class AppState: ObservableObject {
         ISO8601DateFormatter().string(from: Date())
     }
 
+    /// Durable-owned presentation persistence: once the conversation's
+    /// durable identity is positively established (a catalog-confirmed or
+    /// admission-established canonical), the durable key is the only key
+    /// presentation writes land under — runtime aliases are never
+    /// re-persisted, so a flush can never recreate an alias copy that
+    /// `consolidateUnderDurableKey` retired. Without a durable id
+    /// (runtime-only conversations) the supplied ids pass through unchanged.
+    static func durableOwnedPresentationIDs(
+        _ ids: [String],
+        durableSessionID: String?
+    ) -> [String] {
+        guard let durableSessionID = ChatScrollIdentityNormalization.sessionID(durableSessionID) else {
+            return ids
+        }
+        // A lookup may need the whole alias set, but a WRITE does not: the
+        // durable key owns the persisted record.
+        return [durableSessionID]
+    }
+
     /// Hermes can omit UI-only fields from persisted history. Retain a bounded
     /// local record so a reload does not drop a timestamp or tool preview.
     private func cacheMessagePresentation(for sessionIDs: [String] = []) {
-        let ids = sessionIDs + [
-            activeSessionId,
-            reconciliation?.requestedSessionId,
-            reconciliation?.resolvedSessionId
-        ].compactMap { $0 }
+        let ids = Self.durableOwnedPresentationIDs(
+            sessionIDs + [
+                activeSessionId,
+                reconciliation?.requestedSessionId,
+                reconciliation?.resolvedSessionId
+            ].compactMap { $0 },
+            durableSessionID: activeChatScrollSessionIdentity.canonicalSessionID
+        )
         let restorationKeys: Set<String>? = {
             guard let restorationGuard = restoredPendingDecisionCardsAwaitingConfirmation,
                   restorationGuard.profile == activeProfile,
@@ -3289,21 +3311,48 @@ final class AppState: ObservableObject {
                     || referenceIdentity.durableSessionID == established {
                     context?.resolvedDurableSessionId = established
                 }
-                // Commit the admitted result as positive evidence in the
-                // shared identity index: the returned runtime id (and the
-                // requested id, when it differs) positively route to the
-                // conversation's durable identity.
+                // Commit the admitted result as FRESH AUTHORITATIVE evidence
+                // in the shared identity index: the app just accepted this
+                // resume into conversation-owned state, so the index must
+                // agree — a historical conflicting mapping for the same
+                // runtime id is rebound here, never kept (split-brain is
+                // unacceptable between the selected conversation and the
+                // index).
+                //
+                // Durable candidates in priority order: an explicitly
+                // established stored id from the response, the selected
+                // conversation's established durable id, and finally the
+                // RESUME TARGET itself — the request was addressed by that
+                // stored id, so it is the durable the app is acting on (for
+                // a runtime-addressed resume the mapping degenerates to a
+                // self-mapping, which the index skips as information-free).
+                let requestedDurableCandidate: String? = sessionId
                 let admittedDurable = context?.resolvedDurableSessionId
                     ?? referenceIdentity.durableSessionID
+                    ?? requestedDurableCandidate
                 if let admittedDurable, !admittedDurable.isEmpty {
                     for admittedRuntimeID in [result.sessionId, sessionId] {
-                        conversationIdentityIndex.record(
+                        conversationIdentityIndex.recordAuthoritative(
                             runtimeID: admittedRuntimeID,
                             durableID: admittedDurable,
                             profile: profile,
                             source: .resume
                         )
                     }
+                    // Durable-owned presentation: the durable key is the
+                    // only persistent presentation key for this
+                    // conversation. Runtime-keyed records migrate into it
+                    // now, and the alias keys are retired so a later
+                    // re-attribution of a runtime id to a different
+                    // conversation can never inherit this presentation.
+                    let runtimeAliases = acceptedSessionIDs
+                        .union([result.sessionId, sessionId])
+                        .subtracting([admittedDurable])
+                    sessionPresentationCache.consolidateUnderDurableKey(
+                        profile: profile,
+                        durableSessionID: admittedDurable,
+                        runtimeAliases: Array(runtimeAliases)
+                    )
                 }
                 // A live voice turn captured the pre-rebind runtime; the
                 // admitted alias keeps its assistant stream flowing — but
@@ -3715,11 +3764,13 @@ final class AppState: ObservableObject {
             let storedID = created.storedSessionId ?? runtimeSessionID
             // The create response's runtime/stored semantics are verified
             // here (the summary is built from the same response), so the
-            // pair is positive identity evidence.
+            // pair is fresh authoritative evidence: the created conversation
+            // is being adopted into the catalog below, and the index must
+            // agree rather than keep any historical mapping for the runtime.
             if let runtime = ChatScrollIdentityNormalization.sessionID(runtimeSessionID),
                let durable = ChatScrollIdentityNormalization.sessionID(storedID),
                runtime != durable {
-                conversationIdentityIndex.record(
+                conversationIdentityIndex.recordAuthoritative(
                     runtimeID: runtime,
                     durableID: durable,
                     profile: activeProfile,
@@ -3886,10 +3937,18 @@ final class AppState: ObservableObject {
             : []
         let shouldPersistMergedPresentation = gatewayConfirmsActiveTurn
             || !unconfirmedPendingDecisionKeys.isEmpty
+        // Persisted presentation is durable-owned: once this conversation's
+        // canonical/durable id is established, alias keys are not re-created
+        // by writes (the merge lookup above stays a tolerant superset).
+        let persistedSessionIDs = Self.durableOwnedPresentationIDs(
+            sessionIDs,
+            durableSessionID: reconciliation?.resolvedDurableSessionId
+                ?? activeChatScrollSessionIdentity.canonicalSessionID
+        )
         sessionPresentationCache.save(
             shouldPersistMergedPresentation ? messages : result.messages,
             profile: activeProfile,
-            sessionIDs: sessionIDs,
+            sessionIDs: persistedSessionIDs,
             preservePendingDecisionCards: gatewayConfirmsActiveTurn || !unconfirmedPendingDecisionKeys.isEmpty,
             unconfirmedPendingDecisionKeys: unconfirmedPendingDecisionKeys
         )
@@ -5217,6 +5276,24 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// `session.active_list` rows are the gateway's live registry: every row
+    /// naming both a runtime and a stored id is fresh authoritative routing
+    /// evidence (the same authority class as a catalog snapshot), recorded
+    /// through the explicit authoritative rebind. The write is strictly
+    /// OBSERVATIONAL — recording rows never mutates the selected
+    /// conversation, and the healthy-foreground rule (observe the registry,
+    /// never resume without cause) is untouched.
+    func recordActiveListEvidence(_ rows: [LiveSessionStatus], profile: String) {
+        for row in rows {
+            conversationIdentityIndex.recordAuthoritative(
+                runtimeID: row.runtimeSessionId,
+                durableID: row.storedSessionId,
+                profile: profile,
+                source: .activeList
+            )
+        }
+    }
+
     /// Read-only registry probe for the active conversation. Matches a row by
     /// ANY identity the conversation is known under (requested, stored, and
     /// runtime aliases), so a runtime-id rotation cannot be mistaken for a
@@ -5225,6 +5302,8 @@ final class AppState: ObservableObject {
         requestedSessionID: String,
         using client: HermesClient
     ) async -> ForegroundRuntimeProbe {
+        let evidenceProfile = activeProfile
+        let evidenceServerIdentity = defaults.string(forKey: chatResumeServerIdentityKey)
         do {
             let rows: [LiveSessionStatus]
             if let probeActiveSessions = chatResumeLifecycleOperations.probeActiveSessions {
@@ -5232,6 +5311,17 @@ final class AppState: ObservableObject {
             } else {
                 rows = try await client.activeSessions()
             }
+            // Currency fence: rows observed before a SERVER change must not
+            // repopulate the index scope that change cleared. The fence is
+            // the committed server identity — the exact boundary
+            // prepareChatResumeForConnection uses — so a same-server client
+            // replacement (reconnect, possibly re-addressed) stays valid
+            // while a real server switch discards its in-flight rows.
+            guard evidenceProfile == activeProfile,
+                  defaults.string(forKey: chatResumeServerIdentityKey) == evidenceServerIdentity else {
+                return .unavailable("Probe superseded by connection change")
+            }
+            recordActiveListEvidence(rows, profile: evidenceProfile)
             let acceptedIDs = acceptedIdentitySessionIDs(forRequested: requestedSessionID)
             if let row = rows.first(where: {
                 acceptedIDs.contains($0.runtimeSessionId) || acceptedIDs.contains($0.storedSessionId)
@@ -6522,15 +6612,24 @@ final class AppState: ObservableObject {
         )
         // A decision raised while the app was backgrounded is delivered as a
         // structured payload on the notification (the one-shot gateway stream
-        // event was missed). Cache it under both the runtime and resolved
-        // stored IDs so the upcoming resume's `merge` restores the card
-        // regardless of which identity the gateway resumes against.
+        // event was missed). The card is recorded BEFORE the open — the
+        // upcoming resume's `merge` restores it into the live transcript —
+        // but persisted ONLY under the identity the push itself named
+        // (`requestedID`): that id provably belonged to the notified
+        // conversation at push time. The payload's durable claim is NOT
+        // written while unproven — a rejected open must not leave a card
+        // under a durable it merely claimed. When the open succeeds, the
+        // admitted resume's consolidation migrates the card to the durable
+        // key and retires the runtime key.
         if let decision = target.decision {
-            var routedIDs = [route.resumeTargetID, requestedID]
-            if let durable = route.durableSessionID {
-                routedIDs.append(durable)
-            }
-            recordNotificationDecision(decision, sessionIDs: routedIDs)
+            let knownKeys = route.durableSessionID.map { durable in
+                [route.resumeTargetID, requestedID, durable]
+            } ?? [route.resumeTargetID, requestedID]
+            recordNotificationDecision(
+                decision,
+                sessionIDs: knownKeys,
+                cacheSessionIDs: [requestedID]
+            )
         }
         let opened = await openSession(
             route.resumeTargetID,
@@ -6566,10 +6665,14 @@ final class AppState: ObservableObject {
     /// The decision's session key must match one of the routed session
     /// identities — a mismatched key could not be answered via
     /// `approval.respond` and would only duplicate or contradict the live card.
+    /// `cacheSessionIDs` is the (durable-owned) key set the card persists
+    /// under; `sessionIDs` remains the answerability guard.
     private func recordNotificationDecision(
         _ decision: PendingDecisionPayload,
-        sessionIDs: [String]
+        sessionIDs: [String],
+        cacheSessionIDs: [String]? = nil
     ) {
+        let persistedIDs = cacheSessionIDs ?? sessionIDs
         switch decision {
         case let .approval(sessionKey, description, choices):
             // Compare trimmed on both sides: the payload parser trims the
@@ -6600,7 +6703,7 @@ final class AppState: ObservableObject {
             sessionPresentationCache.recordPendingDecision(
                 message,
                 profile: activeProfile,
-                sessionIDs: sessionIDs
+                sessionIDs: persistedIDs
             )
         case let .clarify(requestId, question, choices):
             // Relay-delivered clarify: the plugin middleware minted this id and
@@ -6624,7 +6727,7 @@ final class AppState: ObservableObject {
             sessionPresentationCache.recordPendingDecision(
                 message,
                 profile: activeProfile,
-                sessionIDs: sessionIDs
+                sessionIDs: persistedIDs
             )
         case let .clarifyBatch(requestId, questions):
             // Batch relay decision (current notifier): the SAME batch
@@ -6641,7 +6744,7 @@ final class AppState: ObservableObject {
             sessionPresentationCache.recordPendingDecision(
                 message,
                 profile: activeProfile,
-                sessionIDs: sessionIDs
+                sessionIDs: persistedIDs
             )
         }
     }
@@ -6806,14 +6909,15 @@ final class AppState: ObservableObject {
                 lineageRootId: parentSessionId
             )
             // A branch is its own durable conversation: its response ids are
-            // positive evidence for the BRANCH only. They must never alias
-            // the source conversation, and the source keeps its own mappings.
+            // fresh authoritative evidence for the BRANCH only (adopted into
+            // the catalog below). They must never alias the source
+            // conversation, and the source keeps its own mappings.
             if let runtime = ChatScrollIdentityNormalization.sessionID(branched.sessionId),
                let durable = ChatScrollIdentityNormalization.sessionID(
                    branched.storedSessionId ?? branched.sessionId
                ),
                runtime != durable {
-                conversationIdentityIndex.record(
+                conversationIdentityIndex.recordAuthoritative(
                     runtimeID: runtime,
                     durableID: durable,
                     profile: activeProfile,
@@ -7151,6 +7255,8 @@ final class AppState: ObservableObject {
         // Capture the probe identity BEFORE the await — never re-derive it
         // from the mutable active session afterwards.
         let acceptedIDs = acceptedIdentitySessionIDs(forRequested: sessionId)
+        let evidenceProfile = activeProfile
+        let evidenceServerIdentity = defaults.string(forKey: chatResumeServerIdentityKey)
         let rows: [LiveSessionStatus]
         do {
             if let probeActiveSessions = chatResumeLifecycleOperations.probeActiveSessions {
@@ -7158,6 +7264,16 @@ final class AppState: ObservableObject {
             } else {
                 rows = try await client.activeSessions()
             }
+            // Currency fence (see probeForegroundRuntime): a server change
+            // during the await discards its in-flight rows.
+            guard evidenceProfile == activeProfile,
+                  defaults.string(forKey: chatResumeServerIdentityKey) == evidenceServerIdentity else {
+                lifecycleLog.notice(
+                    "submitComposer: stale-idle probe superseded by connection change; no evidence recorded"
+                )
+                return false
+            }
+            recordActiveListEvidence(rows, profile: evidenceProfile)
         } catch {
             // The registry could not be read (older gateway, transient
             // failure). Proceed with the ordinary send rather than blocking
@@ -8038,6 +8154,8 @@ final class AppState: ObservableObject {
         let lifecycleEvidence = turnLifecycleEvidence
         // The alias set was captured from the ORIGINAL submission before any
         // await; it is never re-derived from the mutable active session here.
+        let evidenceProfile = activeProfile
+        let evidenceServerIdentity = defaults.string(forKey: chatResumeServerIdentityKey)
         let rows: [LiveSessionStatus]
         do {
             if let probeActiveSessions = chatResumeLifecycleOperations.probeActiveSessions {
@@ -8045,6 +8163,13 @@ final class AppState: ObservableObject {
             } else {
                 rows = try await probeClient.activeSessions()
             }
+            // Currency fence (see probeForegroundRuntime): a server change
+            // during the await discards its in-flight rows.
+            guard evidenceProfile == activeProfile,
+                  defaults.string(forKey: chatResumeServerIdentityKey) == evidenceServerIdentity else {
+                return (.unresolved, reconnected, lifecycleEvidence)
+            }
+            recordActiveListEvidence(rows, profile: evidenceProfile)
         } catch {
             return (.unresolved, reconnected, lifecycleEvidence)
         }

@@ -520,4 +520,37 @@ final class SessionIdentityContractTests: XCTestCase {
             identity: identity
         ))
     }
+
+    // MARK: - Durable-owned presentation writes
+
+    func testPresentationWritesCollapseToDurableKeyOnceEstablished() {
+        // With no durable id (runtime-only conversation), the supplied
+        // runtime keys pass through: temporary runtime ownership is allowed.
+        XCTAssertEqual(
+            AppState.durableOwnedPresentationIDs(["runtime-x"], durableSessionID: nil),
+            ["runtime-x"]
+        )
+        // Once the durable id is established, it is the ONLY persisted key —
+        // whether or not the alias list already contained it. A write must
+        // never recreate a runtime-keyed copy that consolidation retired.
+        XCTAssertEqual(
+            AppState.durableOwnedPresentationIDs(
+                ["runtime-new", "stored-a"],
+                durableSessionID: "stored-a"
+            ),
+            ["stored-a"]
+        )
+        XCTAssertEqual(
+            AppState.durableOwnedPresentationIDs(
+                ["runtime-new"],
+                durableSessionID: "stored-a"
+            ),
+            ["stored-a"]
+        )
+        // Empty/whitespace ids collapse to the durable key alone.
+        XCTAssertEqual(
+            AppState.durableOwnedPresentationIDs(["", "  "], durableSessionID: "stored-a"),
+            ["stored-a"]
+        )
+    }
 }
