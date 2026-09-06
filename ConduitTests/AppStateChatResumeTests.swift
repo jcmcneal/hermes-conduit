@@ -4,6 +4,547 @@ import XCTest
 
 @MainActor
 final class AppStateChatResumeTests: XCTestCase {
+    func testPreserveCurrentUsesEstablishedStoredIdentityWhenCatalogLosesRuntimeAlias() async {
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: "runtime-a", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "runtime-a"
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-a")
+    }
+
+    func testPreserveCurrentResumesSelectedConversationWhenCatalogIsEmpty() async {
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: id, messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.activeSessionId = "selected"
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["selected"])
+        XCTAssertEqual(harness.appState.activeSessionId, "selected")
+    }
+
+    func testPreserveCurrentWithoutCurrentIdentityResumesNewestChatInsteadOfCreating() async {
+        // Review finding 1: with no established current conversation there is
+        // nothing to preserve, so the historical newest-chat selection must
+        // apply — preserve-current must not silently become session.create.
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("stored-newest"), self.session("stored-older")] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: id, messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-newest"], "Newest-chat fallback must survive, not fall through to create")
+        XCTAssertEqual(harness.appState.activeSessionId, "stored-newest")
+    }
+
+    func testPristineCanvasWithEmptyCatalogStillAttemptsSessionCreate() async {
+        // The other half of the no-current-identity boundary: an empty
+        // catalog with no current identity keeps the preexisting
+        // session.create behavior. The open seam must never fire.
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: id, messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        installComposerClient(in: harness)
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession()
+
+        XCTAssertTrue(requests.isEmpty, "No conversation exists to resume; the create path is the historical behavior")
+        XCTAssertNil(harness.appState.activeSessionId)
+        XCTAssertEqual(harness.appState.turnState, .idle)
+        // The create path itself ran (and failed on the unconnected test
+        // client) — proving the empty-catalog/no-identity boundary really
+        // reaches session.create rather than silently doing nothing.
+        XCTAssertTrue(
+            harness.appState.errorMessage?.hasPrefix("Failed to create session:") == true,
+            "Expected the create path's failure, got: \(harness.appState.errorMessage ?? "nil")"
+        )
+    }
+
+    func testPreserveCurrentRecoveryBuffersStreamEventsForForgottenRuntimeAlias() async {
+        // Invariant: while preserve-current recovery awaits session.resume,
+        // stream events addressed to any previously confirmed runtime alias
+        // stay associated with this reconciliation. The refreshed catalog
+        // omitted runtime-a, but the alias set was captured BEFORE the
+        // replacement — so the delta is buffered, replayed after the
+        // transcript replacement, and neither lost nor erased.
+        let openGate = ControlledSuspension()
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, _, _ in
+                await openGate.suspend()
+                return SessionResumeResult(sessionId: "runtime-a", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "runtime-a"
+
+        let sync = Task { @MainActor in
+            await harness.appState.syncSession()
+        }
+        await openGate.waitUntilSuspended()
+        harness.appState.handleStreamEvent(
+            .messageDelta(sessionId: "runtime-a", text: "Live recovery text")
+        )
+        openGate.resume()
+        await sync.value
+        // Pump the main actor so the replayed delta's scheduled streaming
+        // publish lands before the assertion.
+        harness.appState.showSidebar = true
+        harness.appState.showSidebar = false
+
+        XCTAssertEqual(
+            harness.appState.streamingText, "Live recovery text",
+            "An event for a confirmed alias must survive the resume window, not be erased by transcript replacement"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+    }
+
+    func testContradictoryResumeIsRejectedWithoutMutatingSelectedConversation() async {
+        // Selected durable stored-a; the resume explicitly says stored-b.
+        // The claim is rejected before transcript, identity, navigation, or
+        // persistence state is touched.
+        var requests: [String] = []
+        let existingMessage = ChatMessage(id: "m1", role: .user, content: "Keep me", timestamp: "1")
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(
+                    sessionId: "runtime-b",
+                    storedSessionId: "stored-b",
+                    messages: [ChatMessage(id: "foreign", role: .assistant, content: "Foreign", timestamp: "2")],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "runtime-a"
+        harness.appState.messages = [existingMessage]
+        harness.store.setLastSessionID("stored-a", for: "default")
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a", "A contradictory resume must not navigate")
+        XCTAssertEqual(harness.appState.messages, [existingMessage], "The selected transcript stays intact")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-a", "The resume store keeps the selected durable id")
+        XCTAssertEqual(harness.appState.turnState, .idle)
+        XCTAssertNotNil(harness.appState.errorMessage, "The rejection is surfaced, not silent")
+    }
+
+    func testResumeRuntimeOwnedByAnotherCatalogConversationIsRejected() async {
+        // The returned runtime id positively belongs to stored-b in the
+        // refreshed catalog: reject the rebind even without an explicit
+        // durable claim.
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [
+                self.session("unrelated"),
+                self.session("stored-a"),
+                self.session("stored-b", alternateIDs: ["runtime-b"])
+            ] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: "runtime-b", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "runtime-a"
+        harness.store.setLastSessionID("stored-a", for: "default")
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a", "A foreign runtime id must not rebind the selection")
+        XCTAssertEqual(harness.appState.messages, [])
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-a")
+    }
+
+    func testLegitimateRuntimeRotationRebindsWithoutNavigation() async {
+        // Hermes legitimately rotated stored-a: runtime-old → runtime-new.
+        // The rebind updates routing identity; the selected conversation
+        // stays stored-a and future addressing uses runtime-new.
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(
+                    sessionId: id == "stored-a" ? "runtime-new" : id,
+                    storedSessionId: id == "stored-a" ? "stored-a" : nil,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-old"])]
+        harness.appState.activeSessionId = "runtime-old"
+        harness.store.setLastSessionID("stored-a", for: "default")
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-new", "The runtime routing id follows the rotation")
+        XCTAssertEqual(
+            harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a",
+            "Rotation must not look like navigation to another conversation"
+        )
+        XCTAssertTrue(
+            harness.appState.activeChatScrollSessionIdentity.areEquivalent("runtime-old", "runtime-new"),
+            "Old and new runtime ids are positively confirmed aliases of the same conversation"
+        )
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-a")
+        XCTAssertEqual(harness.appState.turnState, .idle)
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testRuntimeOnlyConversationEstablishesDurableKeyFromResume() async {
+        // A runtime-only conversation (no catalog row, no established
+        // durable id) whose resume response names its stored key: the key is
+        // established as the durable identity — routing adoption, not
+        // navigation.
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-solo",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.activeSessionId = "runtime-solo"
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-solo")
+        XCTAssertEqual(
+            harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo",
+            "The response's stored key becomes the durable identity"
+        )
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-solo")
+        XCTAssertTrue(
+            harness.appState.activeChatScrollSessionIdentity.areEquivalent("runtime-solo", "stored-solo")
+        )
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testTargetResumeKeepsBufferedEventsForAliasDroppedFromRefreshedRow() async {
+        // The refreshed catalog still contains the selected row (matched via
+        // the durable id) but dropped its runtime alias: the target branch
+        // must keep the pre-captured alias accepted so in-flight events for
+        // it stay buffered and survive the transcript replacement.
+        let openGate = ControlledSuspension()
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, _, _ in
+                await openGate.suspend()
+                return SessionResumeResult(sessionId: "runtime-a", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-a"])]
+        harness.appState.activeSessionId = "stored-a"
+
+        let sync = Task { @MainActor in
+            await harness.appState.syncSession()
+        }
+        await openGate.waitUntilSuspended()
+        harness.appState.handleStreamEvent(
+            .messageDelta(sessionId: "runtime-a", text: "Alias survives")
+        )
+        openGate.resume()
+        await sync.value
+        harness.appState.showSidebar = true
+        harness.appState.showSidebar = false
+
+        XCTAssertEqual(harness.appState.streamingText, "Alias survives")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+    }
+
+    func testAutomaticReturnRejectionDoesNotScheduleReconnect() async {
+        // A rejected identity is deterministic; automatic-return recovery
+        // must not treat it as a retryable failure and loop on the same
+        // contradiction.
+        let scheduler = ControlledReconnectScheduler()
+        let harness = makeHarness(
+            reconnectScheduler: scheduler.schedule(after:operation:),
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.session("stored-a")] },
+                openSession: { _, _, _ in
+                    SessionResumeResult(
+                        sessionId: "runtime-b",
+                        storedSessionId: "stored-b",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.store.setLastSessionID("stored-a", for: "default")
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(scheduler.scheduledCount, 0, "A contradictory resume is not a reconnect candidate")
+        XCTAssertNotNil(harness.appState.errorMessage)
+        XCTAssertNil(harness.appState.activeSessionId, "No navigation happened")
+    }
+
+    func testDeletedActiveSessionIsNotResurrectedByPreserveCurrentRecovery() async {
+        // Explicit destructive navigation cleared the active identity
+        // (clearActiveSessionIfNeeded semantics). Preserve-current recovery
+        // has nothing to resurrect: it selects the newest remaining chat and
+        // never revisits the deleted conversation.
+        var requests: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("stored-remaining")] },
+            openSession: { _, id, _ in
+                requests.append(id)
+                return SessionResumeResult(sessionId: id, messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"), profile: "default")
+        harness.appState.sessions = [self.session("stored-remaining")]
+        harness.appState.activeSessionId = nil
+        harness.store.setLastSessionID("stored-deleted", for: "default")
+
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(requests, ["stored-remaining"], "The deleted conversation is not resurrected")
+        XCTAssertFalse(requests.contains("stored-deleted"))
+        XCTAssertEqual(harness.appState.activeSessionId, "stored-remaining")
+    }
+
+    func testRuntimeToDurableEstablishmentMigratesScrollPersistence() async {
+        // A runtime-only conversation's first durable-establishing resume
+        // moves the canonical key from runtime-solo to stored-solo. The
+        // stored-solo id has NO catalog row yet — the persistence migration
+        // must still happen, because the admitted durable id is positive
+        // identity evidence and the store's lookup is exact-keyed.
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(sessionId: id, storedSessionId: "stored-solo", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in }
+        ))
+        installComposerClient(in: harness)
+        let soloKey = ChatScrollSessionKey(profile: "default", sessionID: "runtime-solo")
+        let soloSnapshot = ChatScrollSnapshot(anchorMessageID: "anchor-solo", followsLatest: false)
+        harness.coordinator.recordViewport(soloSnapshot, for: soloKey)
+        let otherKey = ChatScrollSessionKey(profile: "default", sessionID: "stored-other")
+        let otherSnapshot = ChatScrollSnapshot(anchorMessageID: "anchor-other", followsLatest: false)
+        harness.coordinator.recordViewport(otherSnapshot, for: otherKey)
+        harness.coordinator.flush()
+
+        harness.appState.activeSessionId = "runtime-solo"
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo")
+        XCTAssertEqual(
+            harness.store.snapshot(for: ChatScrollSessionKey(profile: "default", sessionID: "stored-solo")),
+            soloSnapshot,
+            "The runtime-keyed viewport snapshot follows the established durable key"
+        )
+        XCTAssertNil(harness.store.snapshot(for: soloKey), "The old runtime key entry is migrated, not copied")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-solo")
+        XCTAssertEqual(harness.store.snapshot(for: otherKey), otherSnapshot, "Unrelated session persistence is untouched")
+    }
+
+    func testRuntimeToDurableEstablishmentMigratesScrollPersistenceThroughRotation() async {
+        // Same establishment, with the runtime id rotating at the same time:
+        // runtime-solo → runtime-new while stored-solo is established. The
+        // previously selected runtime key is positive evidence (accepted
+        // alias), so its persistence migrates to the new durable key.
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(
+                    sessionId: id == "runtime-solo" ? "runtime-new" : id,
+                    storedSessionId: id == "runtime-solo" ? "stored-solo" : nil,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        installComposerClient(in: harness)
+        let soloKey = ChatScrollSessionKey(profile: "default", sessionID: "runtime-solo")
+        let soloSnapshot = ChatScrollSnapshot(anchorMessageID: "anchor-solo", followsLatest: false)
+        harness.coordinator.recordViewport(soloSnapshot, for: soloKey)
+        harness.coordinator.flush()
+
+        harness.appState.activeSessionId = "runtime-solo"
+        await harness.appState.syncSession()
+
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-new", "The runtime id follows the rotation")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo")
+        XCTAssertTrue(
+            harness.appState.activeChatScrollSessionIdentity.areEquivalent("runtime-solo", "stored-solo")
+        )
+        XCTAssertEqual(
+            harness.store.snapshot(for: ChatScrollSessionKey(profile: "default", sessionID: "stored-solo")),
+            soloSnapshot,
+            "The pre-rotation runtime-keyed snapshot is available under the durable key"
+        )
+        XCTAssertNil(harness.store.snapshot(for: soloKey))
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-solo")
+    }
+
+    func testComposerExactSessionIDMatchStillRequiresDurableIdentity() async {
+        // Exact routing-string equality cannot bypass the durable fence: the
+        // catalog can re-attribute the same runtime string to a different
+        // conversation (discovery state), and a context captured before that
+        // must not keep sending rights into the re-attributed conversation.
+        var sends: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("stored-b", alternateIDs: ["shared-runtime"])] },
+            openSession: { _, _, _ in
+                SessionResumeResult(sessionId: "shared-runtime", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted }
+        ))
+        installComposerClient(in: harness)
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["shared-runtime"])]
+        harness.appState.activeSessionId = "shared-runtime"
+        let staleContext = harness.appState.composerSubmissionContext()
+
+        // Discovery re-attribution: the refreshed catalog resolves the
+        // shared runtime id under stored-b. The resume identity gate admits
+        // it (the runtime string is a confirmed alias), so only the durable
+        // fence can tell the captured context apart.
+        await harness.appState.syncSession()
+        XCTAssertEqual(
+            harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-b",
+            "Setup: the catalog re-attribution took effect"
+        )
+
+        let staleSubmitted = await harness.appState.submitComposer(text: "Stale", context: staleContext)
+
+        XCTAssertFalse(
+            staleSubmitted,
+            "Exact-ID equality with a re-attributed durable identity must be rejected"
+        )
+        XCTAssertTrue(sends.isEmpty, "The stale context must not reach the gateway")
+
+        let freshContext = harness.appState.composerSubmissionContext()
+        let freshSubmitted = await harness.appState.submitComposer(text: "Fresh", context: freshContext)
+
+        XCTAssertTrue(freshSubmitted, "A fresh context on the re-attributed conversation sends normally")
+        XCTAssertEqual(sends, ["shared-runtime"])
+    }
+
+    func testComposerExactMatchSurvivesRowLessDurableEstablishment() async {
+        // Catalog silence is not separation: a context captured on a
+        // runtime-only conversation (durable falls back to the runtime
+        // string) stays owned across the first durable-establishing resume —
+        // the new durable key has no catalog row yet, so there is no
+        // positive re-attribution evidence to fail the fence on.
+        var sends: [String] = []
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated")] },
+            openSession: { _, id, _ in
+                SessionResumeResult(sessionId: id, storedSessionId: "stored-solo", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted }
+        ))
+        installComposerClient(in: harness)
+        harness.appState.activeSessionId = "runtime-solo"
+        let context = harness.appState.composerSubmissionContext()
+
+        await harness.appState.syncSession()
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-solo")
+
+        let submitted = await harness.appState.submitComposer(text: "Established", context: context)
+
+        XCTAssertTrue(submitted, "A row-less durable establishment must not orphan an owned submission")
+        XCTAssertEqual(sends, ["runtime-solo"])
+    }
+
     func testSupersededBranchWaitingForTitleCannotMutateNewerSession() async {
         let titleGate = ControlledSuspension()
         let newerMessages = [
