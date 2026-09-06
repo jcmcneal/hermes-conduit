@@ -479,7 +479,7 @@ struct LoginView: View {
             let access = configuredCloudflareAccess
             let client = NativeAuthClient(baseURL: serverUrl, cloudflareAccess: access)
             let providers = try await client.authProviders()
-            guard providers.contains(where: { $0["supports_password"] as? Bool == true }) else {
+            guard HermesProviderCheck.supportsPassword(providers) else {
                 showWebView = true
                 if let access { KeychainHelper.saveCloudflareAccess(access, origin: serverUrl) }
                 return

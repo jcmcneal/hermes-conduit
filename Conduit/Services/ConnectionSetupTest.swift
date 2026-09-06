@@ -127,16 +127,20 @@ struct ConnectionSetupTestState: Equatable {
         }
     }
 
-    /// Pure reducer: folds one probe event into the state. Out-of-order or
-    /// duplicate events degrade gracefully instead of corrupting the list.
+    /// Pure reducer: folds one probe event into the state. Stage progress is
+    /// monotonic within a run — a terminal stage never reverts — so
+    /// out-of-order or duplicate events degrade gracefully instead of
+    /// corrupting the list.
     mutating func apply(_ event: ConnectionSetupTestEvent) {
         switch event {
         case .started(let stage):
-            guard self[stage] != .running else { return }
+            guard self[stage] == .pending else { return }
             self[stage] = .running
         case .succeeded(let stage):
+            guard self[stage] == .running else { return }
             self[stage] = .succeeded
         case .failed(let stage, let failure):
+            guard self[stage] == .pending || self[stage] == .running else { return }
             self[stage] = .failed(failure)
         }
     }
@@ -276,7 +280,7 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         // before native login. An arbitrary website answering 200 carries no
         // such provider, and 200 alone is never success.
         onEvent(.started(.dashboard))
-        guard providers.contains(where: { $0["supports_password"] as? Bool == true }) else {
+        guard HermesProviderCheck.supportsPassword(providers) else {
             Self.reportFailure(.dashboard, .unexpectedServerResponse, to: onEvent)
             return
         }
@@ -375,6 +379,10 @@ struct ConnectionSetupTestProbeStub: ConnectionSetupTesting {
     }
 
     let script: Script
+
+    static func fromLaunchArguments() -> ConnectionSetupTestProbeStub? {
+        Script.fromLaunchArguments()
+    }
 
     func runTest(
         result: ConnectionSetupResult,

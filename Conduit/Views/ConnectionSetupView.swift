@@ -109,7 +109,9 @@ struct ConnectionSetupView: View {
         testTask?.cancel()
         testTask = Task { @MainActor in
             await prober.runTest(result: run, cloudflareAccess: access, onEvent: { event in
-                flow.wrappedValue.applyTestEvent(event, generation: generation)
+                // Announce only events the model actually applied — dropped
+                // stale events never speak.
+                guard flow.wrappedValue.applyTestEvent(event, generation: generation) else { return }
                 // One completion announcement per run; individual stage
                 // transitions stay quiet.
                 switch event {

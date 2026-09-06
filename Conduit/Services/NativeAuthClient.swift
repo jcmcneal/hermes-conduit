@@ -80,6 +80,15 @@ struct NativeAuthConnection {
     }
 }
 
+/// The single definition of "this dashboard offers password login", shared by
+/// the normal login flow and the Connection Setup probe so the compatibility
+/// check can never drift between them.
+enum HermesProviderCheck {
+    static func supportsPassword(_ providers: [[String: Any]]) -> Bool {
+        providers.contains { $0["supports_password"] as? Bool == true }
+    }
+}
+
 /// URLSession-based Hermes dashboard authentication. Automatic URLSession
 /// cookie handling is disabled: each login transaction captures its own
 /// response cookies, scopes them to the exact ticket URL, and returns them for

@@ -136,7 +136,7 @@ struct ConnectionSetupForm: View {
                     .accessibilityLabel("Dashboard password")
             }.id(Field.password)
             validationNotice
-            nextButton("Test Connection") { flow.submitCredentials() }
+            nextButton("Continue") { flow.submitCredentials() }
         }
     }
 
@@ -167,7 +167,6 @@ struct ConnectionSetupForm: View {
                     .buttonStyle(.borderedProminent)
                     .tint(.conduitAccent)
                     .frame(maxWidth: .infinity)
-                    .disabled(flow.testState.isRunning)
                     .accessibilityIdentifier("setup.test.run")
             }
         }
@@ -307,7 +306,8 @@ struct ConnectionSetupStageList: View {
                 ConnectionSetupStageRow(
                     stage: stage,
                     stageState: state[stage],
-                    label: state.rowLabel(for: stage)
+                    label: state.rowLabel(for: stage),
+                    accessibilityLabel: state.accessibilityLabel(for: stage)
                 )
             }
         }
@@ -321,6 +321,7 @@ struct ConnectionSetupStageRow: View {
     let stage: ConnectionSetupTestStage
     let stageState: ConnectionSetupStageState
     let label: String
+    let accessibilityLabel: String
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -330,9 +331,10 @@ struct ConnectionSetupStageRow: View {
             Spacer(minLength: 0)
         }
         // One VoiceOver element per stage: the objective name plus a state
-        // word, so success/failure never rides on icon or color alone.
+        // word, so success/failure never rides on icon or color alone. The
+        // format comes from the model, which pins it in tests.
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(stage.objectiveLabel), \(stageState.accessibilityState)")
+        .accessibilityLabel(accessibilityLabel)
         .accessibilityIdentifier("setup.test.stage.\(stage.identifierName)")
     }
 

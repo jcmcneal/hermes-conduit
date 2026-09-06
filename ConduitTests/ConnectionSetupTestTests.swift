@@ -366,10 +366,11 @@ final class ConnectionSetupTestTests: XCTestCase {
     func testAccessibilityLabelsCarryStateWordsNotJustIcons() {
         var state = ConnectionSetupTestState()
         XCTAssertEqual(state.accessibilityLabel(for: .server), "Dashboard reachable, waiting")
-        state.apply(.started(.dashboard))
-        XCTAssertEqual(state.accessibilityLabel(for: .dashboard), "Hermes dashboard found, checking")
+        state.apply(.started(.server))
         state.apply(.succeeded(.server))
         XCTAssertEqual(state.accessibilityLabel(for: .server), "Dashboard reachable, passed")
+        state.apply(.started(.dashboard))
+        XCTAssertEqual(state.accessibilityLabel(for: .dashboard), "Hermes dashboard found, checking")
         state.apply(.failed(.authentication, .authenticationRejected))
         XCTAssertEqual(state.accessibilityLabel(for: .authentication), "Authentication, failed")
     }
@@ -402,6 +403,16 @@ final class ConnectionSetupTestTests: XCTestCase {
     }
 
     // MARK: - Probe orchestration (spec 20) — real NativeAuthClient through URLProtocol
+
+    override func setUp() {
+        super.setUp()
+        SetupProbeURLProtocol.reset()
+    }
+
+    override func tearDown() {
+        SetupProbeURLProtocol.reset()
+        super.tearDown()
+    }
 
     private static func makeProbeConfiguration() -> URLSessionConfiguration {
         let configuration = URLSessionConfiguration.ephemeral
@@ -456,6 +467,11 @@ final class ConnectionSetupTestTests: XCTestCase {
     func testProbeTLSBadDateMapsToTLSBadDateAtServerStage() async {
         let events = await runProbe("https://probe-tlsdate.example")
         XCTAssertEqual(events, [.started(.server), .failed(.server, .tlsBadDate)])
+    }
+
+    func testProbeTLSHandshakeFailureMapsToTLSFailureAtServerStage() async {
+        let events = await runProbe("https://probe-tlsfailure.example")
+        XCTAssertEqual(events, [.started(.server), .failed(.server, .tlsFailure)])
     }
 
     func testProbeDashboard5xxMapsToDashboardUnavailableAfterTransportSuccess() async {
@@ -554,12 +570,80 @@ final class ConnectionSetupTestTests: XCTestCase {
             "The probe must never commit cookies to the shared store: \(jarCookies.map(\.name))"
         )
         XCTAssertEqual(
-            SetupProbeURLProtocol.requestCount(forPath: "/auth/password-login"),
+            SetupProbeURLProtocol.requestCount(forPath: "/auth/password-login", host: "probe-success.example"),
             1,
             "One user-requested test equals exactly one authentication attempt"
         )
-        XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/api/auth/ws-ticket"), 1)
-        XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/api/auth/providers"), 1)
+        XCTAssertEqual(
+            SetupProbeURLProtocol.requestCount(forPath: "/api/auth/ws-ticket", host: "probe-success.example"), 1
+        )
+        XCTAssertEqual(
+            SetupProbeURLProtocol.requestCount(forPath: "/api/auth/providers", host: "probe-success.example"), 1
+        )
+    }
+
+    // MARK: - Inherited Cloudflare token origin gate (spec 9/18)
+
+    private func makeOriginGateFlow(
+        existingServerURL: String,
+        origin: String,
+        access: CloudflareAccessCredentials?
+    ) -> ConnectionSetupFlow {
+        ConnectionSetupFlow(
+            entry: .credentials,
+            draft: ConnectionSetupDraft(
+                existingServerURL: existingServerURL,
+                username: "probe-user",
+                password: "in-memory-fixture"
+            ),
+            inheritedCloudflareAccess: access,
+            inheritedCloudflareOriginURL: origin
+        )
+    }
+
+    func testInheritedCloudflareTokenIsUsedOnlySameOrigin() {
+        let token = CloudflareAccessCredentials(clientID: "gate-client-id", clientSecret: "gate-client-secret")
+        let address = "https://hermes.example:9443"
+
+        // Same origin (including an added path prefix): token applies.
+        let sameOrigin = makeOriginGateFlow(existingServerURL: address, origin: address, access: token)
+        XCTAssertEqual(sameOrigin.cloudflareAccessForDraft(), token)
+        let pathPrefixed = makeOriginGateFlow(
+            existingServerURL: "\(address)/hermes", origin: address, access: token
+        )
+        XCTAssertEqual(pathPrefixed.cloudflareAccessForDraft(), token)
+
+        // A different host, scheme, or effective port never receives it.
+        let otherHost = makeOriginGateFlow(existingServerURL: address, origin: "https://other.example:9443", access: token)
+        XCTAssertNil(otherHost.cloudflareAccessForDraft())
+        let otherScheme = makeOriginGateFlow(existingServerURL: address, origin: "http://hermes.example:9443", access: token)
+        XCTAssertNil(otherScheme.cloudflareAccessForDraft())
+        let otherPort = makeOriginGateFlow(existingServerURL: address, origin: "https://hermes.example", access: token)
+        XCTAssertNil(otherPort.cloudflareAccessForDraft())
+
+        // No recorded origin, or an unconfigured token: nothing is sent.
+        let noOrigin = makeOriginGateFlow(existingServerURL: address, origin: "", access: token)
+        XCTAssertNil(noOrigin.cloudflareAccessForDraft())
+        let unconfigured = makeOriginGateFlow(
+            existingServerURL: address, origin: address,
+            access: CloudflareAccessCredentials(clientID: "  ", clientSecret: "")
+        )
+        XCTAssertNil(unconfigured.cloudflareAccessForDraft())
+        let noToken = makeOriginGateFlow(existingServerURL: address, origin: address, access: nil)
+        XCTAssertNil(noToken.cloudflareAccessForDraft())
+    }
+
+    func testEditingTheDraftAwayFromTheTokenOriginDropsTheToken() {
+        let token = CloudflareAccessCredentials(clientID: "gate-client-id", clientSecret: "gate-client-secret")
+        var flow = makeOriginGateFlow(
+            existingServerURL: "https://hermes.example:9443", origin: "https://hermes.example:9443", access: token
+        )
+        XCTAssertEqual(flow.cloudflareAccessForDraft(), token)
+
+        // The user edits the dashboard address inside the wizard: the token
+        // must not follow it to the new origin.
+        flow.draft.existingServerURL = "https://elsewhere.example:9443"
+        XCTAssertNil(flow.cloudflareAccessForDraft(), "A service token is never sent cross-origin")
     }
 }
 
@@ -583,6 +667,7 @@ private final class SetupProbeURLProtocol: URLProtocol {
         "probe-timeout.example",
         "probe-tls.example",
         "probe-tlsdate.example",
+        "probe-tlsfailure.example",
         "probe-5xx.example",
         "probe-foreign.example",
         "probe-auth401.example",
@@ -638,10 +723,19 @@ private final class SetupProbeURLProtocol: URLProtocol {
 
     // MARK: - Inspection
 
-    static func requestCount(forPath path: String) -> Int {
+    /// Clears all recorded traffic so per-test exact-count assertions are
+    /// independent of execution order.
+    static func reset() {
         lock.lock()
         defer { lock.unlock() }
-        return requestRecords.filter { $0.url?.path == path }.count
+        responseRecords.removeAll()
+        requestRecords.removeAll()
+    }
+
+    static func requestCount(forPath path: String, host: String) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestRecords.filter { $0.url?.path == path && $0.url?.host == host }.count
     }
 
     static func requestHeader(forPath path: String, name: String) -> String? {
@@ -671,6 +765,7 @@ private final class SetupProbeURLProtocol: URLProtocol {
         case "probe-timeout.example": return URLError(.timedOut)
         case "probe-tls.example": return URLError(.serverCertificateUntrusted)
         case "probe-tlsdate.example": return URLError(.serverCertificateHasBadDate)
+        case "probe-tlsfailure.example": return URLError(.secureConnectionFailed)
         default: return nil
         }
     }

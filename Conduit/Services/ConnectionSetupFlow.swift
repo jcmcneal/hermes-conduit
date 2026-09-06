@@ -316,13 +316,12 @@ struct ConnectionSetupFlow: Equatable {
 
     // MARK: - Round 4: staged connection test
 
-    /// True only when the test ran to completion successfully against the
-    /// CURRENT draft. Any draft edit (address, port, scheme, username,
-    /// password, access method) immediately invalidates a prior success —
-    /// the revision no longer matches, so Review can no longer authorize
-    /// the old result.
+    /// True only when every stage succeeded against the CURRENT draft. Any
+    /// draft edit (address, port, scheme, username, password, access method)
+    /// immediately invalidates a prior success — the revision no longer
+    /// matches, so Review can no longer authorize the old result.
     var hasCurrentSuccessfulTest: Bool {
-        testState.authentication == .succeeded && testSucceededAtRevision == draftRevision
+        testState.allSucceeded && testSucceededAtRevision == draftRevision
     }
 
     /// The inherited Cloudflare token, ONLY when it is same-origin with the
@@ -348,18 +347,20 @@ struct ConnectionSetupFlow: Equatable {
         return testGeneration
     }
 
-    /// Applies one probe event to the staged state. Events from an obsolete
-    /// generation — superseded by cancellation, a newer run, or a draft
-    /// reset — are ignored, so a late completion can never overwrite newer
-    /// state. The final success seals the result at the current draft
-    /// revision and advances to Review.
-    mutating func applyTestEvent(_ event: ConnectionSetupTestEvent, generation: Int) {
-        guard generation == testGeneration, step == .connectionTest else { return }
+    /// Applies one probe event to the staged state, returning whether it was
+    /// applied. Events from an obsolete generation — superseded by
+    /// cancellation, a newer run, or a draft reset — are ignored, so a late
+    /// completion can never overwrite newer state. The final success seals
+    /// the result at the current draft revision and advances to Review.
+    @discardableResult
+    mutating func applyTestEvent(_ event: ConnectionSetupTestEvent, generation: Int) -> Bool {
+        guard generation == testGeneration, step == .connectionTest else { return false }
         testState.apply(event)
         if event == .succeeded(.authentication) {
             testSucceededAtRevision = draftRevision
             advance(to: .review)
         }
+        return true
     }
 
     /// Cancels in-flight test work: any running stage resets to untested and
@@ -377,7 +378,8 @@ struct ConnectionSetupFlow: Equatable {
     /// failed inputs (connection details for transport/dashboard failures,
     /// credentials for authentication failures). Falls back to inserting the
     /// details step after credentials for the short auth-recovery route,
-    /// which enters the wizard past the details screen.
+    /// which enters the wizard past the details screen. Leaving the test
+    /// step also invalidates any in-flight run's generation.
     mutating func editAfterFailedTest(_ target: ConnectionSetupStep) {
         guard step == .connectionTest,
               target == .connectionDetails || target == .loginCredentials else { return }
@@ -390,6 +392,7 @@ struct ConnectionSetupFlow: Equatable {
             advance(to: target)
         }
         validationError = nil
+        testGeneration += 1
     }
 
     /// Continue from the test screen to Review when a current successful
