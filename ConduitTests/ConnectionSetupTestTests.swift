@@ -694,7 +694,7 @@ private final class SetupProbeURLProtocol: URLProtocol {
             // Never completes: the cancellation test cancels the task.
             return
         }
-        if let transportError = Self.transportError(for: url.host) {
+        if let transportError = Self.transportError(for: url.host ?? "") {
             client?.urlProtocol(self, didFailWithError: transportError)
             return
         }
