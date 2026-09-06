@@ -191,6 +191,12 @@ struct PersistedSessionTranscript {
 struct ComposerSubmissionContext: Equatable {
     let profile: String
     let sessionID: String?
+    /// The conversation's durable identity at capture time. A legitimate
+    /// runtime rebind (runtime-old → runtime-new of the SAME conversation)
+    /// keeps this value stable, so an otherwise-owned submission survives the
+    /// rebind; a navigation handoff to another conversation and back still
+    /// fails the viewport-generation fence.
+    let durableSessionID: String?
     let clientIdentity: ObjectIdentifier?
     let clientEpoch: UUID
     let viewportTransitionGeneration: UInt64
@@ -821,6 +827,11 @@ final class AppState: ObservableObject {
         let requestedSessionId: String
         var automaticSyncOperationID: UUID?
         var resolvedSessionId: String?
+        /// Durable id an admitted resume explicitly established for this
+        /// conversation (parsed from `stored_session_id` / `session_key`).
+        /// Routing state only — it rebinds the conversation's runtime to a
+        /// new stored key without ever looking like navigation.
+        var resolvedDurableSessionId: String?
         var acceptedSessionIDs: Set<String>
         let acceptsAnySession: Bool
         let streamTextAtBoundary: String?
@@ -831,6 +842,7 @@ final class AppState: ObservableObject {
             token: UUID,
             requestedSessionId: String,
             automaticSyncOperationID: UUID? = nil,
+            resolvedDurableSessionId: String? = nil,
             acceptedSessionIDs: Set<String> = [],
             acceptsAnySession: Bool = false,
             streamTextAtBoundary: String? = nil,
@@ -840,6 +852,7 @@ final class AppState: ObservableObject {
             self.token = token
             self.requestedSessionId = requestedSessionId
             self.automaticSyncOperationID = automaticSyncOperationID
+            self.resolvedDurableSessionId = resolvedDurableSessionId
             self.acceptedSessionIDs = acceptedSessionIDs
             self.acceptsAnySession = acceptsAnySession
             self.streamTextAtBoundary = streamTextAtBoundary
@@ -2012,6 +2025,7 @@ final class AppState: ObservableObject {
             catalog: identityCatalog,
             requestedSessionID: reconciliation?.requestedSessionId,
             resolvedSessionID: reconciliation?.resolvedSessionId,
+            resolvedDurableSessionID: reconciliation?.resolvedDurableSessionId,
             previousIdentity: current,
             isReconciling: isReconciling ?? current.isReconciling,
             advanceSettledRevision: advanceSettledRevision
@@ -2668,11 +2682,14 @@ final class AppState: ObservableObject {
         ) else { return .superseded }
         let profile = activeProfile
         let retainedActiveTurn = activeTurnCatalogSession()
-        // Capture the selected conversation before replacing the published
-        // catalog. A preserve-current recovery is allowed to outlive a
-        // transient catalog omission; it must not fall back to another chat.
-        let preservedSessionID = purpose == .preserveCurrent
-            ? (canonicalSessionID(for: activeSessionId) ?? activeSessionId)
+        // Capture the selected conversation's complete identity — durable id,
+        // runtime id, and every positively confirmed alias — BEFORE replacing
+        // the published catalog. A preserve-current recovery is allowed to
+        // outlive a transient catalog omission; it must not fall back to
+        // another chat, and it must not rediscover its alias set from the
+        // replacement catalog that just forgot it.
+        let preservedIdentity = purpose == .preserveCurrent
+            ? captureConversationIdentity(for: activeSessionId)
             : nil
         turnState = .synchronizing
 
@@ -2740,11 +2757,21 @@ final class AppState: ObservableObject {
                 automaticSyncOperationID: automaticOperationID
             )
             if let target {
+                // A freshly selected catalog row positively establishes the
+                // target's identity: the row's ids are the accepted set, and
+                // its stored id (when labeled) is the durable one.
+                let targetIdentity = ConversationIdentity(
+                    profile: profile,
+                    durableSessionID: target.storedSessionId ?? target.id,
+                    runtimeSessionID: target.storedSessionId != nil ? target.id : nil,
+                    acceptedSessionIDs: Set([target.id] + target.alternateIds)
+                )
                 let succeeded = await reconcile(
                     sessionId: target.id,
                     using: client,
                     token: token,
                     acceptedSessionIDs: Set([target.id] + target.alternateIds),
+                    conversationIdentity: targetIdentity,
                     automaticWorkToken: automaticWorkToken,
                     automaticSyncOperationID: automaticOperationID,
                     requiredViewportTransitionGeneration: requiredViewportTransitionGeneration,
@@ -2763,12 +2790,20 @@ final class AppState: ObservableObject {
                 return succeeded
                     ? .completed
                     : chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
-            } else if purpose == .preserveCurrent, let preservedSessionID {
+            } else if purpose == .preserveCurrent, let preservedIdentity,
+                      let preservedSessionID = preservedIdentity.resumeTargetID {
+                // The refreshed catalog omitted the selected conversation (or
+                // only its runtime alias). Resume the captured identity
+                // directly with the alias set captured BEFORE the replacement,
+                // so stream events addressed to a forgotten runtime alias stay
+                // associated with this reconciliation instead of leaking into
+                // or being erased by the transcript replacement.
                 let succeeded = await reconcile(
                     sessionId: preservedSessionID,
                     using: client,
                     token: token,
-                    acceptedSessionIDs: knownSessionIDs(for: preservedSessionID),
+                    acceptedSessionIDs: preservedIdentity.acceptedSessionIDs,
+                    conversationIdentity: preservedIdentity,
                     automaticWorkToken: automaticWorkToken,
                     automaticSyncOperationID: automaticOperationID,
                     requiredViewportTransitionGeneration: requiredViewportTransitionGeneration,
@@ -3001,6 +3036,7 @@ final class AppState: ObservableObject {
         using client: HermesClient,
         token: UUID,
         acceptedSessionIDs: Set<String> = [],
+        conversationIdentity: ConversationIdentity? = nil,
         automaticWorkToken: ChatResumeAutomaticWorkToken? = nil,
         automaticSyncOperationID: UUID? = nil,
         requiredViewportTransitionGeneration: UInt64? = nil,
@@ -3129,9 +3165,54 @@ final class AppState: ObservableObject {
                 return false
             }
 
+            // Admission gate: validate what the resume response claims about
+            // this conversation BEFORE adopting anything. A rejected claim
+            // must not mutate the active id, identity, transcript, scroll
+            // state, presentation cache, or composer ownership.
+            let referenceIdentity = conversationIdentity ?? ConversationIdentity(
+                profile: profile,
+                durableSessionID: nil,
+                runtimeSessionID: reconciliation?.requestedSessionId,
+                acceptedSessionIDs: acceptedSessionIDs.union([sessionId])
+            )
+            let claim = ResumeIdentityClaim(
+                runtimeSessionID: result.sessionId,
+                durableSessionID: result.storedSessionId
+            )
             var context = reconciliation
-            context?.resolvedSessionId = result.sessionId
-            context?.acceptedSessionIDs.insert(result.sessionId)
+            switch ConversationIdentityGate.admit(
+                claim: claim,
+                selected: referenceIdentity,
+                catalog: sessions + cronSessions
+            ) {
+            case .failure(let rejection):
+                sessionCatalogLog.fault(
+                    "Rejected contradictory resume: \(String(describing: rejection), privacy: .public); requested=\(sessionId, privacy: .public), returned=\(result.sessionId, privacy: .public)"
+                )
+                // Unstick the synchronizing wait without clobbering a live
+                // running turn; the transcript and identity above are left
+                // exactly as they were.
+                if turnState == .synchronizing {
+                    turnState = .idle
+                }
+                errorMessage = "Hermes returned a different conversation while resuming this one. Try reopening it."
+                settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
+                chatResumeCoordinator.abandonPendingAutomaticSync()
+                return false
+            case .success:
+                context?.resolvedSessionId = result.sessionId
+                context?.acceptedSessionIDs.insert(result.sessionId)
+                // A response that explicitly names the durable identity may
+                // ESTABLISH it for a runtime-only conversation (the same
+                // adoption the create path performs) or confirm the selected
+                // one. It never overwrites a different established durable
+                // id — confirmed-alias claims keep the existing binding.
+                if let established = result.storedSessionId, !established.isEmpty,
+                   referenceIdentity.durableSessionID == nil
+                    || referenceIdentity.durableSessionID == established {
+                    context?.resolvedDurableSessionId = established
+                }
+            }
             reconciliation = context
             refreshActiveChatScrollSessionIdentity(isReconciling: true)
 
@@ -3297,18 +3378,18 @@ final class AppState: ObservableObject {
                 let acceptedSessionIDs: Set<String>
                 if let boundary,
                    let boundarySessionID = boundary.streamSessionIDAtBoundary {
-                    // Do not infer that a newly returned runtime ID belongs
-                    // to this boundary solely because the resume RPC returned
-                    // it. Keep only IDs already accepted for the boundary and
-                    // known as aliases of that catalog session; an empty
-                    // result intentionally disables deduplication rather than
-                    // risking text from a different session.
-                    acceptedSessionIDs = boundary.acceptedSessionIDs.intersection(
-                        knownSessionIDs(for: boundarySessionID)
-                    )
+                    // The boundary's accepted set was captured from the
+                    // catalog and scroll identity BEFORE recovery replaced
+                    // them, so it survives a refresh that temporarily forgot
+                    // the runtime alias. Do NOT re-derive it from the
+                    // replaced catalog: that would drop exactly the alias the
+                    // resume window needs. An empty set intentionally
+                    // disables deduplication rather than risking text from a
+                    // different session.
+                    acceptedSessionIDs = boundary.acceptedSessionIDs
                     if !acceptedSessionIDs.contains(result.sessionId) {
                         sessionCatalogLog.debug(
-                            "Skipping buffered delta dedup because resumed session \(result.sessionId, privacy: .public) is not a catalog-confirmed alias of the reconciliation boundary"
+                            "Skipping buffered delta dedup because resumed session \(result.sessionId, privacy: .public) is not a catalog-confirmed alias of the reconciliation boundary (boundary=\(boundarySessionID, privacy: .public))"
                         )
                     }
                 } else {
@@ -6060,6 +6141,41 @@ final class AppState: ObservableObject {
         return Set([session.id] + session.alternateIds)
     }
 
+    /// Captures the complete selected conversation identity from the CURRENT
+    /// catalog and scroll identity. Recovery callers MUST invoke this before
+    /// replacing the catalog: the accepted alias set is positively
+    /// established evidence, and the refreshed catalog that recovery is about
+    /// to publish is allowed to have temporarily forgotten the runtime alias.
+    /// Reconstructing the set from the already-replaced catalog would drop
+    /// the alias for exactly the reconcile window that needs it.
+    private func captureConversationIdentity(for selectedID: String?) -> ConversationIdentity? {
+        guard let selectedID, !selectedID.isEmpty else { return nil }
+        var accepted = Set([selectedID])
+        var durableSessionID: String?
+        if let row = (sessions + cronSessions).first(where: {
+            $0.id == selectedID || $0.alternateIds.contains(selectedID)
+        }) {
+            accepted.formUnion([row.id] + row.alternateIds)
+            // The row's stored id is the positively labeled durable identity;
+            // a row without one is represented by its primary id.
+            durableSessionID = row.storedSessionId ?? row.id
+        } else if activeChatScrollSessionIdentity.contains(selectedID) {
+            // Not in the catalog anymore, but the scroll identity still holds
+            // positively confirmed aliases for it (mid-refresh windows).
+            accepted.formUnion(activeChatScrollSessionIdentity.equivalentSessionIDs)
+            if let canonical = activeChatScrollSessionIdentity.canonicalSessionID,
+               canonical != selectedID {
+                durableSessionID = canonical
+            }
+        }
+        return ConversationIdentity(
+            profile: activeProfile,
+            durableSessionID: durableSessionID,
+            runtimeSessionID: durableSessionID == selectedID ? nil : selectedID,
+            acceptedSessionIDs: accepted
+        )
+    }
+
     private func sessionMatchesActiveSession(_ session: SessionSummary) -> Bool {
         guard let activeSessionId else { return false }
         return Set([session.id] + session.alternateIds).contains(activeSessionId)
@@ -6162,6 +6278,7 @@ final class AppState: ObservableObject {
         // through `eventBelongsToActiveSession` and repopulating the
         // cleared message array while reconciliation is in flight.
         flushPendingPresentationCache()
+        let openedIdentity = captureConversationIdentity(for: sessionId)
         let token = beginReconciliation()
         let acceptedSessionIDs = knownSessionIDs(for: sessionId)
         setActiveSessionState(id: sessionId)
@@ -6179,6 +6296,7 @@ final class AppState: ObservableObject {
             using: client,
             token: token,
             acceptedSessionIDs: acceptedSessionIDs,
+            conversationIdentity: openedIdentity,
             requiredViewportTransitionGeneration: transitionGeneration
         )
         guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
@@ -6416,6 +6534,7 @@ final class AppState: ObservableObject {
             using: client,
             token: token,
             acceptedSessionIDs: knownSessionIDs(for: sessionId),
+            conversationIdentity: captureConversationIdentity(for: sessionId),
             requiredViewportTransitionGeneration: transitionGeneration
         )
         if !succeeded || messages == previousMessages {
@@ -6526,6 +6645,7 @@ final class AppState: ObservableObject {
                 using: client,
                 token: token,
                 acceptedSessionIDs: knownSessionIDs(for: branched.sessionId),
+                conversationIdentity: captureConversationIdentity(for: branched.sessionId),
                 requiredViewportTransitionGeneration: transitionGeneration
             )
             guard chatViewportTransitionIsCurrent(generation: transitionGeneration),
@@ -6558,6 +6678,7 @@ final class AppState: ObservableObject {
         ComposerSubmissionContext(
             profile: activeProfile,
             sessionID: activeSessionId,
+            durableSessionID: activeSessionId.flatMap { canonicalSessionID(for: $0) },
             clientIdentity: client.map(ObjectIdentifier.init),
             clientEpoch: activeClientEpoch,
             viewportTransitionGeneration: chatViewportTransitionGeneration
@@ -6565,11 +6686,21 @@ final class AppState: ObservableObject {
     }
 
     private func isCurrentComposerSubmission(_ context: ComposerSubmissionContext) -> Bool {
-        context.profile == activeProfile
-            && context.sessionID == activeSessionId
-            && context.clientIdentity == client.map(ObjectIdentifier.init)
-            && context.clientEpoch == activeClientEpoch
-            && context.viewportTransitionGeneration == chatViewportTransitionGeneration
+        guard context.profile == activeProfile,
+              context.clientIdentity == client.map(ObjectIdentifier.init),
+              context.clientEpoch == activeClientEpoch,
+              context.viewportTransitionGeneration == chatViewportTransitionGeneration else {
+            return false
+        }
+        // A captured nil session (pristine new-chat canvas) only stays valid
+        // while no session was selected since; any active session means the
+        // canvas was replaced.
+        guard let capturedSessionID = context.sessionID else {
+            return activeSessionId == nil
+        }
+        guard let activeSessionId else { return false }
+        if capturedSessionID == activeSessionId { return true }
+        return currentComposerSubmissionContextIfOwnedAndAliased(context) != nil
     }
 
     private func composerSubmissionOwnershipIsCurrent(
@@ -6610,16 +6741,35 @@ final class AppState: ObservableObject {
     ) -> ComposerSubmissionContext? {
         guard composerSubmissionOwnershipIsCurrent(context),
               let activeSessionId,
-              composerSessionIDsAreEquivalent(context.sessionID, activeSessionId) else {
+              composerSessionIDsAreEquivalent(context.sessionID, activeSessionId),
+              composerDurableIdentityMatches(context) else {
             return nil
         }
         return ComposerSubmissionContext(
             profile: context.profile,
             sessionID: activeSessionId,
+            durableSessionID: context.durableSessionID,
             clientIdentity: context.clientIdentity,
             clientEpoch: context.clientEpoch,
             viewportTransitionGeneration: context.viewportTransitionGeneration
         )
+    }
+
+    /// Defense-in-depth durable fence for the alias path: the equivalence
+    /// check above admits positively confirmed aliases, and this additionally
+    /// requires the captured submission to belong to the conversation the
+    /// aliases mean. Never overrides the profile/client/epoch/viewport
+    /// generation fences — a navigation handoff (A → B → A) is rejected by
+    /// the viewport generation fence even though the durable id matches
+    /// again on return.
+    private func composerDurableIdentityMatches(_ context: ComposerSubmissionContext) -> Bool {
+        guard let capturedDurable = context.durableSessionID else { return true }
+        guard let activeSessionId,
+              let currentDurable = canonicalSessionID(for: activeSessionId) else {
+            return true
+        }
+        return capturedDurable == currentDurable
+            || composerSessionIDsAreEquivalent(capturedDurable, currentDurable)
     }
 
     private func recoverComposerSubmission(

@@ -283,6 +283,11 @@ struct SessionRuntimeSnapshot {
 
 struct SessionResumeResult {
     let sessionId: String
+    /// The durable stored-session key the response names, parsed from
+    /// `stored_session_id` / `session_key` when the gateway provides one.
+    /// Deliberately separate from `sessionId`: a returned runtime id alone is
+    /// never proof of durable conversation identity.
+    var storedSessionId: String? = nil
     let messages: [ChatMessage]
     let snapshot: SessionRuntimeSnapshot
 }
@@ -913,6 +918,12 @@ final class HermesClient: ObservableObject {
         )
         let object = result.objectValue ?? [:]
         let resolvedId = object["session_id"]?.stringValue ?? sessionId
+        // The durable stored key is parsed separately from the runtime id and
+        // stays nil when the gateway omits it (legacy gateways). Callers must
+        // not treat the runtime `session_id` as durable identity evidence.
+        let storedId = ["stored_session_id", "session_key"]
+            .compactMap { object[$0]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
         let messages = MessageNormalizer.normalizeMessages(
             object["messages"]?.arrayValue ?? []
         )
@@ -932,6 +943,7 @@ final class HermesClient: ObservableObject {
         }
         return SessionResumeResult(
             sessionId: resolvedId,
+            storedSessionId: storedId,
             messages: messages,
             snapshot: SessionRuntimeSnapshot(
                 object: snapshotObject,
