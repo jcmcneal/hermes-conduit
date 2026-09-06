@@ -87,7 +87,7 @@ struct NativeAuthConnection {
 /// is an unexpected server response. Collapsing them back into "an empty
 /// provider list" would re-create the ambiguity that made browser-auth
 /// deployments unclassifiable.
-enum AuthProviderDiscoveryResult: Equatable {
+enum AuthProviderDiscoveryResult {
     /// The dashboard answered `/api/auth/providers` with recognizable Hermes
     /// provider JSON. The array may be empty (a valid Hermes answer meaning
     /// "no providers configured") or name non-password providers only.
@@ -100,6 +100,22 @@ enum AuthProviderDiscoveryResult: Equatable {
     /// auth/provider structure: malformed JSON, a JSON object without a
     /// `providers` array, or arbitrary web content.
     case unrecognized
+}
+
+extension AuthProviderDiscoveryResult: Equatable {
+    /// Provider arrays are dictionaries of JSON values, so structural
+    /// equality goes through NSArray/NSDictionary's recursive isEqual.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.interactiveSignInRequired, .interactiveSignInRequired),
+             (.unrecognized, .unrecognized):
+            return true
+        case (.providers(let lhsProviders), .providers(let rhsProviders)):
+            return (lhsProviders as NSArray).isEqual(to: rhsProviders)
+        default:
+            return false
+        }
+    }
 }
 
 /// The single definition of "this dashboard offers password login", shared by
