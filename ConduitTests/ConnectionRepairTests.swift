@@ -218,7 +218,10 @@ final class ConnectionRepairTests: XCTestCase {
             testSucceededAtRevision: flow.testSucceededAtRevision
         ))
 
-        // A draft edit invalidates the staged success and the candidate.
+        // A draft edit invalidates the staged success and the candidate:
+        // Back walks Review → test → details, then Continue reaches the
+        // credentials step.
+        flow.back()
         flow.back()
         flow.submitDetails()
         XCTAssertEqual(flow.step, .loginCredentials)
