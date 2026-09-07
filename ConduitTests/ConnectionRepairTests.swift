@@ -449,7 +449,7 @@ final class ConnectionRepairTests: XCTestCase {
 
         XCTAssertEqual(harness.appState.connection?.ticket, "repaired-ticket", "A cannot overwrite B's connection")
         XCTAssertEqual(harness.appState.activeSessionId, "stored-a", "A cannot choose a different session")
-        XCTAssertEqual(harness.appState.recoverySequence.currentPurpose, .preserveCurrent,
+        XCTAssertEqual(harness.recoverySequence.currentPurpose, .preserveCurrent,
                        "No automaticReturn selection occurs after B wins")
         XCTAssertEqual(connectCount.value, 1, "Only the explicit repair ever reached a connection")
     }
