@@ -405,14 +405,14 @@ final class ConnectionRepairTests: XCTestCase {
 
     func testBrowserSignInRepairActivatesAndRemembersWithoutInventingCredentials() async {
         let harness = makeHarness(lifecycleOperations: sessionPreservingFakes(connectClient: { _ in }))
-        harness.appState.connection = HermesConnection(baseUrl: failedURL, ticket: "stale-ticket")
-        harness.appState.client = HermesClient(connection: HermesConnection(baseUrl: failedURL, ticket: "t"), profile: "default")
-        harness.defaults.set(failedURL, forKey: "conduit.dashboardURL")
+        harness.appState.connection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
+        harness.appState.client = HermesClient(connection: HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "t"), profile: "default")
+        harness.defaults.set(ConnectionRepairTests.failedURL, forKey: "conduit.dashboardURL")
 
         let outcome = await harness.appState.performConnectionRepair(.browserSignIn(
             ticket: "browser-ticket",
-            baseURL: failedURL,
-            configuration: ConnectionSetupResult(serverURL: failedURL, username: "", password: "")
+            baseURL: ConnectionRepairTests.failedURL,
+            configuration: ConnectionSetupResult(serverURL: ConnectionRepairTests.failedURL, username: "", password: "")
         ))
 
         XCTAssertEqual(outcome, .activated)
@@ -420,7 +420,7 @@ final class ConnectionRepairTests: XCTestCase {
         XCTAssertEqual(harness.appState.connection?.ticket, "browser-ticket")
         // Existing browser-auth semantics: the activated dashboard is
         // remembered and no native credentials are invented.
-        XCTAssertEqual(harness.defaults.string(forKey: "conduit.dashboardURL"), failedURL)
+        XCTAssertEqual(harness.defaults.string(forKey: "conduit.dashboardURL"), ConnectionRepairTests.failedURL)
     }
 
     // MARK: - Race: explicit repair outranks late automatic recovery (spec 26)
