@@ -44,7 +44,7 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleEngineConfigurationChange(_:)),
-            name: AVAudioEngine.configurationChangeNotification,
+            name: .AVAudioEngineConfigurationChange,
             object: engine
         )
     }
