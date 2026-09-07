@@ -204,8 +204,10 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         coordinator.release(lease)
 
         // The failed deactivation must not crash or misreport the session as
-        // inactive while the system session is actually still applied.
-        XCTAssertEqual(session.deactivationCount, 1)
+        // inactive while the system session is actually still applied. The
+        // mock records only successful calls, so zero recorded deactivations
+        // plus a retained policy means the attempt threw and was swallowed.
+        XCTAssertEqual(session.deactivationCount, 0)
         XCTAssertEqual(coordinator.appliedPolicy, .standalonePlayback)
 
         // The next ownership transition retries the deactivation instead of
@@ -214,7 +216,7 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         let retryLease = try coordinator.acquire(.standalonePlayback)
         coordinator.release(retryLease)
 
-        XCTAssertEqual(session.deactivationCount, 2)
+        XCTAssertEqual(session.deactivationCount, 1)
         XCTAssertEqual(session.lastDeactivationOptions, .notifyOthersOnDeactivation)
         XCTAssertNil(coordinator.appliedPolicy)
     }
