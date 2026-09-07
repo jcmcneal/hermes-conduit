@@ -254,8 +254,10 @@ final class ConnectionRepairTests: XCTestCase {
             testSucceededAtRevision: flow.testSucceededAtRevision
         ))
 
-        // Cancellation rotates the generation and invalidates everything.
-        flow.cancelTest()
+        // A newer test run rotates the generation and invalidates everything
+        // (cancelling a FINISHED success is a deliberate no-op — Round-4
+        // semantics — so the invalidation trigger is the next run).
+        XCTAssertNotNil(flow.beginTest())
         XCTAssertFalse(candidateB.isCurrent(
             hasCurrentSuccessfulTest: flow.hasCurrentSuccessfulTest,
             testGeneration: flow.testGeneration,
