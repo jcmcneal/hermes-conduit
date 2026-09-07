@@ -32,7 +32,6 @@ final class HapticsTests: XCTestCase {
 
         Haptics.testEmissionHandler = { events.append($0) }
         Haptics.testSuppressesHardware = false
-        Haptics.coreHapticsEngineCreationCount = 0
 
         // While a voice session may hold the audio session, response haptics
         // degrade to the UIKit fallback pattern and must not create — or
@@ -46,10 +45,11 @@ final class HapticsTests: XCTestCase {
         )
     }
 
-    func testUnsuppressedResponseStartedAttemptsCoreHapticsEngine() {
+    func testUnsuppressedResponseStartedRequestsCustomEngineWithoutHardware() {
         let previousHandler = Haptics.testEmissionHandler
         let previousSuppressesHardware = Haptics.testSuppressesHardware
         var events: [Haptics.Event] = []
+        var factoryCalls = 0
         defer {
             Haptics.testEmissionHandler = previousHandler
             Haptics.testSuppressesHardware = previousSuppressesHardware
@@ -57,20 +57,24 @@ final class HapticsTests: XCTestCase {
 
         Haptics.testEmissionHandler = { events.append($0) }
         Haptics.testSuppressesHardware = false
-        Haptics.coreHapticsEngineCreationCount = 0
+        // A throwing factory proves the allowed path REQUESTS the custom
+        // engine without constructing or starting real haptic hardware.
+        Haptics.coreHapticsEngineFactoryForTesting = {
+            factoryCalls += 1
+            throw VoiceAudioError.unavailable("No haptic hardware in unit tests.")
+        }
 
         Haptics.responseStarted(coreHapticsAllowed: true)
 
         XCTAssertEqual(events, [.responseStarted])
-        XCTAssertEqual(
-            Haptics.coreHapticsEngineCreationCount, 1,
-            "unsuppressed response haptics attempt the custom Core Haptics pattern"
-        )
+        XCTAssertEqual(factoryCalls, 1, "the allowed path requests the custom engine")
+        XCTAssertEqual(Haptics.coreHapticsEngineCreationCount, 1)
     }
 
     func testHapticsDisabledPreventsEngineCreation() {
         let defaults = UserDefaults.standard
         let previousValue = defaults.object(forKey: Haptics.preferenceKey)
+        var factoryCalls = 0
         defer {
             if let previousValue {
                 defaults.set(previousValue, forKey: Haptics.preferenceKey)
@@ -80,13 +84,18 @@ final class HapticsTests: XCTestCase {
         }
 
         Haptics.enabled = false
+        Haptics.coreHapticsEngineFactoryForTesting = {
+            factoryCalls += 1
+            throw VoiceAudioError.unavailable("No haptic hardware in unit tests.")
+        }
 
         Haptics.responseStarted(coreHapticsAllowed: true)
 
         XCTAssertEqual(
-            Haptics.coreHapticsEngineCreationCount, 0,
-            "a disabled haptics preference must never create Core Haptics resources"
+            factoryCalls, 0,
+            "a disabled haptics preference must never request Core Haptics resources"
         )
+        XCTAssertEqual(Haptics.coreHapticsEngineCreationCount, 0)
     }
 
     func testEngineStopPolicyDiscardsOnlyRecoveryCriticalStops() {

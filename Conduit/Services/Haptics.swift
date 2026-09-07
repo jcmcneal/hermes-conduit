@@ -188,13 +188,20 @@ enum Haptics {
     /// Test seam: counts makeCoreHapticsEngine() attempts so tests can pin
     /// that suppressed/disabled response haptics never create an engine.
     static var coreHapticsEngineCreationCount = 0
-    /// Clears cached engine and pattern state so the creation counter and
-    /// engine reuse are deterministic regardless of test order.
+    /// Test seam: when set, replaces real CHHapticEngine construction so
+    /// tests can verify that the allowed path requests the custom engine
+    /// without touching haptic hardware. Throwing from the factory
+    /// simulates construction failure; returning an engine still runs the
+    /// response-engine configuration.
+    static var coreHapticsEngineFactoryForTesting: (() throws -> CHHapticEngine)?
+    /// Clears cached engine, pattern state, factory, and counter so engine
+    /// requests are deterministic regardless of test order.
     static func resetCoreHapticsStateForTesting() {
         cancelLifecyclePattern()
         clearLifecyclePatternState()
         coreHapticsEngine = nil
         coreHapticsEngineCreationCount = 0
+        coreHapticsEngineFactoryForTesting = nil
     }
 #endif
 
@@ -392,6 +399,11 @@ enum Haptics {
     private static func makeCoreHapticsEngine() throws -> CHHapticEngine {
 #if DEBUG
         coreHapticsEngineCreationCount += 1
+        if let factory = coreHapticsEngineFactoryForTesting {
+            let engine = try factory()
+            configureResponseHapticEngine(engine)
+            return engine
+        }
 #endif
         // Deliberately the session-free initializer: binding this engine to
         // AVAudioSession.sharedInstance() re-introduces the issue #140
@@ -399,6 +411,11 @@ enum Haptics {
         // start). Coexistence with voice capture is enforced by suppression
         // in responseStarted(coreHapticsAllowed:), not by session sharing.
         let engine = try CHHapticEngine()
+        configureResponseHapticEngine(engine)
+        return engine
+    }
+
+    private static func configureResponseHapticEngine(_ engine: CHHapticEngine) {
         engine.playsHapticsOnly = enginePolicy.playsHapticsOnly
         engine.isAutoShutdownEnabled = true
         engine.resetHandler = { [weak engine] in
@@ -417,7 +434,6 @@ enum Haptics {
                 }
             }
         }
-        return engine
     }
 
     private static func clearLifecyclePatternState() {
