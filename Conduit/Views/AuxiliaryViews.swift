@@ -591,12 +591,22 @@ private struct SettingsHome: View {
     @EnvironmentObject private var appState: AppState
     /// Round 5: the Settings entry into the existing Connection Setup
     /// assistant, seeded from the current configuration.
-    @State private var showsConnectionSetup = false
+    @State private var connectionSetupSeed: ConnectionSetupSeed?
     /// Set by the wizard's completion when the applied plan changes the
     /// saved configuration; surfaced as an alert only after the wizard sheet
     /// has dismissed (one presentation context at a time).
     @State private var pendingAppliedNotice = false
     @State private var appliedConnectionNotice = false
+
+    /// Per-presentation seed for the wizard, built once when the row is
+    /// tapped so the Keychain reads stay off the render path.
+    private struct ConnectionSetupSeed: Identifiable {
+        let url: String
+        let username: String
+        let password: String
+        let cloudflareAccess: CloudflareAccessCredentials?
+        var id: String { url }
+    }
 
     var body: some View {
         ZStack {
@@ -622,7 +632,15 @@ private struct SettingsHome: View {
                             detail: "Test, troubleshoot, or change your connection",
                             identifier: "settings.connection-setup"
                         ) {
-                            showsConnectionSetup = true
+                            let seedURL = currentDashboardURL
+                            let saved = KeychainHelper.loadCredentials()
+                            let seeded = ConnectionSetupSeeding.wizardCredentials(for: seedURL, saved: saved)
+                            connectionSetupSeed = ConnectionSetupSeed(
+                                url: seedURL,
+                                username: seeded?.username ?? "",
+                                password: seeded?.password ?? "",
+                                cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seedURL)
+                            )
                         }
                     }
                     homeSection("On this device", tint: .conduitAccent) {
@@ -639,12 +657,36 @@ private struct SettingsHome: View {
                 .padding(16)
             }
         }
-        .sheet(isPresented: $showsConnectionSetup, onDismiss: {
+        .sheet(item: $connectionSetupSeed, onDismiss: {
             guard pendingAppliedNotice else { return }
             pendingAppliedNotice = false
             appliedConnectionNotice = true
-        }) {
-            connectionSetupSheet
+        }) { seed in
+            ConnectionSetupView(
+                initialDestination: .currentConnection,
+                initialDraft: ConnectionSetupDraft(
+                    existingServerURL: seed.url,
+                    username: seed.username,
+                    password: seed.password
+                ),
+                // The probe may reuse this same-origin service token; the
+                // wizard re-verifies the origin itself before sending it and
+                // never displays, edits, or persists it.
+                initialCloudflareAccess: seed.cloudflareAccess,
+                initialCloudflareOriginURL: seed.url
+            ) { result in
+                // Reload the saved state at apply time: the plan must decide
+                // against what exists NOW, not what existed when the sheet
+                // was seeded.
+                let plan = ConnectionSetupApplication.plan(
+                    result: result,
+                    currentDashboardURL: seed.url,
+                    savedCredentials: KeychainHelper.loadCredentials(),
+                    savedCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seed.url)
+                )
+                plan.perform(appState: appState)
+                pendingAppliedNotice = !plan.isEmpty
+            }
         }
         .alert("Settings applied", isPresented: $appliedConnectionNotice) {
             Button("OK", role: .cancel) {}
@@ -658,35 +700,6 @@ private struct SettingsHome: View {
     /// tested result never writes to the live session itself.
     private var currentDashboardURL: String {
         appState.connection?.baseUrl ?? appState.lastDashboardURL
-    }
-
-    @ViewBuilder
-    private var connectionSetupSheet: some View {
-        let seedURL = currentDashboardURL
-        let saved = KeychainHelper.loadCredentials()
-        let seeded = ConnectionSetupSeeding.wizardCredentials(for: seedURL, saved: saved)
-        ConnectionSetupView(
-            initialDestination: .currentConnection,
-            initialDraft: ConnectionSetupDraft(
-                existingServerURL: seedURL,
-                username: seeded?.username ?? "",
-                password: seeded?.password ?? ""
-            ),
-            // The probe may reuse this same-origin service token; the wizard
-            // re-verifies the origin itself before sending it and never
-            // displays, edits, or persists it.
-            initialCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seedURL),
-            initialCloudflareOriginURL: seedURL
-        ) { result in
-            let plan = ConnectionSetupApplication.plan(
-                result: result,
-                currentDashboardURL: seedURL,
-                savedCredentials: saved,
-                savedCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seedURL)
-            )
-            plan.perform(appState: appState)
-            pendingAppliedNotice = !plan.isEmpty
-        }
     }
 
     private var profileDisplayName: String {

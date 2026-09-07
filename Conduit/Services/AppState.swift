@@ -2243,6 +2243,7 @@ final class AppState: ObservableObject {
     func loadSavedConnection() {
         #if DEBUG
         if let stub = Self.uiTestConnectedStub() {
+            lifecycleLog.notice("UI-test connected stub active: no transport will be created and reconnects are inert")
             connection = stub
             isConnected = true
             isConnecting = false

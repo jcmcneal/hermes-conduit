@@ -29,7 +29,12 @@ struct ConnectionSetupApplication: Equatable, CustomStringConvertible, CustomDeb
     /// credentials DO exist, and the tested URL moved: the applied
     /// configuration cannot use them, and keeping them would send a stale
     /// password to the next reconnect against the new address. The live
-    /// session is untouched either way.
+    /// session is untouched either way. A credential-less apply to the SAME
+    /// URL deliberately keeps the saved record: that shape is the interactive
+    /// sign-in outcome for the current dashboard, which is not a verified
+    /// replacement for the working native credentials — deleting them here
+    /// would strand the still-connected configuration (Round-5 acceptance:
+    /// a failed or inconclusive experiment must be harmless).
     let clearsSavedCredentials: Bool
     /// Same-origin rewrite of the inherited Cloudflare Access token to the
     /// new normalized URL string (path-only moves). A cross-origin apply
@@ -99,8 +104,9 @@ extension ConnectionSetupApplication {
         var rewrite: CloudflareAccessRewrite?
         if let access = savedCloudflareAccess, access.isConfigured,
            LoginCloudflareHandoff.sameOrigin(currentURL, newURL) {
+            let currentOrigin = (try? ConnectionURLPolicy.normalizedBaseURL(currentURL)) ?? currentURL
             let newOrigin = (try? ConnectionURLPolicy.normalizedBaseURL(newURL)) ?? newURL
-            if newOrigin != currentURL {
+            if newOrigin != currentOrigin {
                 rewrite = CloudflareAccessRewrite(access: access, origin: newOrigin)
             }
         }
@@ -140,10 +146,14 @@ enum ConnectionSetupSeeding {
         for dashboardURL: String,
         saved: DashboardCredentials?
     ) -> (username: String, password: String)? {
-        guard let saved,
-              saved.baseURL == dashboardURL.trimmingCharacters(in: .whitespacesAndNewlines) else {
-            return nil
-        }
+        guard let saved else { return nil }
+        // Both sides compare policy-normalized, so a trailing-slash or
+        // default-port spelling of the same address still seeds. Anything
+        // that fails normalization compares trimmed-raw (fail closed).
+        let wanted = (try? ConnectionURLPolicy.normalizedBaseURL(dashboardURL))
+            ?? dashboardURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stored = (try? ConnectionURLPolicy.normalizedBaseURL(saved.baseURL)) ?? saved.baseURL
+        guard stored == wanted else { return nil }
         return (saved.username, saved.requiresFaceID ? "" : saved.password)
     }
 }

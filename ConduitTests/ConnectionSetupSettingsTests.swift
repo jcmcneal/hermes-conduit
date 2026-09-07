@@ -50,6 +50,30 @@ final class ConnectionSetupSettingsTests: XCTestCase {
         XCTAssertEqual(flow.step, .connectionTest)
         XCTAssertTrue(flow.enteredFromCurrentConnection)
         XCTAssertNil(flow.progressLabel, "The Settings entry sits outside the numbered first-run sequence")
+        XCTAssertTrue(flow.canGoBack, "Back from the test must reach an editable address")
+        var editable = flow
+        editable.back()
+        XCTAssertEqual(editable.step, .connectionDetails)
+    }
+
+    func testFaceIDWithheldSeedLandsOnDetailsInsteadOfAnEmptyPasswordProbe() {
+        // A username with a withheld (Face ID-protected) password is a NATIVE
+        // deployment: the wizard must ask for the password, never open
+        // straight onto a staged test that would spend an empty-credential
+        // login attempt on the user's own server.
+        let flow = ConnectionSetupFlow(
+            entry: .currentConnection,
+            draft: ConnectionSetupDraft(existingServerURL: currentURL, username: "eric", password: "")
+        )
+        XCTAssertEqual(flow.step, .connectionDetails)
+    }
+
+    func testUnbuildableSeedAddressFallsBackToTheDetailsEntry() {
+        let flow = ConnectionSetupFlow(
+            entry: .currentConnection,
+            draft: ConnectionSetupDraft(existingServerURL: "not a url")
+        )
+        XCTAssertEqual(flow.step, .connectionDetails, "A broken address belongs on the details screen, which surfaces the validation")
     }
 
     // MARK: - Existing native-auth connection
@@ -112,6 +136,54 @@ final class ConnectionSetupSettingsTests: XCTestCase {
         XCTAssertFalse(flow.testedSettingsUnchanged)
     }
 
+    func testLoginEntryAlwaysOffersTheSettingsHandoffEvenWhenUnchanged() throws {
+        // The "Done" offer belongs to the Settings entry alone: the
+        // LoginView-driven wizard keeps its normal "Use these settings"
+        // handoff even when the user edited nothing.
+        var flow = ConnectionSetupFlow(entry: .credentials, draft: ConnectionSetupDraft(
+            existingServerURL: currentURL, username: "eric", password: "fixture"
+        ))
+        flow.answerCredentials(.yes)
+        XCTAssertEqual(flow.step, .loginCredentials)
+        flow.submitCredentials()
+        StagedTestDriver.runSuccessfulTest(on: &flow)
+        XCTAssertEqual(flow.step, .review)
+        XCTAssertFalse(flow.testedSettingsUnchanged, "The login entry must never collapse the handoff into Done")
+    }
+
+    func testInteractiveEntryCanContinueWithEmptyCredentialsAfterEditingTheAddress() throws {
+        // Edit-after-failure must not dead-end at a meaningless password
+        // screen for an interactive-auth deployment: with both fields empty
+        // and a buildable address, the Settings entry continues to the test.
+        var flow = ConnectionSetupFlow(
+            entry: .currentConnection,
+            draft: ConnectionSetupDraft(existingServerURL: currentURL)
+        )
+        XCTAssertEqual(flow.step, .connectionTest)
+        flow.back()
+        XCTAssertEqual(flow.step, .connectionDetails)
+        flow.draft.existingServerURL = "https://fixed.example/hermes"
+        flow.submitDetails()
+        XCTAssertEqual(flow.step, .loginCredentials)
+        XCTAssertTrue(flow.draft.username.isEmpty)
+        XCTAssertTrue(flow.draft.password.isEmpty)
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionTest, "Empty credentials must not block the Settings interactive path")
+        XCTAssertNil(flow.validationError)
+    }
+
+    func testLoginEntryStillRequiresCredentialsBeforeTheTest() {
+        // The empty-credential relaxation is scoped to the Settings entry;
+        // the LoginView wizard keeps its strict requirement.
+        var flow = ConnectionSetupFlow(entry: .credentials, draft: ConnectionSetupDraft(
+            existingServerURL: currentURL
+        ))
+        flow.answerCredentials(.yes)
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .loginCredentials)
+        XCTAssertEqual(flow.validationError, .credentialsRequired)
+    }
+
     // MARK: - Interactive auth from Settings
 
     func testInteractiveAuthDeploymentTestsAndCompletesWithoutAnyPassword() throws {
@@ -168,6 +240,18 @@ final class ConnectionSetupSettingsTests: XCTestCase {
                        "The same-origin token must reach discovery even with no credentials in the draft")
     }
 
+    func testInheritedCloudflareTokenNeverAppliesCrossOriginWithoutCredentials() throws {
+        let access = try XCTUnwrap(CloudflareAccessCredentials.from(clientID: "id", clientSecret: "secret"))
+        let flow = ConnectionSetupFlow(
+            entry: .currentConnection,
+            draft: ConnectionSetupDraft(existingServerURL: currentURL),
+            inheritedCloudflareAccess: access,
+            inheritedCloudflareOriginURL: "https://other.example:9443"
+        )
+        XCTAssertNil(flow.cloudflareAccessForDraft(),
+                     "Origin safety does not depend on credentials being present in the draft")
+    }
+
     func testTestConfigurationPreservesTheAddressWithoutRequiringCredentials() throws {
         let draft = ConnectionSetupDraft(existingServerURL: currentURL, username: "", password: "")
         let configuration = try draft.testConfiguration()
@@ -186,6 +270,13 @@ final class ConnectionSetupSettingsTests: XCTestCase {
         let seeded = ConnectionSetupSeeding.wizardCredentials(for: currentURL, saved: matching)
         XCTAssertEqual(seeded?.username, "eric")
         XCTAssertEqual(seeded?.password, "fixture")
+
+        // The same address spelled with a trailing slash still seeds: both
+        // sides are compared policy-normalized.
+        let trailingSlash = ConnectionSetupSeeding.wizardCredentials(
+            for: currentURL + "/", saved: matching
+        )
+        XCTAssertEqual(trailingSlash?.username, "eric")
 
         let faceID = DashboardCredentials(
             baseURL: currentURL, username: "eric", password: "fixture", requiresFaceID: true
@@ -274,6 +365,18 @@ final class ConnectionSetupSettingsTests: XCTestCase {
         )
         XCTAssertTrue(plan.isEmpty, "Testing the current address interactively changes nothing")
         XCTAssertFalse(plan.clearsSavedCredentials)
+    }
+
+    func testCredentiallessResultWithNoSavedCredentialsNeverTouchesCredentials() {
+        let plan = ConnectionSetupApplication.plan(
+            result: ConnectionSetupResult(serverURL: "https://new.example", username: "", password: ""),
+            currentDashboardURL: currentURL,
+            savedCredentials: nil,
+            savedCloudflareAccess: nil
+        )
+        XCTAssertEqual(plan.dashboardURLToRemember, "https://new.example")
+        XCTAssertNil(plan.credentialsToSave)
+        XCTAssertFalse(plan.clearsSavedCredentials, "There is nothing to clear when nothing was ever saved")
     }
 
     func testSameOriginPathMoveRewritesTheCloudflareTokenWithoutCopyingAcrossOrigins() throws {
