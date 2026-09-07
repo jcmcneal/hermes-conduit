@@ -72,7 +72,12 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
         // The active connection is intact: still inside Settings, still the
         // stubbed connected session, never bounced to the login card.
         XCTAssertFalse(app.textFields["login.server-url"].exists, "The live session must never be disrupted by the wizard")
-        XCTAssertTrue(app.staticTexts[Identity.stubDashboardURL].firstMatch.exists, "The Gateway row still shows the current dashboard")
+        let gatewayRow = app.buttons["settings.gateway"]
+        XCTAssertTrue(gatewayRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            gatewayRow.label.contains(Identity.stubDashboardURL),
+            "The Gateway row still shows the current dashboard, got: \(gatewayRow.label)"
+        )
     }
 
     // MARK: - Walk helpers

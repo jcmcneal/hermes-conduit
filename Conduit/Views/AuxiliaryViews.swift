@@ -625,7 +625,7 @@ private struct SettingsHome: View {
                         settingsLink(.capabilities, icon: "puzzlepiece.extension", title: "Capabilities", detail: "Skills, toolsets, and categories")
                     }
                     homeSection("Connection", tint: .conduitAura) {
-                        settingsLink(.gateway, icon: "radio", title: "Gateway", detail: snapshot.server ?? "Not connected")
+                        settingsLink(.gateway, icon: "radio", title: "Gateway", detail: snapshot.server ?? "Not connected", identifier: "settings.gateway")
                         settingsActionRow(
                             icon: "checkmark.circle",
                             title: "Connection Setup",
@@ -710,7 +710,7 @@ private struct SettingsHome: View {
         ConduitSettingsSection(title: title, symbol: title == "Profile" ? "person.crop.circle" : "gearshape.2", tint: tint, content: content)
     }
 
-    private func settingsLink(_ destination: SettingsDestination, icon: String, title: String, detail: String) -> some View {
+    private func settingsLink(_ destination: SettingsDestination, icon: String, title: String, detail: String, identifier: String = "") -> some View {
         Button {
             Haptics.selection()
             path.append(destination)
@@ -719,6 +719,7 @@ private struct SettingsHome: View {
         }
         .buttonStyle(.plain)
         .accessibilityHint(detail)
+        .accessibilityIdentifier(identifier)
     }
 
     private func settingsActionRow(icon: String, title: String, detail: String, identifier: String, action: @escaping () -> Void) -> some View {
