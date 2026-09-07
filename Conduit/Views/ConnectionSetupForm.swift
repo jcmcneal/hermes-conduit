@@ -146,6 +146,13 @@ struct ConnectionSetupForm: View {
     private var connectionTest: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Test connection").font(.title2.weight(.semibold))
+            // Entries that skipped the details form (the Settings
+            // current-connection entry) still show what is being tested.
+            if flow.enteredFromCurrentConnection,
+               let address = try? ConnectionSetupAddressBuilder.build(flow.draft) {
+                Text(address).font(.subheadline).textSelection(.enabled)
+                    .accessibilityIdentifier("setup.address-preview")
+            }
             Text("Conduit will check the dashboard address and try your credentials now. Nothing is saved, and Conduit won’t connect yet — you’ll confirm everything on the Review screen.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -155,6 +162,11 @@ struct ConnectionSetupForm: View {
             if let failure = flow.testState.failedFailure,
                let stage = flow.testState.failedStage {
                 failedTestRecovery(stage: stage, failure: failure)
+            } else if flow.testState.requiresCredentials {
+                // Partial outcome, not a failure: server and dashboard
+                // passed, no login was attempted, and the missing secret is
+                // the only thing between the user and a full test.
+                credentialsRequiredRecovery
             } else if flow.canUseSettings {
                 // Reachable after returning Back from Review: a passing or
                 // interactive outcome is still current, so continue without
@@ -170,6 +182,29 @@ struct ConnectionSetupForm: View {
                     .frame(maxWidth: .infinity)
                     .accessibilityIdentifier("setup.test.run")
             }
+        }
+    }
+
+    /// The credentials-required partial outcome's recovery: Enter
+    /// Credentials is the primary action and routes to the existing
+    /// credentials step (leaving the test step invalidates the partial
+    /// result, so returning runs a fresh full test). Retry is deliberately
+    /// absent — retrying with the same missing credentials would be
+    /// pointless, and no login attempt occurred, so there is no
+    /// rate-limit concern.
+    @ViewBuilder
+    private var credentialsRequiredRecovery: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(ConnectionSetupTestState.credentialsRequiredMessage)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("setup.test.credentials-required")
+            Button("Enter Credentials") {
+                flow.editAfterFailedTest(.loginCredentials)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.conduitAccent)
+            .accessibilityIdentifier("setup.test.enter-credentials")
         }
     }
 
@@ -225,10 +260,14 @@ struct ConnectionSetupForm: View {
             // Revalidate for rendering only: a draft that stopped validating
             // after reaching Review must never silently blank the card.
             reviewContent
-            Text("These settings will fill the login form. You’ll tap Connect there when you’re ready.")
+            Text(flow.enteredFromCurrentConnection
+                 ? "Applying saves these settings for your next reconnect. Your current session stays connected."
+                 : "These settings will fill the login form. You’ll tap Connect there when you’re ready.")
                 .foregroundStyle(.secondary)
             validationNotice
-            Button("Use these settings") {
+            // From Settings with unchanged, successfully tested settings
+            // there is nothing to apply — Done simply closes the wizard.
+            Button(flow.testedSettingsUnchanged ? "Done" : "Use these settings") {
                 if let result = flow.complete() { onComplete(result) }
             }
             .buttonStyle(.borderedProminent)
@@ -242,8 +281,17 @@ struct ConnectionSetupForm: View {
         case .success(let result):
             reviewValue("Connection method", flow.draft.methodTitle)
             reviewValue("Dashboard address", result.serverURL)
-            reviewValue("Username", result.username)
-            reviewValue("Password", "Entered")
+            if !result.username.isEmpty {
+                reviewValue("Username", result.username)
+            }
+            if result.password.isEmpty {
+                // Only reachable through the interactive-auth acceptance:
+                // discovery proved this dashboard signs in via the browser,
+                // so the absent password is expected, not an omission.
+                reviewValue("Password", "None — browser sign-in")
+            } else {
+                reviewValue("Password", "Entered")
+            }
         case .failure(let error):
             VStack(alignment: .leading, spacing: 8) {
                 Text("These settings can’t be used yet. Go Back to edit them, then return here.")
@@ -366,10 +414,11 @@ struct ConnectionSetupStageRow: View {
                 .font(.footnote)
                 .foregroundStyle(.green)
                 .padding(.top, 2)
-        case .requiresInteractiveSignIn:
+        case .requiresInteractiveSignIn, .requiresCredentials:
             // An open circle in the accent color: deliberately not a
             // checkmark (the user has not authenticated) and not an error
-            // mark (nothing failed). Text and VoiceOver carry the meaning.
+            // mark (nothing failed). Both are partial outcomes — text and
+            // VoiceOver carry which one it is.
             Image(systemName: "circle")
                 .font(.footnote)
                 .foregroundStyle(.conduitAccent)

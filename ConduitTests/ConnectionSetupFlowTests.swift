@@ -135,6 +135,7 @@ final class ConnectionSetupFlowTests: XCTestCase {
         XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .network), .accessMethod)
         XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .tls), .tlsTroubleshooting)
         XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .cloudflare), .cloudflareTroubleshooting)
+        XCTAssertEqual(ConnectionSetupFlow.entryStep(for: .currentConnection), .connectionDetails)
     }
 
     func testTLSAndCloudflareEntriesOpenTroubleshootingDirectly() {
