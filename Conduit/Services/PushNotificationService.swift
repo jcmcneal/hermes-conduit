@@ -4,7 +4,16 @@ import UserNotifications
 
 struct ConduitNotificationTarget: Equatable, Identifiable {
     let profile: String?
+    /// The runtime identity the notification names. Hermes notifications
+    /// identify the live routing session; this is never treated as a durable
+    /// conversation id on its own.
     let sessionId: String
+    /// The durable conversation identity when the payload explicitly carries
+    /// one (`stored_session_id`, or Hermes-native `session_key`). Optional:
+    /// older notifier builds send routing only, and a nil value must degrade
+    /// to alias resolution — never to reinterpreting the runtime id as
+    /// durable.
+    let durableSessionID: String?
     let type: String?
     /// Structured decision content carried alongside a decision notification.
     /// Lets Conduit render an answerable card from the push payload alone when
@@ -16,11 +25,13 @@ struct ConduitNotificationTarget: Equatable, Identifiable {
     init(
         profile: String?,
         sessionId: String,
+        durableSessionID: String? = nil,
         type: String?,
         decision: PendingDecisionPayload? = nil
     ) {
         self.profile = profile
         self.sessionId = sessionId
+        self.durableSessionID = durableSessionID
         self.type = type
         self.decision = decision
     }
@@ -127,23 +138,93 @@ enum RelayTransportPolicy {
     }
 }
 
+/// MainActor-scoped like the identity index it consults; every caller
+/// (AppState routing, notification handling, tests) already runs there.
+@MainActor
 enum NotificationSessionResolver {
-    /// Hermes notifications identify a live runtime session, while
-    /// `session.resume` is keyed by the durable stored session. Catalog rows
-    /// retain both identities so a notification can be routed without asking
-    /// the gateway to resume a runtime-only key.
-    static func resumableSessionID(
-        for notificationSessionID: String,
-        in sessions: [SessionSummary]
-    ) -> String {
-        let normalizedID = notificationSessionID.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedID.isEmpty else { return normalizedID }
-        guard let session = sessions.first(where: { session in
-            session.id == normalizedID || session.alternateIds.contains(normalizedID)
-        }) else {
-            return normalizedID
+    /// How a notification's routing identity was resolved to the conversation
+    /// it opens. The basis is diagnostics vocabulary: it names the evidence
+    /// source that decided the route, never the conversation's content.
+    enum RouteBasis: Equatable {
+        /// The payload explicitly carried the durable id.
+        case explicitDurable
+        /// A live catalog row positively contains the runtime id.
+        case catalogAlias
+        /// The shared identity index holds a positively confirmed mapping.
+        case confirmedAlias
+        /// No positive durable evidence exists. The notification's own
+        /// runtime id is resumed directly — the legacy behavior, and the
+        /// only id this route may name: an unknown runtime identity is never
+        /// reinterpreted as some other conversation's durable id.
+        case legacyRuntime
+    }
+
+    struct Route: Equatable {
+        /// The id a `session.resume` should address.
+        let resumeTargetID: String
+        /// The positively established durable identity, when one exists.
+        let durableSessionID: String?
+        let basis: RouteBasis
+    }
+
+    /// Resolves a notification target to the conversation it should open.
+    ///
+    /// Priority is the evidence hierarchy: an explicit durable id outranks
+    /// everything; a live catalog row containing the runtime id is next (the
+    /// freshest positive alias evidence); the confirmed identity index
+    /// fills the gap a stale or omitted catalog leaves; and only when NO
+    /// positive durable evidence exists does the raw runtime id flow
+    /// through. There is deliberately no newest-chat, ordering, or
+    /// similarity fallback: a notification can only ever open the
+    /// conversation its payload named.
+    static func route(
+        target: ConduitNotificationTarget,
+        catalog: [SessionSummary],
+        identityIndex: ConversationIdentityIndex,
+        profile: String
+    ) -> Route {
+        let runtimeID = target.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let durable = target.durableSessionID?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !durable.isEmpty {
+            return Route(
+                resumeTargetID: durable,
+                durableSessionID: durable,
+                basis: .explicitDurable
+            )
         }
-        return session.storedSessionId ?? session.id
+        // Catalog rows are scoped like the rest of identity resolution: an
+        // explicitly labeled foreign-profile row never routes this profile's
+        // notification (nil stays caller-scoped).
+        if let row = catalog.first(where: { row in
+            if let rowProfile = row.profile?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+               !rowProfile.isEmpty,
+               rowProfile != profile.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                return false
+            }
+            return row.id == runtimeID || row.alternateIds.contains(runtimeID)
+        }) {
+            let durable = (row.storedSessionId ?? row.id)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Route(
+                resumeTargetID: durable,
+                durableSessionID: durable,
+                basis: .catalogAlias
+            )
+        }
+        if let confirmed = identityIndex.durableID(forRuntime: runtimeID, profile: profile) {
+            return Route(
+                resumeTargetID: confirmed,
+                durableSessionID: confirmed,
+                basis: .confirmedAlias
+            )
+        }
+        return Route(
+            resumeTargetID: runtimeID,
+            durableSessionID: nil,
+            basis: .legacyRuntime
+        )
     }
 }
 
@@ -581,14 +662,32 @@ final class PushNotificationService: ObservableObject {
         }
         guard let sessionId = payload["session_id"] as? String,
               !sessionId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let durableSessionID = Self.routingDurableSessionID(from: payload)
         let profile = (payload["profile"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let type = (payload["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return ConduitNotificationTarget(
             profile: profile?.isEmpty == false ? profile : nil,
             sessionId: sessionId,
+            durableSessionID: durableSessionID,
             type: type?.isEmpty == false ? type : nil,
             decision: pendingDecision(from: payload)
         )
+    }
+
+    /// The durable conversation id a routing payload may explicitly carry
+    /// (`stored_session_id`, or the Hermes-native `session_key` spelling).
+    /// Only a top-level routing field counts: an approval card's
+    /// `decision.session_key` is the answer key for `approval.respond`, not
+    /// this conversation's routing identity, and must not be promoted into
+    /// one. Older notifier builds send neither field; nil degrades to alias
+    /// resolution.
+    private static func routingDurableSessionID(from payload: [String: Any]) -> String? {
+        for key in ["stored_session_id", "session_key"] {
+            guard let value = payload[key] as? String else { continue }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
     }
 
     /// Parses the structured decision content the relay forwards alongside a
