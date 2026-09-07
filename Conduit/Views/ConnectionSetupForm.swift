@@ -414,17 +414,11 @@ struct ConnectionSetupStageRow: View {
                 .font(.footnote)
                 .foregroundStyle(.green)
                 .padding(.top, 2)
-        case .requiresInteractiveSignIn:
+        case .requiresInteractiveSignIn, .requiresCredentials:
             // An open circle in the accent color: deliberately not a
             // checkmark (the user has not authenticated) and not an error
-            // mark (nothing failed). Text and VoiceOver carry the meaning.
-            Image(systemName: "circle")
-                .font(.footnote)
-                .foregroundStyle(.conduitAccent)
-                .padding(.top, 2)
-        case .requiresCredentials:
-            // Same open-circle shape as the interactive outcome: a partial
-            // result, not an error and not a success.
+            // mark (nothing failed). Both are partial outcomes — text and
+            // VoiceOver carry which one it is.
             Image(systemName: "circle")
                 .font(.footnote)
                 .foregroundStyle(.conduitAccent)

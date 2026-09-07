@@ -303,10 +303,11 @@ protocol ConnectionSetupTesting {
 /// The production probe. Reuses `NativeAuthClient` unchanged for every
 /// request — including its redirect policy, Cloudflare header application,
 /// transport policy, and status classification via
-/// `ConnectionFailureClassifier`. A password-capable dashboard sees exactly
-/// one discovery request, one password-login attempt, and one ticket mint;
-/// an interactive-auth dashboard sees exactly one discovery request and
-/// nothing else.
+/// `ConnectionFailureClassifier`. A password-capable dashboard with present
+/// credentials sees exactly one discovery request, one password-login
+/// attempt, and one ticket mint. A password-capable dashboard without
+/// present credentials — and an interactive-auth dashboard — sees exactly
+/// one discovery request and nothing else.
 struct ConnectionSetupProbe: ConnectionSetupTesting {
     private static let logger = Logger(subsystem: "com.milim.relay", category: "connection-setup-test")
 

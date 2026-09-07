@@ -567,7 +567,7 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(state.rowLabel(for: .authentication), "Login successful")
     }
 
-    // MARK: - Credentials-required partial outcome (Round 5.1)
+    // MARK: - Credentials-required partial outcome, flow model (Round 5.1)
 
     /// The staged credentials-required run: server and dashboard succeed and
     /// authentication stops BEFORE any login attempt because the tested
@@ -649,7 +649,26 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertNotEqual(state.rowLabel(for: .authentication), ConnectionSetupTestStage.authentication.successLabel)
     }
 
+    func testCredentialsRequiredOutcomeIsMonotonicWithinARun() {
+        // A terminal stage never reverts, whatever arrives later in the same
+        // run: the partial outcome can be superseded only by a new run, not
+        // by late events.
+        var state = ConnectionSetupTestState()
+        state.apply(Self.credentialsRequiredEvents[4]) // started(.authentication)
+        state.apply(.requiresCredentials(.authentication))
+        state.apply(.succeeded(.authentication))
+        XCTAssertEqual(state.authentication, .requiresCredentials)
+        state.apply(.failed(.authentication, .authenticationRejected))
+        XCTAssertEqual(state.authentication, .requiresCredentials)
+    }
+
     func testTestCopyContainsNoExposureOrCredentialLanguage() {
+        // `ConnectionSetupTestState.credentialsRequiredMessage` is
+        // deliberately absent from this scan: as the recovery notice for a
+        // proven password dashboard it must name the username-and-password
+        // auth mode, so the "password" forbidden word below — which guards
+        // row labels and ready claims, not recovery notices — does not
+        // apply to it.
         var allStrings = [
             ConnectionSetupTestState.readyMessage,
             ConnectionSetupTestState.interactiveReadyMessage,
@@ -825,7 +844,7 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(events, [.started(.server)], "Cancellation must emit no failure events")
     }
 
-    // MARK: - Credentials-required partial outcome (Round 5.1)
+    // MARK: - Credentials-required partial outcome, probe (Round 5.1)
 
     @MainActor
     private func runProbeWithCredentials(
@@ -877,7 +896,9 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(events, Array(StagedTestDriver.successEvents.prefix(5)) + [
             .requiresCredentials(.authentication)
         ])
+        XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/api/auth/providers", host: host), 1)
         XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/auth/password-login", host: host), 0)
+        XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/api/auth/ws-ticket", host: host), 0)
     }
 
     // MARK: - Interactive sign-in outcome
