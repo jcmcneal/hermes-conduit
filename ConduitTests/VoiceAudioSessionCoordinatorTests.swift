@@ -297,6 +297,7 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         XCTAssertThrowsError(try coordinator.acquire(.conversationCapture))
 
         XCTAssertEqual(session.categoryCalls.count, 2, "the transition and the rollback each attempted the category")
+        XCTAssertEqual(session.activationCount, 0, "neither the transition nor the rollback activated")
         XCTAssertEqual(coordinator.appliedPolicy, .standalonePlayback)
 
         // Once activations succeed again, the very next ownership transition
@@ -378,7 +379,8 @@ private final class MockVoiceAudioSession: VoiceAudioSessionControlling {
     /// Fails the next N activation attempts before recording them, modelling
     /// a one-shot activation failure (category succeeds, activation does
     /// not). Failed attempts are deliberately not recorded, so counts reflect
-    /// successful system calls.
+    /// successful system calls. Note: unlike the call recordings, the failure
+    /// knobs are NOT cleared by `resetRecordings()` — clear them explicitly.
     var pendingActivationFailures = 0
 
     var activationCount: Int { activationCalls.filter(\.active).count }

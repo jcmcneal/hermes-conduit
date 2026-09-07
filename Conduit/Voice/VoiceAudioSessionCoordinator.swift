@@ -123,15 +123,7 @@ final class VoiceAudioSessionCoordinator {
             // their dominant policy in full instead of trusting the
             // unchanged bookkeeping. If the restore also fails, the flag
             // stays raised and the next ownership transition retries.
-            if appliedPolicy != nil {
-                do {
-                    try applyDominantPolicy()
-                } catch {
-                    audioSessionLogger.error(
-                        "audio session rollback to the remaining policy failed: \(String(describing: error), privacy: .public)"
-                    )
-                }
-            }
+            compensatingReapplyForRemainingOwners()
             throw error
         }
         audioSessionLogger.debug(
@@ -146,23 +138,16 @@ final class VoiceAudioSessionCoordinator {
             try applyDominantPolicy()
         } catch {
             // Transition and deactivation failures must never crash the
-            // caller. applyDominantPolicy raised needsReapply for a partial
-            // transition; for the remaining owners' sake this compensating
-            // re-apply mirrors acquire's rollback. A failed deactivation to
-            // nil has no remaining owners and stays consistent under the
-            // retained applied policy, so no rollback is attempted there.
-            if dominantPolicy != nil {
-                do {
-                    try applyDominantPolicy()
-                } catch {
-                    audioSessionLogger.error(
-                        "audio session rollback to the remaining policy failed: \(String(describing: error), privacy: .public)"
-                    )
-                }
-            }
+            // caller.
             audioSessionLogger.error(
                 "audio session policy transition failed on release: \(String(describing: error), privacy: .public)"
             )
+            // A partial transition may have half-switched the physical
+            // session under the remaining owners: restore their dominant
+            // policy best-effort. A failed deactivation to nil has no
+            // remaining owners and stays consistent under the retained
+            // applied policy, so no rollback is attempted there.
+            compensatingReapplyForRemainingOwners()
             return
         }
         audioSessionLogger.debug(
@@ -191,6 +176,24 @@ final class VoiceAudioSessionCoordinator {
             return .standalonePlayback
         }
         return nil
+    }
+
+    /// Best-effort restore of the surviving owners' policy after a partial
+    /// transition failure. Never throws: a failed restore leaves needsReapply
+    /// raised, so the next ownership transition retries the full
+    /// configuration. The `appliedPolicy != nil` guard covers both callers —
+    /// a failed acquire with no previously applied policy leaves the session
+    /// inactive (the next acquire re-applies fully anyway), and a release to
+    /// nil has no survivors.
+    private func compensatingReapplyForRemainingOwners() {
+        guard appliedPolicy != nil else { return }
+        do {
+            try applyDominantPolicy()
+        } catch {
+            audioSessionLogger.error(
+                "audio session rollback to the remaining policy failed: \(String(describing: error), privacy: .public)"
+            )
+        }
     }
 
     private func applyDominantPolicy() throws {
@@ -223,7 +226,9 @@ final class VoiceAudioSessionCoordinator {
             if target != nil { needsReapply = true }
             throw error
         }
-        audioSessionLogger.info("audio policy changed: \(Self.describe(target), privacy: .public)")
+        // "Applied" rather than "changed": a needsReapply transition can
+        // legitimately re-apply the policy that bookkeeping already named.
+        audioSessionLogger.info("audio policy applied: \(Self.describe(target), privacy: .public)")
     }
 
     private static func describe(_ intent: VoiceAudioIntent) -> String {
