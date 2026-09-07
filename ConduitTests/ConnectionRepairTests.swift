@@ -204,9 +204,6 @@ final class ConnectionRepairTests: XCTestCase {
             existingServerURL: ConnectionRepairTests.failedURL, username: "u", password: "p"
         )
         var flow = ConnectionSetupFlow(entry: .repairConnection, draft: seed)
-        XCTAssertEqual(flow.step, .connectionDetails)
-        flow.submitDetails()
-        flow.submitCredentials()
         XCTAssertEqual(flow.step, .connectionTest)
         StagedTestDriver.runSuccessfulTest(on: &flow)
 
@@ -223,6 +220,8 @@ final class ConnectionRepairTests: XCTestCase {
 
         // A draft edit invalidates the staged success and the candidate.
         flow.back()
+        flow.submitDetails()
+        XCTAssertEqual(flow.step, .loginCredentials)
         flow.draft.password = "edited"
         XCTAssertFalse(flow.hasCurrentSuccessfulTest)
         XCTAssertFalse(candidateA.isCurrent(
@@ -328,6 +327,8 @@ final class ConnectionRepairTests: XCTestCase {
         let failedConnection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
         harness.appState.connection = failedConnection
         harness.appState.client = HermesClient(connection: failedConnection, profile: "default")
+        // The visible session A is the established, durably stored identity.
+        harness.store.setLastSessionID("stored-a", for: "default")
         harness.appState.activeSessionId = "stored-a"
 
         let outcome = await harness.appState.performConnectionRepair(.native(candidate(
@@ -420,6 +421,7 @@ final class ConnectionRepairTests: XCTestCase {
         harness.appState.connection = failedConnection
         harness.appState.client = HermesClient(connection: failedConnection, profile: "default")
         harness.appState.activeSessionId = "stored-a"
+        harness.store.setLastSessionID("stored-a", for: "default")
 
         // Automatic reconnect A begins and suspends at the mint boundary.
         let taskA = Task { @MainActor in
