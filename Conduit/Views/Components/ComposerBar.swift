@@ -40,6 +40,9 @@ struct ComposerBar: View {
     @State private var documentImportContext: AsyncAttachmentContext?
     @State private var attachmentGeneration: UInt64 = 0
     @State private var suppressNextTextChangeSuggestions = false
+    /// Round 6: non-nil presents the Repair Connection wizard seeded from
+    /// the failed connection.
+    @State private var repairContext: ConnectionRepairContext?
     /// Local, device-only input preference. Defaults to off so existing
     /// users keep Return inserting a newline after updating.
     @AppStorage(ComposerReturnKey.preferenceKey) private var returnKeySends = false
@@ -389,6 +392,20 @@ struct ComposerBar: View {
         .opacity(appState.turnState == .unsupportedGateway ? 0.7 : 1)
         .animation(ConduitMotion.transition, value: action)
         .preferredColorScheme(appState.themePreference.colorScheme)
+        .sheet(item: $repairContext) { context in
+            ConnectionSetupView(
+                initialDestination: .repairConnection,
+                initialDraft: context.draft,
+                initialCloudflareAccess: context.cloudflareAccess,
+                initialCloudflareOriginURL: context.cloudflareOriginURL,
+                repairFailure: context.failure,
+                onComplete: { _ in
+                    // Unreachable in Repair mode: the Review's final actions
+                    // are Reconnect Now / Sign In to Reconnect.
+                },
+                onRepair: appState.connectionRepairActivationHandler()
+            )
+        }
     }
 
     @ViewBuilder
@@ -415,6 +432,30 @@ struct ComposerBar: View {
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Round 6: Repair Connection appears only once the connection is
+            // actually down AND a failed attempt has surfaced its error —
+            // never during normal automatic recovery, and never uninvited.
+            // Entering repair hands recovery authority to the user; the
+            // automatic retry loop stays stopped until the repair reconnects
+            // or the user retries manually.
+            if appState.connection != nil, !appState.isConnected,
+               let error = appState.errorMessage, !error.isEmpty {
+                Button {
+                    Haptics.light()
+                    repairContext = appState.beginConnectionRepair()
+                } label: {
+                    Label("Repair Connection", systemImage: "wrench.and.screwdriver")
+                        .font(.footnote.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.bordered)
+                .tint(.conduitAccent)
+                .accessibilityIdentifier("composer.repair-connection")
+                .accessibilityLabel("Repair Connection")
+                .accessibilityHint("Test and fix the failed connection, then reconnect")
             }
         }
         .padding(.horizontal, 14)

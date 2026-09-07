@@ -731,6 +731,46 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(events, StagedTestDriver.successEvents)
     }
 
+    // MARK: - Validated transaction acquisition (Round 6)
+
+    @MainActor
+    private func runProbeWithAcquisition(
+        _ baseURL: String
+    ) async -> (events: [ConnectionSetupTestEvent], acquisition: ConnectionSetupTestAcquisition?) {
+        let probe = ConnectionSetupProbe(sessionConfiguration: Self.makeProbeConfiguration())
+        var events: [ConnectionSetupTestEvent] = []
+        let acquisition = await probe.runTest(
+            result: ConnectionSetupResult(
+                serverURL: baseURL,
+                username: "probe-user",
+                password: "probe-password-fixture"
+            ),
+            cloudflareAccess: nil,
+            onEvent: { events.append($0) }
+        )
+        return (events, acquisition)
+    }
+
+    func testProbeFullSuccessReturnsTheValidatedTransactionMemoryOnly() async throws {
+        // Round 6: a successful native test hands back the validated
+        // transaction (memory only — the probe never commits it), so Repair
+        // can reconnect without repeating the password login.
+        let (events, acquisition) = await runProbeWithAcquisition("https://probe-success.example")
+        XCTAssertEqual(events, StagedTestDriver.successEvents)
+        let validated = try XCTUnwrap(acquisition)
+        XCTAssertEqual(validated.configuration.serverURL, "https://probe-success.example")
+        XCTAssertEqual(validated.nativeConnection.ticket, "probe-ticket")
+    }
+
+    func testProbeDiagnosticOutcomesReturnNoAcquisition() async {
+        let interactive = await runProbeWithAcquisition("https://probe-interactive.example")
+        XCTAssertNil(interactive.acquisition, "The interactive outcome produces no native transaction")
+        let rejected = await runProbeWithAcquisition("https://probe-auth401.example")
+        XCTAssertNil(rejected.acquisition, "A rejected login produces no native transaction")
+        let dns = await runProbeWithAcquisition("https://probe-dns.example")
+        XCTAssertNil(dns.acquisition, "A transport failure produces no native transaction")
+    }
+
     func testProbeDNSFailureMapsToHostNotFoundAtServerStage() async {
         let events = await runProbe("https://probe-dns.example")
         XCTAssertEqual(events, [.started(.server), .failed(.server, .hostNotFound)])

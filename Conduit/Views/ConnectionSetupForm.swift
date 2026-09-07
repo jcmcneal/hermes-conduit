@@ -1,10 +1,32 @@
 import SwiftUI
 
+/// Round 6: the Repair review's action model, built by ConnectionSetupView
+/// when the wizard runs in Repair mode. The view evaluates candidate
+/// currency; the form only renders states and forwards taps.
+struct ConnectionSetupRepairReview {
+    /// The staged test ended in the browser sign-in outcome — the final
+    /// action is Sign In to Reconnect, not Reconnect Now.
+    let isInteractive: Bool
+    /// A validated native transaction exists and is still current. Reconnect
+    /// Now requires it; a consumed candidate forces a fresh test.
+    let isCandidateAvailable: Bool
+    /// The classified failure of the last explicit activation attempt.
+    let activationFailure: ConnectionFailure?
+    let isActivating: Bool
+    let reconnectNow: () -> Void
+    let signInToReconnect: () -> Void
+    let testAgain: () -> Void
+}
+
 /// Form rendering only: navigation and final validation stay in the flow.
 struct ConnectionSetupForm: View {
     @Binding var flow: ConnectionSetupFlow
     let onStartTest: () -> Void
     let onComplete: (ConnectionSetupResult) -> Void
+    /// Round 6: non-nil only in Repair mode, where the Review's final
+    /// actions are Reconnect Now / Sign In to Reconnect instead of the
+    /// login-form handoff or the Settings Done/apply paths.
+    let repairReview: ConnectionSetupRepairReview?
     @FocusState private var focusedField: Field?
 
     private enum Field: Hashable { case host, port, url, username, password }
@@ -247,7 +269,9 @@ struct ConnectionSetupForm: View {
                 if flow.testState.requiresInteractiveSignIn {
                     // The user has NOT authenticated: say what happens next
                     // instead of claiming success. Never "Login successful".
-                    Text(ConnectionSetupTestState.interactiveReadyMessage)
+                    Text(flow.isRepairingConnection
+                         ? ConnectionSetupTestState.repairInteractiveMessage
+                         : ConnectionSetupTestState.interactiveReadyMessage)
                         .font(.headline)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("setup.test.interactive-ready")
@@ -260,19 +284,65 @@ struct ConnectionSetupForm: View {
             // Revalidate for rendering only: a draft that stopped validating
             // after reaching Review must never silently blank the card.
             reviewContent
-            Text(flow.enteredFromCurrentConnection
-                 ? "Applying saves these settings for your next reconnect. Your current session stays connected."
-                 : "These settings will fill the login form. You’ll tap Connect there when you’re ready.")
-                .foregroundStyle(.secondary)
-            validationNotice
-            // From Settings with unchanged, successfully tested settings
-            // there is nothing to apply — Done simply closes the wizard.
-            Button(flow.testedSettingsUnchanged ? "Done" : "Use these settings") {
-                if let result = flow.complete() { onComplete(result) }
+            if let repair = repairReview {
+                repairReviewFooter(repair)
+            } else {
+                Text(flow.enteredFromCurrentConnection
+                     ? "Applying saves these settings for your next reconnect. Your current session stays connected."
+                     : "These settings will fill the login form. You’ll tap Connect there when you’re ready.")
+                    .foregroundStyle(.secondary)
+                validationNotice
+                // From Settings with unchanged, successfully tested settings
+                // there is nothing to apply — Done simply closes the wizard.
+                Button(flow.testedSettingsUnchanged ? "Done" : "Use these settings") {
+                    if let result = flow.complete() { onComplete(result) }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!reviewIsValid)
+                .accessibilityIdentifier("setup.use-settings")
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(!reviewIsValid)
-            .accessibilityIdentifier("setup.use-settings")
+        }
+    }
+
+    /// Round 6: the Repair review's final actions. Reconnect Now requires a
+    /// current validated candidate (a consumed one forces a fresh test);
+    /// Sign In to Reconnect opens the existing AuthWebView; an activation
+    /// failure is shown classified with the explicit next step. Never an
+    /// automatic retry, never an automatic reconnection.
+    @ViewBuilder
+    private func repairReviewFooter(_ repair: ConnectionSetupRepairReview) -> some View {
+        if repair.isActivating {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Reconnecting…")
+                    .font(.headline)
+            }
+            .accessibilityIdentifier("setup.review.reconnecting")
+        } else {
+            if let failure = repair.activationFailure {
+                Text(failure.userMessage)
+                    .font(.subheadline)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setup.review.reconnect-failure")
+            }
+            if repair.isInteractive {
+                Button("Sign In to Reconnect") { repair.signInToReconnect() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.conduitAccent)
+                    .accessibilityIdentifier("setup.review.sign-in-reconnect")
+            } else if repair.isCandidateAvailable {
+                Button("Reconnect Now") { repair.reconnectNow() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.conduitAccent)
+                    .accessibilityIdentifier("setup.review.reconnect-now")
+            } else {
+                Button("Test Connection Again") { repair.testAgain() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.conduitAccent)
+                    .accessibilityIdentifier("setup.review.test-again")
+            }
         }
     }
 

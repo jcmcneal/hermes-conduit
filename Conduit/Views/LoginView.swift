@@ -33,6 +33,9 @@ struct LoginView: View {
     /// Non-nil presents the Connection Setup shell, pre-seeded with the
     /// classified help destination (or `.start` from the entry point).
     @State private var connectionSetupDestination: ConnectionHelpDestination?
+    /// Round 6: non-nil presents Repair Connection, seeded from the failed
+    /// saved-credential reconnect.
+    @State private var connectionRepairContext: ConnectionRepairContext?
     /// Set only by the user's Cloudflare toggle (never by the onAppear
     /// Keychain restore), so a returning saved-token user is not scrolled
     /// away from the top of the form every time the login screen appears.
@@ -137,6 +140,20 @@ struct LoginView: View {
                 failure = nil
                 focusedField = nil
             }
+        }
+        .sheet(item: $connectionRepairContext) { context in
+            ConnectionSetupView(
+                initialDestination: .repairConnection,
+                initialDraft: context.draft,
+                initialCloudflareAccess: context.cloudflareAccess,
+                initialCloudflareOriginURL: context.cloudflareOriginURL,
+                repairFailure: context.failure,
+                onComplete: { _ in
+                    // Unreachable in Repair mode: the Review's final actions
+                    // are Reconnect Now / Sign In to Reconnect.
+                },
+                onRepair: appState.connectionRepairActivationHandler()
+            )
         }
         .sheet(isPresented: $showWebView) {
             AuthWebView(
@@ -368,6 +385,16 @@ struct LoginView: View {
                                         connectionSetupDestination = destination
                                     }
                                     .accessibilityIdentifier("login.error.troubleshoot")
+                                }
+
+                                // Round 6: a failed saved-credential reconnect
+                                // is a failed EXISTING connection — offer the
+                                // repair flow seeded from that record.
+                                if appState.makeSavedConnectionRepairContext() != nil {
+                                    Button("Repair Connection") {
+                                        connectionRepairContext = appState.makeSavedConnectionRepairContext()
+                                    }
+                                    .accessibilityIdentifier("login.repair-connection")
                                 }
                             }
                             .font(.footnote.weight(.semibold))
