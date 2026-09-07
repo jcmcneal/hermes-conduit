@@ -5,14 +5,21 @@ import XCTest
 /// (`-CONDUIT_UI_TEST_CONNECTED_DASHBOARD`: a snapshot connection with no
 /// transport), and the staged test runs against the deterministic
 /// `-CONNECTION_SETUP_TEST_RESULT` stub — no test touches a real server.
+///
+/// The simulator has no saved credentials, so the seed is the passwordless
+/// interactive-auth shape: the wizard opens directly on the staged test with
+/// the current URL preserved, and Back reaches the editable details screens.
 final class ConnectionSetupSettingsUITests: XCTestCase {
     private enum Identity {
         static let stubDashboardURL = "https://conduit-uitest.example"
         static let settingsRow = "settings.connection-setup"
+        static let gatewayRow = "settings.gateway"
         static let urlField = "setup.url"
+        static let addressPreview = "setup.address-preview"
         static let next = "setup.next"
         static let username = "setup.username"
         static let password = "setup.password"
+        static let back = "setup.back"
         static let testRun = "setup.test.run"
         static let useSettings = "setup.use-settings"
     }
@@ -21,7 +28,7 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testSettingsConnectionSetupTestsCurrentConnectionAndLeavesItUntouched() {
+    func testSettingsConnectionSetupEditsTestsAndAppliesWithoutTouchingTheSession() {
         let app = XCUIApplication()
         app.launchArguments += [
             "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", Identity.stubDashboardURL,
@@ -36,11 +43,18 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
         XCTAssertTrue(app.buttons[Identity.settingsRow].waitForExistence(timeout: 5))
         app.buttons[Identity.settingsRow].tap()
 
-        // The wizard opens on the prefilled connection-details screen — no
-        // first-run readiness questions — with the current URL preserved
-        // exactly.
+        // The passwordless seed opens straight on the staged test with the
+        // current URL preserved exactly — no first-run readiness questions,
+        // no meaningless password field.
+        let preview = row(app, Identity.addressPreview)
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "Wizard did not open on the staged test. Tree:\n\(app.debugDescription)")
+        XCTAssertEqual(preview.label, Identity.stubDashboardURL)
+
+        // Back reaches the editable details screen, also prefilled with the
+        // exact current address.
+        tapVisible(app.buttons[Identity.back], in: app)
         let urlField = app.textFields[Identity.urlField]
-        XCTAssertTrue(urlField.waitForExistence(timeout: 5), "Wizard did not open on connection details. Tree:\n\(app.debugDescription)")
+        XCTAssertTrue(urlField.waitForExistence(timeout: 5), "Details screen did not appear. Tree:\n\(app.debugDescription)")
         XCTAssertEqual(urlField.value as? String, Identity.stubDashboardURL)
 
         tapVisible(app.buttons[Identity.next], in: app)
@@ -72,12 +86,51 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
         // The active connection is intact: still inside Settings, still the
         // stubbed connected session, never bounced to the login card.
         XCTAssertFalse(app.textFields["login.server-url"].exists, "The live session must never be disrupted by the wizard")
-        let gatewayRow = app.buttons["settings.gateway"]
+        let gatewayRow = app.buttons[Identity.gatewayRow]
         XCTAssertTrue(gatewayRow.waitForExistence(timeout: 5))
         XCTAssertTrue(
             gatewayRow.label.contains(Identity.stubDashboardURL),
             "The Gateway row still shows the current dashboard, got: \(gatewayRow.label)"
         )
+    }
+
+    func testInteractiveSignInOutcomeFromSettingsOffersDoneAndDismissesSafely() {
+        // A browser-sign-in deployment with no stored password: the staged
+        // test ends in the supported interactive outcome, Review offers plain
+        // Done (unchanged settings), and dismissing leaves the active
+        // session untouched.
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", Identity.stubDashboardURL,
+            "-CONNECTION_SETUP_TEST_RESULT", "auth:interactiveSignInRequired"
+        ]
+        app.launch()
+
+        openSettings(app)
+        XCTAssertTrue(app.buttons[Identity.settingsRow].waitForExistence(timeout: 5))
+        app.buttons[Identity.settingsRow].tap()
+
+        let preview = row(app, Identity.addressPreview)
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "Wizard did not open on the staged test. Tree:\n\(app.debugDescription)")
+        XCTAssertEqual(preview.label, Identity.stubDashboardURL)
+
+        tapVisible(app.buttons[Identity.testRun], in: app)
+
+        // Review, reached by auto-advance: browser sign-in is explained,
+        // "Login successful" is never claimed, and unchanged settings offer
+        // Done instead of Use These Settings.
+        let interactiveReady = app.staticTexts["setup.test.interactive-ready"]
+        XCTAssertTrue(interactiveReady.waitForExistence(timeout: 5))
+        XCTAssertTrue(interactiveReady.label.contains("browser-based sign-in"), "Got: \(interactiveReady.label)")
+        XCTAssertFalse(app.staticTexts["setup.test.ready"].exists, "Interactive auth must never claim the connection is ready to use")
+        let authRow = row(app, "setup.test.stage.authentication")
+        XCTAssertTrue(authRow.exists)
+        XCTAssertTrue(authRow.label.lowercased().contains("browser sign-in required"), "Got: \(authRow.label)")
+
+        tapVisible(app.buttons[Identity.useSettings], in: app)
+        XCTAssertTrue(app.buttons[Identity.settingsRow].waitForExistence(timeout: 5), "Done did not return to Settings. Tree:\n\(app.debugDescription)")
+        XCTAssertFalse(app.alerts.firstMatch.exists, "Done on unchanged settings applies nothing and needs no confirmation")
+        XCTAssertFalse(app.textFields["login.server-url"].exists, "The live session must never be disrupted by the wizard")
     }
 
     // MARK: - Walk helpers
@@ -90,6 +143,12 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
         let settings = app.buttons["Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 5), "Sidebar did not appear. Tree:\n\(app.debugDescription)")
         settings.tap()
+    }
+
+    /// Stage rows and the address preview are single combined accessibility
+    /// elements, so query by identifier across element types.
+    private func row(_ app: XCUIApplication, _ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
     private func tapVisible(_ element: XCUIElement, in app: XCUIApplication) {
