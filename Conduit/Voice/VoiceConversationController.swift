@@ -123,6 +123,24 @@ final class VoiceConversationController: ObservableObject {
         isOutputMuted = preferences.outputMuted
     }
 
+    /// True while a voice session or provider test is armed or live — i.e.
+    /// while voice audio ownership may exist or is being acquired — so
+    /// audio-adjacent side features (response haptics) stand down.
+    ///
+    /// Deliberately does NOT key off `state != .idle`: a terminal
+    /// `.failed("Audio was interrupted.")` has no live operation and must
+    /// not suppress Core Haptics indefinitely. The explicit ownership flags
+    /// cover every real ownership window: `startListening` raises
+    /// `isVoiceSessionActive` before its permission await (arming window),
+    /// all listening/thinking/speaking/muted/transcribing states occur with
+    /// it raised, and provider tests raise `isProviderTestRunning`. A failed
+    /// arming attempt keeps the flag until the session is stopped or
+    /// re-armed — bounded by the voice sheet's lifetime and conservative in
+    /// the safe direction.
+    var hasLiveVoiceSession: Bool {
+        isVoiceSessionActive || isProviderTestRunning
+    }
+
     func setForegroundActive(_ active: Bool) {
         isForegroundActive = active
         guard !active else { return }
@@ -534,6 +552,10 @@ final class VoiceConversationController: ObservableObject {
         isMicrophonePaused = false
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
+        // Terminal path: release session-ownership bookkeeping so audio-
+        // adjacent side features (response haptics) do not stand down
+        // forever after an interruption.
+        isVoiceSessionActive = false
         state = .failed("Audio was interrupted.")
     }
 

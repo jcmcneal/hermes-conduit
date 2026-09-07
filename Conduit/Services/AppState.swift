@@ -12817,13 +12817,27 @@ final class AppState: ObservableObject {
         responseHaptics.invalidateConclusion()
     }
 
-    private func performResponseHapticEffects(
+    /// While a voice session may hold the audio session — Voice Conversation
+    /// (listening, thinking, speaking, muted, transcribing, including a
+    /// paused mic and the arming window) or a provider test — the custom
+    /// Core Haptics response pattern is suppressed: Core Haptics must never
+    /// contend with voice capture or reactivate the coordinator-owned
+    /// session (issue #140). Response feedback falls back to the UIKit
+    /// pattern in that state.
+    var responseHapticsMayUseCoreHaptics: Bool {
+        !voiceConversationController.hasLiveVoiceSession
+    }
+
+    /// Internal for testing: the response-haptic forwarding seam is the
+    /// exact line that must degrade Core Haptics while a voice session is
+    /// live, so tests drive it end to end.
+    func performResponseHapticEffects(
         _ effects: [ResponseHapticState.Effect]
     ) {
         for effect in effects {
             switch effect {
             case .responseStarted:
-                Haptics.responseStarted()
+                Haptics.responseStarted(coreHapticsAllowed: responseHapticsMayUseCoreHaptics)
             case .toolStarted:
                 Haptics.toolStarted()
             case .responseConcluded:
