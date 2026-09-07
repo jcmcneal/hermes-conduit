@@ -541,14 +541,14 @@ struct ConnectionSetupTestProbeStub: ConnectionSetupTesting {
         onEvent: @escaping (ConnectionSetupTestEvent) -> Void
     ) async -> ConnectionSetupTestAcquisition? {
         script.run(onEvent)
-        // Same-file construction: the stub's transaction carries an inert
-        // empty cookie set. Repair UI tests script the ACTIVATION outcome
+        // The stub's transaction is built through the DEBUG factory (inert
+        // empty cookie set). Repair UI tests script the ACTIVATION outcome
         // separately (`-CONDUIT_REPAIR_ACTIVATION`), so this transaction is
         // never committed by the stub itself.
         guard script == .success else { return nil }
         return ConnectionSetupTestAcquisition(
             configuration: result,
-            nativeConnection: NativeAuthConnection(ticket: "connection-setup-stub-ticket", cookies: [])
+            nativeConnection: .debugStub(ticket: "connection-setup-stub-ticket")
         )
     }
 }
