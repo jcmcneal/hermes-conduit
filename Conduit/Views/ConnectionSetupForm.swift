@@ -151,8 +151,9 @@ struct ConnectionSetupForm: View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Test connection").font(.title2.weight(.semibold))
             // Entries that skipped the details form (the Settings
-            // current-connection entry) still show what is being tested.
-            if flow.enteredFromCurrentConnection,
+            // current-connection and Repair entries) still show what is
+            // being tested.
+            if (flow.enteredFromCurrentConnection || flow.isRepairingConnection),
                let address = try? ConnectionSetupAddressBuilder.build(flow.draft) {
                 Text(address).font(.subheadline).textSelection(.enabled)
                     .accessibilityIdentifier("setup.address-preview")

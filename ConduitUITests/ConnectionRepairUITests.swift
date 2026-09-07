@@ -188,8 +188,11 @@ final class ConnectionRepairUITests: XCTestCase {
         tapVisible(app.buttons[Identity.reconnectNow], in: app)
 
         // Still on Review with the classified failure — never a silent drop
-        // to a wiped test screen, never a retry.
-        XCTAssertTrue(app.buttons[Identity.reconnectNow].waitForExistence(timeout: 5), "Wizard did not stay on Review. Tree:\n\(app.debugDescription)")
+        // to a wiped test screen, never a retry. The consumed candidate
+        // means the only way forward is a fresh Test Connection.
+        XCTAssertTrue(app.staticTexts["setup.review.reconnect-failure"].waitForExistence(timeout: 5), "Classified activation failure not shown. Tree:\n\(app.debugDescription)")
+        XCTAssertTrue(app.buttons["setup.review.test-again"].exists, "Test Connection Again must be the offered next step")
+        XCTAssertFalse(app.buttons[Identity.reconnectNow].exists, "A consumed candidate must not authorize another Reconnect Now")
         XCTAssertFalse(app.staticTexts["setup.test.ready"].exists, "A failed reconnect must not claim the connection is ready")
         XCTAssertFalse(app.textFields["login.server-url"].exists, "A failed activation must never strand the user on the login card")
     }
