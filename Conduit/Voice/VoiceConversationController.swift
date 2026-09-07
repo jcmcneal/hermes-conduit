@@ -123,6 +123,14 @@ final class VoiceConversationController: ObservableObject {
         isOutputMuted = preferences.outputMuted
     }
 
+    /// True from the moment a voice session is armed (including the
+    /// permission-await and provider-test windows where `state` is still
+    /// `.idle`) until it is terminally stopped. Audio-adjacent side features
+    /// — response haptics — must stand down while this is true.
+    var hasLiveVoiceSession: Bool {
+        isVoiceSessionActive || isProviderTestRunning || state != .idle
+    }
+
     func setForegroundActive(_ active: Bool) {
         isForegroundActive = active
         guard !active else { return }
@@ -534,6 +542,10 @@ final class VoiceConversationController: ObservableObject {
         isMicrophonePaused = false
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
+        // Terminal path: release session-ownership bookkeeping so audio-
+        // adjacent side features (response haptics) do not stand down
+        // forever after an interruption.
+        isVoiceSessionActive = false
         state = .failed("Audio was interrupted.")
     }
 

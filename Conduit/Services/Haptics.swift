@@ -200,6 +200,14 @@ enum Haptics {
     /// Test seam: counts makeCoreHapticsEngine() attempts so tests can pin
     /// that suppressed/disabled response haptics never create an engine.
     static var coreHapticsEngineCreationCount = 0
+    /// Clears cached engine and pattern state so the creation counter and
+    /// engine reuse are deterministic regardless of test order.
+    static func resetCoreHapticsStateForTesting() {
+        cancelLifecyclePattern()
+        clearLifecyclePatternState()
+        coreHapticsEngine = nil
+        coreHapticsEngineCreationCount = 0
+    }
 #endif
 
     static let preferenceKey = "conduit.haptics"
@@ -287,8 +295,9 @@ enum Haptics {
     /// is false — a voice session may hold the audio session — the pattern
     /// degrades to the UIKit fallback so Core Haptics never starts an engine
     /// (and never touches any audio session) while voice capture or playback
-    /// is live.
-    static func responseStarted(coreHapticsAllowed: Bool = true) {
+    /// is live. The parameter is deliberately required: every call site must
+    /// decide, so the audio-activating path cannot be reached by omission.
+    static func responseStarted(coreHapticsAllowed: Bool) {
         guard emit(.responseStarted) else { return }
         let token = beginLifecyclePattern(duration: 0.18)
         guard coreHapticsAllowed else {

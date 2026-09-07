@@ -211,7 +211,7 @@ final class HapticsEmissionTests: XCTestCase {
         Haptics.warning()
         Haptics.selection()
         Haptics.toolStarted()
-        Haptics.responseStarted()
+        Haptics.responseStarted(coreHapticsAllowed: true)
         Haptics.responseConcluded()
     }
 }

@@ -19,8 +19,14 @@ final class HapticsVoiceIsolationTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
+        Haptics.resetCoreHapticsStateForTesting()
         session = RecordingVoiceAudioSession()
         coordinator = VoiceAudioSessionCoordinator(session: session)
+    }
+
+    override func tearDown() {
+        Haptics.resetCoreHapticsStateForTesting()
+        super.tearDown()
     }
 
     func testResponseHapticLifecycleLeavesVoiceAudioSessionUntouched() {
@@ -95,8 +101,51 @@ final class HapticsVoiceIsolationTests: XCTestCase {
         await controller.startListening()
         XCTAssertFalse(appState.responseHapticsMayUseCoreHaptics)
 
+        // A paused mic keeps the voice session logically open (and the
+        // conversation state non-idle), so suppression holds.
+        controller.pauseMicrophone()
+        XCTAssertFalse(appState.responseHapticsMayUseCoreHaptics)
+
         controller.stop()
         XCTAssertTrue(appState.responseHapticsMayUseCoreHaptics)
+    }
+
+    func testAppStateForwardingSuppressesEngineCreationWhileVoiceSessionIsLive() async {
+        // End-to-end pin of the forwarding seam: while a voice session is
+        // live, performResponseHapticEffects must degrade response-start to
+        // the UIKit fallback (no engine creation); once the session ends, the
+        // custom pattern is allowed again. Reverting the forwarding line to
+        // an unconditionally-allowed call fails this test.
+        let suiteName = "HapticsVoiceIsolation.Forwarding.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create test UserDefaults suite")
+            return
+        }
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+
+        let appState = AppState(defaults: defaults, loadSavedConnection: false)
+        let controller = VoiceConversationController(
+            capture: StubPermissionCapture(),
+            playback: StubPlayback(),
+            gateway: StubVoiceGateway(),
+            submit: { _ in true },
+            interrupt: {}
+        )
+        appState.voiceConversationController = controller
+
+        await controller.startListening()
+        appState.performResponseHapticEffects([.responseStarted])
+        XCTAssertEqual(
+            Haptics.coreHapticsEngineCreationCount, 0,
+            "response-start haptics during a live voice session must not create a Core Haptics engine"
+        )
+
+        controller.stop()
+        appState.performResponseHapticEffects([.responseStarted])
+        XCTAssertEqual(
+            Haptics.coreHapticsEngineCreationCount, 1,
+            "response-start haptics outside a voice session may use the custom pattern"
+        )
     }
 }
 

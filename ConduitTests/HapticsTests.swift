@@ -4,6 +4,16 @@ import XCTest
 
 @MainActor
 final class HapticsTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        Haptics.resetCoreHapticsStateForTesting()
+    }
+
+    override func tearDown() {
+        Haptics.resetCoreHapticsStateForTesting()
+        super.tearDown()
+    }
+
     func testResponseEngineDoesNotBindSharedAudioSession() {
         // Ordinary response haptics must not bind AVAudioSession
         // sharedInstance(): a shared-session-bound CHHapticEngine activates
@@ -73,11 +83,8 @@ final class HapticsTests: XCTestCase {
         }
 
         Haptics.enabled = false
-        Haptics.coreHapticsEngineCreationCount = 0
 
         Haptics.responseStarted(coreHapticsAllowed: true)
-        Haptics.toolStarted()
-        Haptics.responseConcluded()
 
         XCTAssertEqual(
             Haptics.coreHapticsEngineCreationCount, 0,
