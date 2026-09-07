@@ -16,6 +16,32 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Round-6 Repair sheet
+
+/// The shared Repair-mode presentation used by every failure surface (the
+/// composer banner and the login card), so seeding, the intentionally
+/// unreachable login handoff, and the activation handler cannot drift
+/// between them.
+struct ConnectionRepairSetupSheet: View {
+    let context: ConnectionRepairContext
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        ConnectionSetupView(
+            initialDestination: .repairConnection,
+            initialDraft: context.draft,
+            initialCloudflareAccess: context.cloudflareAccess,
+            initialCloudflareOriginURL: context.cloudflareOriginURL,
+            repairFailure: context.failure,
+            onComplete: { _ in
+                // Unreachable in Repair mode: the Review's final actions are
+                // Reconnect Now / Sign In to Reconnect.
+            },
+            onRepair: appState.connectionRepairActivationHandler()
+        )
+    }
+}
+
 struct ConnectionSetupView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var flow: ConnectionSetupFlow
@@ -25,7 +51,20 @@ struct ConnectionSetupView: View {
     /// by the flow's generation guard, so correctness never relies on view
     /// destruction.
     @State private var testTask: Task<Void, Never>?
+    /// Round 6 (Repair): the memory-only validated native transaction from
+    /// the current successful test, bound to the revision/generation that
+    /// produced it. One-shot: consumed by Reconnect Now whether activation
+    /// succeeds or fails, and invalidated by edits, newer runs, and
+    /// cancellation. Never logged, never persisted.
+    @State private var repairCandidate: ConnectionRepairCandidate?
+    @State private var isActivating = false
+    @State private var activationFailure: ConnectionFailure?
+    @State private var showRepairSignIn = false
+    @State private var repairSignInConfiguration: ConnectionSetupResult?
     private let onComplete: (ConnectionSetupResult) -> Void
+    /// Round 6 (Repair): the explicit activation boundary. Nil outside
+    /// Repair mode, in which case the Review shows its normal context action.
+    private let onRepair: ((ConnectionRepairHandoff) async -> ConnectionRepairActivationOutcome)?
     private let prober: any ConnectionSetupTesting
 
     init(
@@ -33,15 +72,19 @@ struct ConnectionSetupView: View {
         initialDraft: ConnectionSetupDraft = ConnectionSetupDraft(),
         initialCloudflareAccess: CloudflareAccessCredentials? = nil,
         initialCloudflareOriginURL: String = "",
-        onComplete: @escaping (ConnectionSetupResult) -> Void
+        repairFailure: ConnectionFailure? = nil,
+        onComplete: @escaping (ConnectionSetupResult) -> Void,
+        onRepair: ((ConnectionRepairHandoff) async -> ConnectionRepairActivationOutcome)? = nil
     ) {
         _flow = State(initialValue: ConnectionSetupFlow(
             entry: initialDestination,
             draft: initialDraft,
             inheritedCloudflareAccess: initialCloudflareAccess,
-            inheritedCloudflareOriginURL: initialCloudflareOriginURL
+            inheritedCloudflareOriginURL: initialCloudflareOriginURL,
+            repairFailure: repairFailure
         ))
         self.onComplete = onComplete
+        self.onRepair = onRepair
         self.prober = Self.makeProber()
     }
 
@@ -57,10 +100,15 @@ struct ConnectionSetupView: View {
             Group {
                 switch flow.step {
                 case .connectionDetails, .loginCredentials, .connectionTest, .review:
-                    ConnectionSetupForm(flow: $flow, onStartTest: { startTestRun() }) { result in
-                        onComplete(result)
-                        dismiss()
-                    }
+                    ConnectionSetupForm(
+                        flow: $flow,
+                        onStartTest: { startTestRun() },
+                        onComplete: { result in
+                            onComplete(result)
+                            dismiss()
+                        },
+                        repairReview: repairReview
+                    )
                 default:
                     ScrollView {
                         content
@@ -95,6 +143,120 @@ struct ConnectionSetupView: View {
                         .accessibilityIdentifier("connection-setup.done")
                 }
             }
+            .sheet(isPresented: $showRepairSignIn) {
+                repairSignInSheet
+            }
+        }
+    }
+
+    /// The Repair review's action model, nil outside Repair mode. The
+    /// candidate's currency is evaluated here — the flow's staged success
+    /// must still be current at exactly the revision and generation that
+    /// produced the candidate.
+    private var repairReview: ConnectionSetupRepairReview? {
+        guard flow.isRepairingConnection, onRepair != nil else { return nil }
+        let candidateCurrent = repairCandidate?.isCurrent(
+            hasCurrentSuccessfulTest: flow.hasCurrentSuccessfulTest,
+            testGeneration: flow.testGeneration,
+            testSucceededAtRevision: flow.testSucceededAtRevision
+        ) ?? false
+        return ConnectionSetupRepairReview(
+            isInteractive: flow.testState.requiresInteractiveSignIn,
+            isCandidateAvailable: candidateCurrent,
+            activationFailure: activationFailure,
+            isActivating: isActivating,
+            reconnectNow: { reconnectNow() },
+            signInToReconnect: { beginRepairSignIn() },
+            testAgain: { testAgainAfterFailedActivation() }
+        )
+    }
+
+    /// The existing AuthWebView, pointed at the tested address with the
+    /// wizard's same-origin Cloudflare state. The probe never hosts a
+    /// WebView; sign-in happens only on this explicit action.
+    @ViewBuilder
+    private var repairSignInSheet: some View {
+        if let configuration = repairSignInConfiguration {
+            AuthWebView(
+                url: configuration.serverURL,
+                cloudflareAccess: flow.cloudflareAccessForDraft(),
+                onTicket: { ticket, baseURL in
+                    Task { @MainActor in
+                        showRepairSignIn = false
+                        await activate(.browserSignIn(
+                            ticket: ticket,
+                            baseURL: baseURL,
+                            configuration: configuration
+                        ))
+                    }
+                },
+                onError: { classifiedFailure, _ in
+                    showRepairSignIn = false
+                    // Sign-in failure consumed no transaction: the user may
+                    // retry sign-in directly, without re-testing.
+                    activationFailure = classifiedFailure
+                }
+            )
+        } else {
+            // Unreachable: the sheet is only presented with a configuration.
+            Color.clear.onAppear { showRepairSignIn = false }
+        }
+    }
+
+    // MARK: - Repair activation (Round 6)
+
+    private func reconnectNow() {
+        guard !isActivating,
+              let candidate = repairCandidate,
+              candidate.isCurrent(
+                hasCurrentSuccessfulTest: flow.hasCurrentSuccessfulTest,
+                testGeneration: flow.testGeneration,
+                testSucceededAtRevision: flow.testSucceededAtRevision
+              ),
+              let onRepair else { return }
+        // The candidate is one-shot: consumed here, whether activation
+        // succeeds or fails. A failed activation requires a fresh test.
+        repairCandidate = nil
+        Task { @MainActor in
+            await activate(.native(candidate))
+        }
+    }
+
+    private func beginRepairSignIn() {
+        guard !isActivating, flow.canUseSettings, onRepair != nil else { return }
+        guard let result = flow.complete() else { return }
+        repairSignInConfiguration = result
+        showRepairSignIn = true
+    }
+
+    private func testAgainAfterFailedActivation() {
+        activationFailure = nil
+        flow.invalidateTestForRepairRetry()
+    }
+
+    private func activate(_ handoff: ConnectionRepairHandoff) async {
+        guard let onRepair else { return }
+        activationFailure = nil
+        isActivating = true
+        let outcome = await onRepair(handoff)
+        isActivating = false
+        switch outcome {
+        case .activated:
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: "Reconnected to Hermes."
+            )
+            dismiss()
+        case .failed(let failure):
+            UIAccessibility.post(
+                notification: .announcement,
+                argument: failure.userTitle
+            )
+            // Stay on Review: the candidate is consumed (Reconnect Now can
+            // neither re-fire nor be retried automatically), and the footer
+            // renders the classified failure with Test Connection Again —
+            // which invalidates the staged result only when the user asks.
+            activationFailure = failure
         }
     }
 
@@ -103,7 +265,9 @@ struct ConnectionSetupView: View {
     private func startTestRun() {
         // Credentials are optional here: provider discovery decides whether a
         // password applies, so an interactive-auth dashboard is testable
-        // without typing one first.
+        // without typing one first. A fresh run also clears the spent
+        // activation failure of any previous reconnect attempt.
+        activationFailure = nil
         guard let run = try? flow.draft.testConfiguration(),
               let generation = flow.beginTest() else { return }
         let access = flow.cloudflareAccessForDraft()
@@ -111,7 +275,7 @@ struct ConnectionSetupView: View {
         let flow = $flow
         testTask?.cancel()
         testTask = Task { @MainActor in
-            await prober.runTest(result: run, cloudflareAccess: access, onEvent: { event in
+            let acquisition = await prober.runTest(result: run, cloudflareAccess: access, onEvent: { event in
                 // Announce only events the model actually applied — dropped
                 // stale events never speak.
                 guard flow.wrappedValue.applyTestEvent(event, generation: generation) else { return }
@@ -139,13 +303,35 @@ struct ConnectionSetupView: View {
                     break
                 }
             })
+            // Round 6 (Repair): promote the validated transaction into the
+            // reconnect candidate ONLY while the flow still shows the staged
+            // success this run produced — a superseded or cancelled run's
+            // acquisition is dropped, exactly like its late events.
+            guard let acquisition,
+                  !Task.isCancelled,
+                  flow.wrappedValue.hasCurrentSuccessfulTest,
+                  flow.wrappedValue.testGeneration == generation else { return }
+            repairCandidate = ConnectionRepairCandidate(
+                configuration: acquisition.configuration,
+                nativeConnection: acquisition.nativeConnection,
+                validatedRevision: flow.wrappedValue.testSucceededAtRevision ?? 0,
+                generation: generation
+            )
         }
     }
 
     private func stopTestRun() {
         testTask?.cancel()
         testTask = nil
+        // Leaving the test step resets RUNNING work. A sealed success (and
+        // its candidate) survives non-editing Back/forward walks — the
+        // candidate's currency is still enforced at use time — so the view
+        // and the flow model never disagree about whether a test is current.
+        let wasRunning = flow.testState.isRunning
         flow.cancelTest()
+        if wasRunning {
+            repairCandidate = nil
+        }
     }
 
     // MARK: - Step routing
@@ -614,6 +800,7 @@ extension ConnectionHelpDestination {
         case .tls: return "HTTPS & certificates"
         case .cloudflare: return "Cloudflare Access"
         case .currentConnection: return "Current connection"
+        case .repairConnection: return "Repair connection"
         }
     }
 
@@ -637,7 +824,7 @@ extension ConnectionHelpDestination {
                 "Make sure a Service Auth policy allows that token to reach this Access application.",
                 "Or turn off \"Use Cloudflare Access service token\" to sign in interactively through the in-app browser."
             ]
-        case .start, .dashboard, .credentials, .network, .currentConnection:
+        case .start, .dashboard, .credentials, .network, .currentConnection, .repairConnection:
             return []
         }
     }

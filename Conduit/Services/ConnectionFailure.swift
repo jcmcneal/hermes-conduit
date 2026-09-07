@@ -198,6 +198,13 @@ enum ConnectionHelpDestination: Equatable, Hashable, Identifiable, CaseIterable 
     /// first-run readiness questions and seeds the wizard from the current
     /// configuration instead.
     case currentConnection
+    /// Round 6: the Repair entry for a failed existing connection. Distinct
+    /// from `.currentConnection` so Settings (things may be working) and
+    /// failure recovery (a connection actually failed) never share one
+    /// semantic: Repair seeds from the failed target, routes near the
+    /// classified problem, and owns the Reconnect Now / Sign In to
+    /// Reconnect actions.
+    case repairConnection
 
     var id: Self { self }
 }

@@ -33,6 +33,13 @@ struct LoginView: View {
     /// Non-nil presents the Connection Setup shell, pre-seeded with the
     /// classified help destination (or `.start` from the entry point).
     @State private var connectionSetupDestination: ConnectionHelpDestination?
+    /// Round 6: non-nil presents Repair Connection, seeded from the failed
+    /// saved-credential reconnect.
+    @State private var connectionRepairContext: ConnectionRepairContext?
+    /// Whether a repairable saved connection exists, computed once when a
+    /// failure is presented (pure reads in `body`; the takeover happens at
+    /// tap time).
+    @State private var savedRepairAvailable = false
     /// Set only by the user's Cloudflare toggle (never by the onAppear
     /// Keychain restore), so a returning saved-token user is not scrolled
     /// away from the top of the form every time the login screen appears.
@@ -103,6 +110,7 @@ struct LoginView: View {
             // both orderings are covered. Consume once.
             guard let pending else { return }
             failure = pending
+            savedRepairAvailable = appState.makeSavedConnectionRepairContext() != nil
             appState.pendingLoginFailure = nil
         }
         .sheet(item: $connectionSetupDestination) { destination in
@@ -137,6 +145,9 @@ struct LoginView: View {
                 failure = nil
                 focusedField = nil
             }
+        }
+        .sheet(item: $connectionRepairContext) { context in
+            ConnectionRepairSetupSheet(context: context)
         }
         .sheet(isPresented: $showWebView) {
             AuthWebView(
@@ -369,6 +380,20 @@ struct LoginView: View {
                                     }
                                     .accessibilityIdentifier("login.error.troubleshoot")
                                 }
+
+                                // Round 6: a failed SAVED-credential reconnect
+                                // is a failed EXISTING connection — offer the
+                                // repair flow seeded from that record. The
+                                // typed failure proves provenance (manual
+                                // login failures never set it), and entering
+                                // repair revokes any outstanding automatic
+                                // recovery authority.
+                                if savedRepairAvailable, appState.lastConnectionFailure != nil {
+                                    Button("Repair Connection") {
+                                        connectionRepairContext = appState.beginSavedConnectionRepair()
+                                    }
+                                    .accessibilityIdentifier("login.repair-connection")
+                                }
                             }
                             .font(.footnote.weight(.semibold))
                         }
@@ -434,6 +459,10 @@ struct LoginView: View {
         // the return-key chain also reach this method: never let a second
         // auth sequence run concurrently (Hermes throttles password login).
         guard !isConnecting else { return }
+        // A manual login attempt abandons any prior existing-connection
+        // failure context: Repair Connection is for the connection that
+        // actually failed, not for whatever the user is typing now.
+        appState.lastConnectionFailure = nil
         let cleaned = serverUrl.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else {
             // The return-key chain can reach submit without the Connect

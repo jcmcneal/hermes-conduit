@@ -149,6 +149,9 @@ struct ConnectionSetupFlow: Equatable {
     private(set) var inheritedCloudflareOriginURL: String
     private(set) var validationError: ConnectionSetupValidationError?
     private let entry: ConnectionHelpDestination
+    /// Round 6 (Repair): the classified failure that surfaced at the failed
+    /// connection, used only to route the entry near the likely problem.
+    private let repairFailure: ConnectionFailure?
     /// The draft exactly as the wizard was seeded. The Settings
     /// current-connection entry compares against it so a tested-but-unchanged
     /// configuration can offer plain Done instead of an apply.
@@ -178,14 +181,16 @@ struct ConnectionSetupFlow: Equatable {
         entry: ConnectionHelpDestination = .start,
         draft: ConnectionSetupDraft = ConnectionSetupDraft(),
         inheritedCloudflareAccess: CloudflareAccessCredentials? = nil,
-        inheritedCloudflareOriginURL: String = ""
+        inheritedCloudflareOriginURL: String = "",
+        repairFailure: ConnectionFailure? = nil
     ) {
         self.entry = entry
+        self.repairFailure = repairFailure
         self.seededDraft = draft
         self.draft = draft
         self.inheritedCloudflareAccess = inheritedCloudflareAccess
         self.inheritedCloudflareOriginURL = inheritedCloudflareOriginURL
-        path = Self.initialPath(for: entry, draft: draft)
+        path = Self.initialPath(for: entry, draft: draft, repairFailure: repairFailure)
     }
 
     /// Failure-driven Round-1 destinations land at sensible parts of the
@@ -199,6 +204,36 @@ struct ConnectionSetupFlow: Equatable {
         case .tls: return .tlsTroubleshooting
         case .cloudflare: return .cloudflareTroubleshooting
         case .currentConnection: return .connectionDetails
+        case .repairConnection: return .connectionDetails
+        }
+    }
+
+    /// Round 6 (Repair): start near the classified problem, always with the
+    /// editable address one Back-step away. Deliberately not over-optimized —
+    /// the user can navigate Back and edit the address if the initial
+    /// diagnosis was wrong.
+    static func repairPath(for draft: ConnectionSetupDraft, failure: ConnectionFailure?) -> [ConnectionSetupStep] {
+        let details: [ConnectionSetupStep] = [.connectionDetails]
+        switch failure {
+        case .authenticationRejected:
+            return details + [.loginCredentials]
+        case .cloudflareTokenRejected:
+            return details + [.cloudflareTroubleshooting]
+        case .tlsUntrusted, .tlsBadDate, .tlsFailure:
+            return details + [.tlsTroubleshooting]
+        // Transport/dashboard/address problems and a password-login throttle
+        // all start at the address editor. A throttled login in particular
+        // must never route toward another login.
+        case .invalidAddress, .insecureTransport, .hostNotFound, .unreachable,
+             .connectionRefused, .timedOut, .offline, .rateLimited,
+             .dashboardUnavailable, .unexpectedServerResponse:
+            return details
+        // No strong diagnosis (or none retained): the seeded staged test is
+        // the diagnostic.
+        case .loginRequired, .sessionTicketFailure, .unknown, nil:
+            return (try? draft.testConfiguration()) != nil
+                ? details + [.connectionTest]
+                : details
         }
     }
 
@@ -223,7 +258,14 @@ struct ConnectionSetupFlow: Equatable {
     ///   credentials are present.
     /// * An address that cannot even be built falls back to the details
     ///   screen, which surfaces the validation.
-    static func initialPath(for destination: ConnectionHelpDestination, draft: ConnectionSetupDraft) -> [ConnectionSetupStep] {
+    static func initialPath(
+        for destination: ConnectionHelpDestination,
+        draft: ConnectionSetupDraft,
+        repairFailure: ConnectionFailure? = nil
+    ) -> [ConnectionSetupStep] {
+        if destination == .repairConnection {
+            return repairPath(for: draft, failure: repairFailure)
+        }
         guard destination == .currentConnection else {
             return [entryStep(for: destination)]
         }
@@ -240,6 +282,26 @@ struct ConnectionSetupFlow: Equatable {
     /// distinctions that would otherwise sound wrong to an already-connected
     /// user can be made without forking the wizard's wording.
     var enteredFromCurrentConnection: Bool { entry == .currentConnection }
+
+    /// Round 6: true for the Repair entry, which owns the context-specific
+    /// final actions (Reconnect Now / Sign In to Reconnect) and never the
+    /// login-form handoff or the Settings Done/apply paths.
+    var isRepairingConnection: Bool { entry == .repairConnection }
+
+    /// Round 6 (Repair): a consumed or failed reconnect attempt invalidates
+    /// the staged success that produced it — a fresh explicit test is
+    /// required before another reconnect. Pops Review so the test screen is
+    /// showing, with the same generation rotation as any other reset, so no
+    /// late event from the consumed run can resurrect it.
+    mutating func invalidateTestForRepairRetry() {
+        testGeneration += 1
+        testState = ConnectionSetupTestState()
+        testSucceededAtRevision = nil
+        validationError = nil
+        if step == .review {
+            path.removeLast()
+        }
+    }
 
     mutating func back() {
         guard canGoBack else { return }
@@ -314,13 +376,15 @@ struct ConnectionSetupFlow: Equatable {
 
     mutating func submitCredentials() {
         guard step == .loginCredentials else { return }
-        // The Settings current-connection entry may proceed with no
-        // credentials at all: an interactive-auth dashboard signs in through
-        // the browser, so empty fields are its normal shape — including when
-        // returning here after editing a failed test's address. LoginView
-        // entries keep the strict requirement; a first-run user must not
-        // spend a real server's login attempt on empty credentials.
-        let credentialsOptional = enteredFromCurrentConnection
+        // The Settings current-connection and Repair entries may proceed with
+        // no credentials at all: provider discovery decides the auth mode,
+        // and both contexts legitimately seed without credentials (a
+        // browser-auth deployment, or an active connection whose password is
+        // not saved). A missing-password stop is the supported partial
+        // outcome. LoginView entries keep the strict requirement; a
+        // first-run user must not spend a real server's login attempt on
+        // empty credentials.
+        let credentialsOptional = (enteredFromCurrentConnection || isRepairingConnection)
             && draft.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && draft.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         do {

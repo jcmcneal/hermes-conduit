@@ -769,6 +769,14 @@ final class AppState: ObservableObject {
     /// once by LoginView; never read by the connected composer banner, so a
     /// sign-in failure cannot resurface stale over a healthy session.
     @Published var pendingLoginFailure: ConnectionFailurePresentation?
+    /// Round 6: the classified failure of the most recent failed connection
+    /// attempt (saved-credential reconnect, repair activation, or a failed
+    /// explicit connect). Typed — never recovered from user-facing strings —
+    /// so Repair Connection can seed its routing from the actual problem.
+    /// Cleared by any successful connection, by explicit disconnect, and
+    /// when the user starts a manual login (which abandons the prior
+    /// failure's repair context).
+    @Published var lastConnectionFailure: ConnectionFailure?
     @Published var showLogin = true
     @Published private(set) var composerPrefillText = ""
     @Published private(set) var composerPrefillToken = UUID()
@@ -2275,10 +2283,42 @@ final class AppState: ObservableObject {
               index + 1 < arguments.count else { return nil }
         return HermesConnection(baseUrl: arguments[index + 1], ticket: "ui-test-stub")
     }
+
+    /// UI-test-only FAILED-connection state (Round 6): a snapshot connection
+    /// with a surfaced, classified stable failure so the Repair Connection
+    /// entry is visible. Inert by construction under the same reconnect
+    /// suppression as the connected stub. `-CONDUIT_UI_TEST_FAILURE_KIND
+    /// none` retains no failure, so the repair entry opens straight on the
+    /// staged test.
+    private static func uiTestFailedConnectionStub() -> HermesConnection? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-CONDUIT_UI_TEST_FAILED_CONNECTION"),
+              index + 1 < arguments.count else { return nil }
+        return HermesConnection(baseUrl: arguments[index + 1], ticket: "ui-test-stub")
+    }
+
+    private static func uiTestFailureKind() -> ConnectionFailure? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-CONDUIT_UI_TEST_FAILURE_KIND"),
+              index + 1 < arguments.count else { return .hostNotFound }
+        return arguments[index + 1] == "none" ? nil : .hostNotFound
+    }
 #endif
 
     func loadSavedConnection() {
         #if DEBUG
+        if let stub = Self.uiTestFailedConnectionStub() {
+            let failureKind = Self.uiTestFailureKind()
+            lifecycleLog.notice("UI-test failed-connection stub active: repair surface visible, transport inert")
+            connection = stub
+            isConnected = false
+            isConnecting = false
+            turnState = .reconnecting
+            lastConnectionFailure = failureKind
+            errorMessage = "The connection to Hermes was lost. (UI test stub)"
+            showLogin = false
+            return
+        }
         if let stub = Self.uiTestConnectedStub() {
             lifecycleLog.notice("UI-test connected stub active: no transport will be created and reconnects are inert")
             connection = stub
@@ -2407,6 +2447,7 @@ final class AppState: ObservableObject {
             isConnecting = false
             // A fresh healthy session never inherits an older banner error.
             errorMessage = nil
+            lastConnectionFailure = nil
             reconnectAttempts = 0
             connectedAt = Date()
             KeychainHelper.saveConnection(conn)
@@ -2464,11 +2505,184 @@ final class AppState: ObservableObject {
             isConnected = false
             turnState = .reconnecting
             errorMessage = error.localizedDescription
+            // The typed classification is retained for Repair Connection's
+            // seeding and routing; the raw error never reaches the UI.
+            lastConnectionFailure = ConnectionFailureClassifier.classify(error)
             // Only an explicit dashboard 401/403 may return the user to the
             // sign-in screen. A transient gateway or WebKit startup failure
             // must retain the saved dashboard session and retry.
             showLogin = false
             scheduleReconnect(purpose: continuation.purpose)
+        }
+    }
+
+    // MARK: - Connection Repair (Round 6)
+
+    /// Builds the Repair seed from the configuration that actually failed:
+    /// the active (failed) connection's exact URL, safely available
+    /// credentials for it, and the origin-matched Cloudflare token. Nil when
+    /// there is no failed target — a healthy connected session is never a
+    /// repair candidate.
+    func makeConnectionRepairContext() -> ConnectionRepairContext? {
+        guard let failedURL = connection?.baseUrl, !isConnected else { return nil }
+        return repairContext(for: failedURL)
+    }
+
+    /// Repair seed for a failed SAVED-credential reconnect (login screen):
+    /// the failed target is the saved record's dashboard, and the record
+    /// itself — kept intact by the failure path — supplies the seed under
+    /// the normal seeding rules (a Face ID-protected record surrenders its
+    /// username only).
+    func makeSavedConnectionRepairContext() -> ConnectionRepairContext? {
+        guard let credentials = KeychainHelper.loadCredentials() else { return nil }
+        return repairContext(for: credentials.baseURL)
+    }
+
+    private func repairContext(for failedURL: String) -> ConnectionRepairContext {
+        let seeded = ConnectionSetupSeeding.wizardCredentials(
+            for: failedURL,
+            saved: KeychainHelper.loadCredentials()
+        )
+        return ConnectionRepairContext(
+            draft: ConnectionSetupDraft(
+                existingServerURL: failedURL,
+                username: seeded?.username ?? "",
+                password: seeded?.password ?? ""
+            ),
+            cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: failedURL),
+            cloudflareOriginURL: failedURL,
+            failure: lastConnectionFailure
+        )
+    }
+
+    /// Repair entry for a failed SAVED-credential reconnect (login screen).
+    /// Like the composer entry, this is an explicit user takeover: any
+    /// outstanding automatic recovery loses authority before the wizard
+    /// opens, so it can never install a connection underneath the repair.
+    @discardableResult
+    func beginSavedConnectionRepair() -> ConnectionRepairContext? {
+        guard let context = makeSavedConnectionRepairContext() else { return nil }
+        cancelChatResumeTransportRecovery()
+        return context
+    }
+
+    /// Entering Repair is an explicit user takeover of connection recovery:
+    /// outstanding automatic recovery — the scheduled reconnect timer, its
+    /// operations, and its automatic work — loses authority here, so a stale
+    /// automatic reconnect can never install a connection or select a
+    /// session over the user's explicit repair. Dismissal does not silently
+    /// restart the loop; the user is left in the stable disconnected state.
+    @discardableResult
+    func beginConnectionRepair() -> ConnectionRepairContext? {
+        guard let context = makeConnectionRepairContext() else { return nil }
+        cancelChatResumeTransportRecovery()
+        return context
+    }
+
+    /// The wizard's activation handler for the Repair entry: runs the
+    /// explicit reconnect through the authoritative connection path and
+    /// persists the tested configuration only after activation succeeds.
+    func connectionRepairActivationHandler(
+    ) -> (ConnectionRepairHandoff) async -> ConnectionRepairActivationOutcome {
+        let activator = AppStateConnectionRepairActivator(appState: self)
+        return { handoff in await activator.activate(handoff) }
+    }
+
+    /// The explicit repair activation behind Reconnect Now / Sign In to
+    /// Reconnect. Revokes outstanding automatic recovery authority first,
+    /// commits the validated transaction's cookies (native only — browser
+    /// sign-in publishes its own cookies through the AuthWebView flow), then
+    /// connects with `.preserveCurrent`: the server confirms the preserved
+    /// session identity, never automatic-return selection.
+    func performConnectionRepair(
+        _ handoff: ConnectionRepairHandoff
+    ) async -> ConnectionRepairActivationOutcome {
+        // The PRE-activation target anchors persistence: it decides whether
+        // the tested URL counts as changed (remember it) and whether the
+        // Cloudflare token needs a same-origin re-bind.
+        let failedTarget = connection?.baseUrl
+        cancelChatResumeTransportRecovery()
+        let outcome: ConnectionRepairActivationOutcome
+        switch handoff {
+        case .native(let candidate):
+            // The one-shot candidate is consumed here, whether activation
+            // succeeds or fails: its cookies are committed exactly once, and
+            // a failed activation requires a fresh test, never a retry of a
+            // spent transaction. If activation fails after the commit, the
+            // committed cookies belong to a genuinely authenticated session
+            // (login and ticket mint both succeeded first) — they are
+            // naturally superseded by the next explicit test or sign-in and
+            // are deliberately not rolled back.
+            candidate.nativeConnection.commitCookies()
+            outcome = await activateRepairedConnection(with: HermesConnection(
+                baseUrl: candidate.configuration.serverURL,
+                ticket: candidate.nativeConnection.ticket
+            ))
+        case .browserSignIn(let ticket, let baseURL, _):
+            outcome = await activateRepairedConnection(with: HermesConnection(
+                baseUrl: baseURL,
+                ticket: ticket
+            ))
+        }
+        guard outcome == .activated else { return outcome }
+        persistActivatedRepair(handoff, failedTarget: failedTarget)
+        return outcome
+    }
+
+    /// The authoritative activation step. A test success is not a guarantee
+    /// the world is unchanged; if the websocket activation fails, the
+    /// failure is classified, the reconnect `connect` armed is cancelled (no
+    /// automatic retry), the remembered dashboard URL is restored, and the
+    /// caller stays in Repair.
+    private func activateRepairedConnection(
+        with conn: HermesConnection
+    ) async -> ConnectionRepairActivationOutcome {
+        // connect() remembers the URL it attempts by design; a FAILED
+        // activation must not move the remembered dashboard (the saved
+        // connection and credentials are untouched by the failure path
+        // already).
+        let rememberedURL = defaults.string(forKey: dashboardURLKey)
+        await connect(
+            with: conn,
+            profile: activeProfile,
+            syncPurpose: .preserveCurrent,
+            cancelsResumeRestoration: false
+        )
+        guard isConnected else {
+            if let rememberedURL { defaults.set(rememberedURL, forKey: dashboardURLKey) }
+            // connect() armed an automatic retry in its failure path; the
+            // explicit repair owns recovery, so the loop stays stopped until
+            // the user tests and reconnects again.
+            cancelChatResumeTransportRecovery()
+            return .failed(lastConnectionFailure ?? .unknown)
+        }
+        return .activated
+    }
+
+    /// Persists the tested configuration ONLY after successful activation.
+    /// Reuses the Round-5 apply plan (replace-never-create credentials,
+    /// same-origin Cloudflare rewrites) anchored at the failed target so a
+    /// changed URL is remembered and a path-only move re-binds the token.
+    private func persistActivatedRepair(
+        _ handoff: ConnectionRepairHandoff,
+        failedTarget: String?
+    ) {
+        switch handoff {
+        case .native(let candidate):
+            let anchor = failedTarget ?? candidate.configuration.serverURL
+            let plan = ConnectionSetupApplication.plan(
+                result: candidate.configuration,
+                currentDashboardURL: anchor,
+                savedCredentials: KeychainHelper.loadCredentials(),
+                savedCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: anchor)
+            )
+            plan.perform(appState: self)
+        case .browserSignIn(_, let baseURL, _):
+            // Existing browser-auth semantics: no reusable password exists,
+            // stale native credentials are cleared, the activated dashboard
+            // is remembered, and same-origin Cloudflare rules are untouched.
+            rememberDashboardURL(baseURL)
+            KeychainHelper.clearCredentials()
         }
     }
 
@@ -2482,6 +2696,7 @@ final class AppState: ObservableObject {
         chatResumeRestorationRequest = nil
         invalidateReconciliation()
         cancelScenePhaseAttempt()
+        lastConnectionFailure = nil
         client?.disconnect()
         isConnected = false
         isConnecting = false
@@ -2602,16 +2817,18 @@ final class AppState: ObservableObject {
             authenticatedConnection.commitCookies()
             await connect(with: HermesConnection(baseUrl: credentials.baseURL, ticket: authenticatedConnection.ticket), profile: activeProfile)
         } catch is CancellationError {
-            // Intentional cancellation (e.g. a superseded connect) is not a
-            // login failure; fall back to the login screen silently.
+            // A superseded connect owns the flow from here; fall back to the
+            // login screen silently.
             showLogin = true
         } catch {
             // A rejected saved password falls back to the native login screen
             // without erasing it, allowing the user to correct the account.
             // The typed classified handoff replaces the old string write, so
             // the composer banner never inherits a stale sign-in message.
+            let failure = ConnectionFailureClassifier.classify(error)
+            lastConnectionFailure = failure
             showLogin = true
-            pendingLoginFailure = .presenting(ConnectionFailureClassifier.classify(error))
+            pendingLoginFailure = .presenting(failure)
         }
     }
 
@@ -4693,9 +4910,10 @@ final class AppState: ObservableObject {
 
     func reconnectForRetry(purpose requestedPurpose: ChatResumeSyncPurpose) async {
         #if DEBUG
-        // The UI-test stubbed session has no transport to restore; every
-        // automatic or explicit reconnect is a deterministic no-op for it.
-        guard Self.uiTestConnectedStub() == nil else { return }
+        // The UI-test stubbed sessions have no transport to restore; every
+        // automatic or explicit reconnect is a deterministic no-op for them.
+        guard Self.uiTestConnectedStub() == nil,
+              Self.uiTestFailedConnectionStub() == nil else { return }
         #endif
         guard let savedConnection = connection else { return }
         let purpose = beginChatResumeRecovery(purpose: requestedPurpose)
@@ -4789,6 +5007,9 @@ final class AppState: ObservableObject {
                     }
                 }
                 guard refreshTransportContinuation() else { return }
+                // The dashboard's session is gone (sign-in required): the
+                // typed classification routes Repair toward browser sign-in.
+                lastConnectionFailure = .loginRequired
                 requireSignIn(
                     failure: Self.silentRenewalSignInFailure(
                         reauthError: silentRenewalReauthError,
@@ -4800,6 +5021,7 @@ final class AppState: ObservableObject {
                 isConnected = false
                 isConnecting = false
                 turnState = .reconnecting
+                lastConnectionFailure = ConnectionFailureClassifier.classify(error)
                 errorMessage = "Failed to refresh the dashboard session: \(error.localizedDescription)"
                 scheduleReconnect(purpose: continuationPurpose)
             }
@@ -4819,8 +5041,12 @@ final class AppState: ObservableObject {
                   let activeClient = self.client, activeClient === client else { return }
             isConnected = true
             isConnecting = false
-            // A fresh healthy session never inherits an older banner error.
+            // A fresh healthy session never inherits an older banner error —
+            // including the typed classification Repair Connection seeds
+            // from: a successful reconnect makes any previous failure stale,
+            // so a LATER unrelated failure must route repair from itself.
             errorMessage = nil
+            lastConnectionFailure = nil
             reconnectAttempts = 0
             connectedAt = Date()
             guard let continuation = await synchronizeTransportContinuation(

@@ -20,8 +20,11 @@
 //  credentials ends in the supported `requiresCredentials` partial outcome —
 //  credential absence is not an authentication mode, and an empty-credential
 //  login is never sent. The probe commits nothing: no cookie store write, no
-//  Keychain, no AppState mutation, no websocket, no screen changes. The
-//  resulting ticket and transaction cookies are discarded here.
+//  Keychain, no AppState mutation, no websocket, no screen changes. A
+//  successful native test RETURNS the validated transaction memory-only
+//  (Round 6): Repair mode may promote it to an explicit reconnect, and the
+//  transaction's cookies reach the shared store only when that reconnect
+//  commits them.
 //
 
 import Foundation
@@ -155,6 +158,12 @@ struct ConnectionSetupTestState: Equatable {
     /// "connection ready" claim.
     static let credentialsRequiredMessage = "This dashboard uses username and password sign-in. "
         + "Enter your credentials to finish testing the connection."
+
+    /// Round 6 (Repair): the interactive-auth message in the Repair context,
+    /// where the next step is signing in over the existing AuthWebView —
+    /// not returning to the login screen.
+    static let repairInteractiveMessage = "This dashboard uses browser-based sign-in. "
+        + "Sign in now to reconnect to it."
 
     subscript(stage: ConnectionSetupTestStage) -> ConnectionSetupStageState {
         get {
@@ -293,11 +302,31 @@ struct ConnectionSetupTestRecoveryPlan: Equatable {
 /// every other wizard state mutation.
 @MainActor
 protocol ConnectionSetupTesting {
+    /// Runs the staged test, reporting progress through `onEvent`. A
+    /// successful NATIVE test also returns the validated transaction —
+    /// memory only, nothing committed — which Repair mode may promote into
+    /// an explicit reconnect candidate. Every diagnostic outcome returns
+    /// nil, and testing never commits cookies, writes Keychain, or touches
+    /// AppState.
+    @discardableResult
     func runTest(
         result: ConnectionSetupResult,
         cloudflareAccess: CloudflareAccessCredentials?,
         onEvent: @escaping (ConnectionSetupTestEvent) -> Void
-    ) async
+    ) async -> ConnectionSetupTestAcquisition?
+}
+
+/// Memory-only validated native authentication transaction from a
+/// successful staged test. The probe commits nothing itself:
+/// `commitCookies()` happens only when an explicit reconnect later promotes
+/// this acquisition into the active connection.
+struct ConnectionSetupTestAcquisition: CustomStringConvertible, CustomDebugStringConvertible {
+    let configuration: ConnectionSetupResult
+    let nativeConnection: NativeAuthConnection
+
+    // Redacted: the transaction carries a ticket and cookies.
+    var description: String { "ConnectionSetupTestAcquisition(redacted)" }
+    var debugDescription: String { description }
 }
 
 /// The production probe. Reuses `NativeAuthClient` unchanged for every
@@ -319,7 +348,7 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         result: ConnectionSetupResult,
         cloudflareAccess: CloudflareAccessCredentials?,
         onEvent: @escaping (ConnectionSetupTestEvent) -> Void
-    ) async {
+    ) async -> ConnectionSetupTestAcquisition? {
         let client = NativeAuthClient(
             baseURL: result.serverURL,
             cloudflareAccess: cloudflareAccess,
@@ -336,19 +365,19 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         do {
             discovery = try await client.authProviderDiscovery()
         } catch {
-            guard !Self.wasCancelled(error) else { return }
+            guard !Self.wasCancelled(error) else { return nil }
             if let authError = error as? AuthClientError {
                 if case .invalidURL = authError {
                     Self.reportFailure(.server, ConnectionFailureClassifier.classify(authError), to: onEvent)
-                    return
+                    return nil
                 }
                 onEvent(.succeeded(.server))
                 onEvent(.started(.dashboard))
                 Self.reportFailure(.dashboard, ConnectionFailureClassifier.classify(authError), to: onEvent)
-                return
+                return nil
             }
             Self.reportFailure(.server, ConnectionFailureClassifier.classify(error), to: onEvent)
-            return
+            return nil
         }
         onEvent(.succeeded(.server))
 
@@ -366,19 +395,19 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
             // identity plus the expected auth behavior — and reports the
             // supported terminal outcome. It stays side-effect-free: no
             // native login attempt, no ticket mint, no WebView, no
-            // cookie/Keychain writes. The actual sign-in happens in
-            // LoginView over the normal handoff.
+            // cookie/Keychain writes. The actual sign-in happens over the
+            // existing AuthWebView, never inside the probe.
             onEvent(.succeeded(.dashboard))
             onEvent(.started(.authentication))
             onEvent(.requiresInteractiveSignIn(.authentication))
-            return
+            return nil
         case .unrecognized:
             Self.reportFailure(.dashboard, .unexpectedServerResponse, to: onEvent)
-            return
+            return nil
         case .providers(let providers):
             guard HermesProviderCheck.supportsPassword(providers) else {
                 Self.reportFailure(.dashboard, .unexpectedServerResponse, to: onEvent)
-                return
+                return nil
             }
         }
         onEvent(.succeeded(.dashboard))
@@ -386,29 +415,31 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         // Stage 3: the full native credential proof — password login plus
         // the ws-ticket mint that proves the session is actually usable.
         // This is the exact milestone normal login requires before it would
-        // commit cookies. The transaction (ticket + transaction cookies) is
-        // deliberately discarded: the test persists nothing and connects
-        // nothing.
+        // commit cookies. The transaction is RETURNED memory-only, never
+        // committed: the test persists nothing and connects nothing.
         //
         // A password-capable dashboard WITHOUT present credentials stops
         // here at the supported credentials-required outcome. Credential
-        // absence is not an authentication mode — it only means the Settings
-        // seed could not supply the secret — and an empty-credential login
-        // would be a real, rate-limited authentication attempt against a
+        // absence is not an authentication mode — it only means the seed
+        // could not supply the secret — and an empty-credential login would
+        // be a real, rate-limited authentication attempt against a
         // connection that may already be known to work.
         onEvent(.started(.authentication))
         guard result.hasUsableCredentials else {
             onEvent(.requiresCredentials(.authentication))
-            return
+            return nil
         }
         do {
-            // Deliberately discarded: commitCookies() is never called, so
-            // the transaction never reaches the shared cookie store.
-            _ = try await client.connect(username: result.username, password: result.password)
+            let authenticatedConnection = try await client.connect(username: result.username, password: result.password)
             onEvent(.succeeded(.authentication))
+            return ConnectionSetupTestAcquisition(
+                configuration: result,
+                nativeConnection: authenticatedConnection
+            )
         } catch {
-            guard !Self.wasCancelled(error) else { return }
+            guard !Self.wasCancelled(error) else { return nil }
             Self.reportFailure(.authentication, ConnectionFailureClassifier.classify(error), to: onEvent)
+            return nil
         }
     }
 
@@ -512,8 +543,17 @@ struct ConnectionSetupTestProbeStub: ConnectionSetupTesting {
         result: ConnectionSetupResult,
         cloudflareAccess: CloudflareAccessCredentials?,
         onEvent: @escaping (ConnectionSetupTestEvent) -> Void
-    ) async {
+    ) async -> ConnectionSetupTestAcquisition? {
         script.run(onEvent)
+        // The stub's transaction is built through the DEBUG factory (inert
+        // empty cookie set). Repair UI tests script the ACTIVATION outcome
+        // separately (`-CONDUIT_REPAIR_ACTIVATION`), so this transaction is
+        // never committed by the stub itself.
+        guard script == .success else { return nil }
+        return ConnectionSetupTestAcquisition(
+            configuration: result,
+            nativeConnection: .debugStub(ticket: "connection-setup-stub-ticket")
+        )
     }
 }
 #endif
