@@ -12591,13 +12591,23 @@ final class AppState: ObservableObject {
         responseHaptics.invalidateConclusion()
     }
 
+    /// While a voice session may hold the audio session — Voice Conversation
+    /// (listening, thinking, speaking, muted, transcribing, including a
+    /// paused mic) or a provider test — the custom Core Haptics response
+    /// pattern is suppressed: Core Haptics must never contend with voice
+    /// capture or reactivate the coordinator-owned session (issue #140).
+    /// Response feedback falls back to the UIKit pattern in that state.
+    var responseHapticsMayUseCoreHaptics: Bool {
+        voiceConversationController.state == .idle
+    }
+
     private func performResponseHapticEffects(
         _ effects: [ResponseHapticState.Effect]
     ) {
         for effect in effects {
             switch effect {
             case .responseStarted:
-                Haptics.responseStarted()
+                Haptics.responseStarted(coreHapticsAllowed: responseHapticsMayUseCoreHaptics)
             case .toolStarted:
                 Haptics.toolStarted()
             case .responseConcluded:
