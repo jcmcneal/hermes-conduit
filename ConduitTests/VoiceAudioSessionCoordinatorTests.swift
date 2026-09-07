@@ -117,6 +117,34 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(session.categoryCalls.last?.category, .playback)
     }
 
+    func testAcquiringConversationUnderStandaloneUpgradesWithoutDeactivation() throws {
+        _ = try coordinator.acquire(.standalonePlayback)
+        session.resetRecordings()
+
+        _ = try coordinator.acquire(.conversationCapture)
+
+        XCTAssertEqual(session.deactivationCount, 0)
+        XCTAssertEqual(session.categoryCalls.last?.category, .playAndRecord)
+        XCTAssertEqual(coordinator.appliedPolicy, .conversation)
+    }
+
+    func testReassertFailureKeepsPolicySoLaterReleaseStillDeactivates() throws {
+        let lease = try coordinator.acquire(.conversationCapture)
+        session.categoryError = VoiceAudioSessionMockError.configurationFailed
+
+        XCTAssertThrowsError(try coordinator.reassert())
+        XCTAssertEqual(coordinator.appliedPolicy, .conversation, "a failed reassert keeps the last known-applied policy")
+        session.resetRecordings()
+
+        // With the last owner gone, the retained policy must still diff
+        // against the inactive target so the final deactivation runs — the
+        // exact sequence a failed route-change restart produces.
+        coordinator.release(lease)
+
+        XCTAssertEqual(session.deactivationCount, 1)
+        XCTAssertNil(coordinator.appliedPolicy)
+    }
+
     func testStandaloneReleaseDeactivatesImmediately() throws {
         let lease = try coordinator.acquire(.standalonePlayback)
 
@@ -237,6 +265,23 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(session.categoryCalls.count, 0)
         XCTAssertEqual(session.activationCount, 0)
+    }
+
+    /// Service-level ownership check that needs no audio hardware: encoded
+    /// playback acquires a lease before constructing the player, so a startup
+    /// failure (here: invalid audio data) must roll the lease back through
+    /// the coordinator — the same acquire/rollback contract the engine paths
+    /// rely on. Engine-dependent paths (natural PCM completion, interruption,
+    /// configuration change) remain manual/device verification.
+    func testEncodedPlaybackStartupFailureReleasesAcquiredLease() throws {
+        let service = AVSpeechPlaybackService(coordinator: coordinator)
+
+        XCTAssertThrowsError(try service.playEncodedAudioData(Data()))
+
+        XCTAssertEqual(session.categoryCalls.count, 1, "ownership was acquired before the player was built")
+        XCTAssertEqual(session.categoryCalls.last?.category, .playback)
+        XCTAssertEqual(session.deactivationCount, 1, "the failure must release the acquired lease")
+        XCTAssertNil(coordinator.appliedPolicy)
     }
 }
 

@@ -99,6 +99,31 @@ final class AppStateReadAloudTests: XCTestCase {
         harness.readAloudController.stop()
     }
 
+    func testRunningASRTestStopsActiveReadAloud() async {
+        // The ASR test claims conversation-capture session ownership, so it
+        // must stop a still-playing read aloud first — the mirror of
+        // testStartingReadAloudStopsInFlightSpeechTest.
+        let harness = makeHarness(snapshot: VoiceCapabilitySnapshot(
+            isGatewayConnected: true,
+            supportsTranscription: true,
+            supportsSpeech: true,
+            unavailableReason: nil
+        ))
+        let messageA = ChatMessage(id: "msg-a", role: .assistant, content: "Response A", timestamp: "1")
+
+        harness.appState.toggleReadAloud(message: messageA)
+        await awaitUntil("read aloud to reach playing") {
+            harness.readAloudController.state == .playing(messageID: "msg-a")
+        }
+        XCTAssertTrue(harness.readAloudPlayback.isPlaying)
+
+        let result = await harness.appState.runVoiceASRTest()
+
+        XCTAssertTrue(result.passed)
+        XCTAssertFalse(harness.readAloudPlayback.isPlaying)
+        XCTAssertEqual(harness.readAloudController.state, .idle)
+    }
+
     func testTTSOnlyAvailabilityIsIndependentOfTranscription() {
         let harness = makeHarness(snapshot: ttsOnlySnapshot)
 

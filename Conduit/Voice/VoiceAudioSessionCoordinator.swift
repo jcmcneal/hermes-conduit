@@ -57,7 +57,7 @@ final class SystemVoiceAudioSession: VoiceAudioSessionControlling {
 /// unknown or already-released lease is a no-op, so repeated cleanup paths
 /// (stop, cancellation, backgrounding) can never underflow another owner.
 struct VoiceAudioLease: Equatable {
-    fileprivate let id: UUID
+    private let id: UUID
     /// Internal so tests can synthesize unknown leases; production callers
     /// only ever receive leases from `acquire`.
     init(id: UUID = UUID()) { self.id = id }
@@ -120,11 +120,12 @@ final class VoiceAudioSessionCoordinator {
         do {
             try applyDominantPolicy()
         } catch {
-            // Deactivation failures must never crash the caller. The policy
-            // stays marked applied, so the next ownership transition retries
-            // the deactivation instead of assuming the session went inactive.
+            // Deactivation and policy-transition failures must never crash
+            // the caller. The policy stays marked applied, so the next
+            // ownership transition retries it instead of assuming the session
+            // went inactive.
             audioSessionLogger.error(
-                "audio session deactivation failed: \(String(describing: error), privacy: .public)"
+                "audio session policy transition failed on release: \(String(describing: error), privacy: .public)"
             )
             return
         }
@@ -137,8 +138,17 @@ final class VoiceAudioSessionCoordinator {
     /// the session underneath a live lease (route change restarting capture).
     func reassert() throws {
         guard !leases.isEmpty else { return }
+        let previous = appliedPolicy
         appliedPolicy = nil
-        try applyDominantPolicy()
+        do {
+            try applyDominantPolicy()
+        } catch {
+            // Mirror release(): keep the last known-applied policy so a later
+            // ownership transition still diffs against it and retries the
+            // deactivation instead of assuming the session went inactive.
+            appliedPolicy = previous
+            throw error
+        }
     }
 
     /// Any conversation intent keeps the conversation configuration:

@@ -648,6 +648,11 @@ final class VoiceConversationController: ObservableObject {
                 }
                 return
             }
+            // Terminal drain failure: settle playback like every other
+            // terminal path so the lease and engine do not outlive the turn.
+            // (The cancellation branch above intentionally keeps ownership —
+            // an interrupted stream's already-scheduled audio renders out.)
+            playback.stop()
             if state == .speaking || state == .thinking { state = .failed(error.localizedDescription) }
             return
         }

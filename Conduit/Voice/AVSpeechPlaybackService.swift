@@ -73,6 +73,10 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
     func enqueuePCM16(_ data: Data, sampleRate: Double) throws -> Int {
         if format == nil { try start(sampleRate: sampleRate) }
         guard let format, abs(format.sampleRate - sampleRate) < 1 else {
+            // A stream that changes sample rates can never render; settle
+            // immediately so the lease does not wait on the caller's error
+            // path.
+            stop()
             throw VoiceAudioError.unavailable("The gateway changed PCM sample rates during a stream.")
         }
         remainder.append(data)
@@ -216,8 +220,8 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
 
 extension AVSpeechPlaybackService: AVAudioPlayerDelegate {
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        Task { @MainActor in
-            guard self.encodedPlayer === player else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.encodedPlayer === player else { return }
             // Natural completion is terminal for the encoded path: stop()
             // clears the player, resumes drain waiters, and releases the
             // session lease.
