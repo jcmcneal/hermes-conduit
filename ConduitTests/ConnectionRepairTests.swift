@@ -16,7 +16,7 @@ import XCTest
 
 @MainActor
 final class ConnectionRepairTests: XCTestCase {
-    private let failedURL = "https://hermes.example:9443/hermes"
+    private static let failedURL = "https://hermes.example:9443/hermes"
 
     // MARK: - Harness (mirrors AppStateChatResumeTests)
 
@@ -284,7 +284,7 @@ final class ConnectionRepairTests: XCTestCase {
     // MARK: - Repair takeover of automatic recovery (spec 8, 27)
 
     func testEnteringRepairStopsTheAutomaticRetryLoopWithoutSideEffects() async {
-        let reconnectSpy = ReconnectExecutionSpy()
+        let reconnectSpy = RepairReconnectExecutionSpy()
         let scheduler = RepairControlledReconnectScheduler()
         let suite = "ConnectionRepairTests.scheduler.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
@@ -321,7 +321,7 @@ final class ConnectionRepairTests: XCTestCase {
     // MARK: - Activation (spec 13, 14, 16, 28, 30)
 
     func testSameConnectionRepairActivatesOnceAndPreservesTheSession() async {
-        let connectCount = ConnectCount()
+        let connectCount = RepairConnectCount()
         let harness = makeHarness(lifecycleOperations: sessionPreservingFakes(connectClient: { _ in
             connectCount.value += 1
         }))
@@ -398,7 +398,7 @@ final class ConnectionRepairTests: XCTestCase {
 
     func testExplicitRepairOutranksLateAutomaticReconnect() async {
         let mintGate = RepairControlledSuspension()
-        let connectCount = ConnectCount()
+        let connectCount = RepairConnectCount()
         let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
             connectClient: { _ in connectCount.value += 1 },
             loadCatalog: { _, _ in [self.session("stored-a")] },
@@ -460,14 +460,14 @@ enum RepairControlledError: Error {
 }
 
 @MainActor
-final class ReconnectExecutionSpy {
+final class RepairReconnectExecutionSpy {
     var purposes: [ChatResumeSyncPurpose] = []
 }
 
 /// Minimal replicas of the AppStateChatResumeTests test doubles (those are
 /// file-private there).
 @MainActor
-final class ConnectCount {
+final class RepairConnectCount {
     var value = 0
 }
 
