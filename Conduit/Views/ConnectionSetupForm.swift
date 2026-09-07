@@ -146,6 +146,13 @@ struct ConnectionSetupForm: View {
     private var connectionTest: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Test connection").font(.title2.weight(.semibold))
+            // Entries that skipped the details form (the Settings
+            // current-connection entry) still show what is being tested.
+            if flow.enteredFromCurrentConnection,
+               let address = try? ConnectionSetupAddressBuilder.build(flow.draft) {
+                Text(address).font(.subheadline).textSelection(.enabled)
+                    .accessibilityIdentifier("setup.address-preview")
+            }
             Text("Conduit will check the dashboard address and try your credentials now. Nothing is saved, and Conduit won’t connect yet — you’ll confirm everything on the Review screen.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -225,10 +232,14 @@ struct ConnectionSetupForm: View {
             // Revalidate for rendering only: a draft that stopped validating
             // after reaching Review must never silently blank the card.
             reviewContent
-            Text("These settings will fill the login form. You’ll tap Connect there when you’re ready.")
+            Text(flow.enteredFromCurrentConnection
+                 ? "Applying saves these settings for your next reconnect. Your current session stays connected."
+                 : "These settings will fill the login form. You’ll tap Connect there when you’re ready.")
                 .foregroundStyle(.secondary)
             validationNotice
-            Button("Use these settings") {
+            // From Settings with unchanged, successfully tested settings
+            // there is nothing to apply — Done simply closes the wizard.
+            Button(flow.testedSettingsUnchanged ? "Done" : "Use these settings") {
                 if let result = flow.complete() { onComplete(result) }
             }
             .buttonStyle(.borderedProminent)
@@ -242,8 +253,17 @@ struct ConnectionSetupForm: View {
         case .success(let result):
             reviewValue("Connection method", flow.draft.methodTitle)
             reviewValue("Dashboard address", result.serverURL)
-            reviewValue("Username", result.username)
-            reviewValue("Password", "Entered")
+            if !result.username.isEmpty {
+                reviewValue("Username", result.username)
+            }
+            if result.password.isEmpty {
+                // Only reachable through the interactive-auth acceptance:
+                // discovery proved this dashboard signs in via the browser,
+                // so the absent password is expected, not an omission.
+                reviewValue("Password", "None — browser sign-in")
+            } else {
+                reviewValue("Password", "Entered")
+            }
         case .failure(let error):
             VStack(alignment: .leading, spacing: 8) {
                 Text("These settings can’t be used yet. Go Back to edit them, then return here.")

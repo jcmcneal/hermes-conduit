@@ -101,7 +101,10 @@ struct ConnectionSetupView: View {
     // MARK: - Staged connection test
 
     private func startTestRun() {
-        guard let run = try? flow.draft.result(),
+        // Credentials are optional here: provider discovery decides whether a
+        // password applies, so an interactive-auth dashboard is testable
+        // without typing one first.
+        guard let run = try? flow.draft.testConfiguration(),
               let generation = flow.beginTest() else { return }
         let access = flow.cloudflareAccessForDraft()
         let prober = prober
@@ -605,6 +608,7 @@ extension ConnectionHelpDestination {
         case .network: return "Network & reachability"
         case .tls: return "HTTPS & certificates"
         case .cloudflare: return "Cloudflare Access"
+        case .currentConnection: return "Current connection"
         }
     }
 
@@ -628,7 +632,7 @@ extension ConnectionHelpDestination {
                 "Make sure a Service Auth policy allows that token to reach this Access application.",
                 "Or turn off \"Use Cloudflare Access service token\" to sign in interactively through the in-app browser."
             ]
-        case .start, .dashboard, .credentials, .network:
+        case .start, .dashboard, .credentials, .network, .currentConnection:
             return []
         }
     }

@@ -149,6 +149,10 @@ struct ConnectionSetupFlow: Equatable {
     private(set) var inheritedCloudflareOriginURL: String
     private(set) var validationError: ConnectionSetupValidationError?
     private let entry: ConnectionHelpDestination
+    /// The draft exactly as the wizard was seeded. The Settings
+    /// current-connection entry compares against it so a tested-but-unchanged
+    /// configuration can offer plain Done instead of an apply.
+    private let seededDraft: ConnectionSetupDraft
 
     var accessMethod: ConnectionAccessMethod? { draft.accessMethod }
 
@@ -177,10 +181,11 @@ struct ConnectionSetupFlow: Equatable {
         inheritedCloudflareOriginURL: String = ""
     ) {
         self.entry = entry
+        self.seededDraft = draft
         self.draft = draft
         self.inheritedCloudflareAccess = inheritedCloudflareAccess
         self.inheritedCloudflareOriginURL = inheritedCloudflareOriginURL
-        path = [Self.entryStep(for: entry)]
+        path = [Self.initialStep(for: entry, draft: draft)]
     }
 
     /// Failure-driven Round-1 destinations land at sensible parts of the
@@ -193,8 +198,28 @@ struct ConnectionSetupFlow: Equatable {
         case .network: return .accessMethod
         case .tls: return .tlsTroubleshooting
         case .cloudflare: return .cloudflareTroubleshooting
+        case .currentConnection: return .connectionDetails
         }
     }
+
+    /// The step a fresh wizard lands on. The Settings current-connection
+    /// entry skips the first-run readiness questions entirely: with a usable
+    /// password seed it opens on the (prefilled) connection-details screen;
+    /// without one — an interactive-auth deployment legitimately has no
+    /// stored password — it opens straight on the staged test rather than
+    /// parking the user on a meaningless password field.
+    static func initialStep(for destination: ConnectionHelpDestination, draft: ConnectionSetupDraft) -> ConnectionSetupStep {
+        guard destination == .currentConnection,
+              draft.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return entryStep(for: destination)
+        }
+        return .connectionTest
+    }
+
+    /// True only for the Settings current-connection entry, so the few copy
+    /// distinctions that would otherwise sound wrong to an already-connected
+    /// user can be made without forking the wizard's wording.
+    var enteredFromCurrentConnection: Bool { entry == .currentConnection }
 
     mutating func back() {
         guard canGoBack else { return }
@@ -295,8 +320,28 @@ struct ConnectionSetupFlow: Equatable {
     /// untested configuration is never handed off.
     mutating func complete() -> ConnectionSetupResult? {
         guard step == .review, canUseSettings else { return nil }
-        do { return try draft.result() }
-        catch { record(error); return nil }
+        switch acceptedResult() {
+        case .success(let result): return result
+        case .failure(let error): record(error); return nil
+        }
+    }
+
+    /// The result Review can hand off: the fully-validated draft, or — only
+    /// when the CURRENT staged outcome is the interactive-auth terminal — the
+    /// address-only configuration. Discovery, not form presence, proved how
+    /// that dashboard authenticates, so there is no password to require.
+    /// Every other validation failure stays a failure.
+    func acceptedResult() -> Result<ConnectionSetupResult, ConnectionSetupValidationError> {
+        do { return .success(try draft.result()) }
+        catch {
+            if (error as? ConnectionSetupValidationError) == .credentialsRequired,
+               hasCurrentInteractiveAuthOutcome,
+               let addressOnly = try? draft.testConfiguration() {
+                return .success(addressOnly)
+            }
+            let validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
+            return .failure(validationError)
+        }
     }
 
     /// Pure revalidation for rendering the Review card: the validated result
@@ -305,11 +350,7 @@ struct ConnectionSetupFlow: Equatable {
     /// failure can never silently blank the Review content — the view renders
     /// the failure branch instead.
     func reviewState() -> Result<ConnectionSetupResult, ConnectionSetupValidationError> {
-        do { return .success(try draft.result()) }
-        catch {
-            let validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
-            return .failure(validationError)
-        }
+        acceptedResult()
     }
 
     private mutating func record(_ error: Error) {
@@ -352,6 +393,15 @@ struct ConnectionSetupFlow: Equatable {
         hasCurrentSuccessfulTest || hasCurrentInteractiveAuthOutcome
     }
 
+    /// Round 5 (Settings current-connection entry): the CURRENT staged test
+    /// validated a configuration byte-identical to the one the wizard was
+    /// seeded with, so Review can offer plain Done — there is nothing to
+    /// apply. Any draft edit (address, credentials, route) breaks equality
+    /// exactly like it breaks the staged test's revision match.
+    var testedSettingsUnchanged: Bool {
+        canUseSettings && draft == seededDraft
+    }
+
     /// The inherited Cloudflare token, ONLY when it is same-origin with the
     /// draft's current address. A service token entered for one dashboard is
     /// never sent to a different origin during the test (Round-3 origin
@@ -359,7 +409,7 @@ struct ConnectionSetupFlow: Equatable {
     func cloudflareAccessForDraft() -> CloudflareAccessCredentials? {
         guard let access = inheritedCloudflareAccess, access.isConfigured else { return nil }
         let origin = inheritedCloudflareOriginURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !origin.isEmpty, let result = try? draft.result() else { return nil }
+        guard !origin.isEmpty, let result = try? draft.testConfiguration() else { return nil }
         return LoginCloudflareHandoff.sameOrigin(result.serverURL, origin) ? access : nil
     }
 

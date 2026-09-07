@@ -589,6 +589,14 @@ private struct SettingsHome: View {
     let snapshot: SettingsSnapshot
     @Binding var path: [SettingsDestination]
     @EnvironmentObject private var appState: AppState
+    /// Round 5: the Settings entry into the existing Connection Setup
+    /// assistant, seeded from the current configuration.
+    @State private var showsConnectionSetup = false
+    /// Set by the wizard's completion when the applied plan changes the
+    /// saved configuration; surfaced as an alert only after the wizard sheet
+    /// has dismissed (one presentation context at a time).
+    @State private var pendingAppliedNotice = false
+    @State private var appliedConnectionNotice = false
 
     var body: some View {
         ZStack {
@@ -608,6 +616,14 @@ private struct SettingsHome: View {
                     }
                     homeSection("Connection", tint: .conduitAura) {
                         settingsLink(.gateway, icon: "radio", title: "Gateway", detail: snapshot.server ?? "Not connected")
+                        settingsActionRow(
+                            icon: "checkmark.circle",
+                            title: "Connection Setup",
+                            detail: "Test, troubleshoot, or change your connection",
+                            identifier: "settings.connection-setup"
+                        ) {
+                            showsConnectionSetup = true
+                        }
                     }
                     homeSection("On this device", tint: .conduitAccent) {
                         settingsLink(.appearance, icon: "circle.lefthalf.filled", title: "Appearance", detail: "Theme and interface preferences")
@@ -622,6 +638,54 @@ private struct SettingsHome: View {
                 }
                 .padding(16)
             }
+        }
+        .sheet(isPresented: $showsConnectionSetup, onDismiss: {
+            guard pendingAppliedNotice else { return }
+            pendingAppliedNotice = false
+            appliedConnectionNotice = true
+        }) {
+            connectionSetupSheet
+        }
+        .alert("Settings applied", isPresented: $appliedConnectionNotice) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Saved for your next reconnect. Your current session stays connected.")
+        }
+    }
+
+    /// The active connection's address — the live connection when one exists,
+    /// else the last configured dashboard. Seeding reads it; applying a
+    /// tested result never writes to the live session itself.
+    private var currentDashboardURL: String {
+        appState.connection?.baseUrl ?? appState.lastDashboardURL
+    }
+
+    @ViewBuilder
+    private var connectionSetupSheet: some View {
+        let seedURL = currentDashboardURL
+        let saved = KeychainHelper.loadCredentials()
+        let seeded = ConnectionSetupSeeding.wizardCredentials(for: seedURL, saved: saved)
+        ConnectionSetupView(
+            initialDestination: .currentConnection,
+            initialDraft: ConnectionSetupDraft(
+                existingServerURL: seedURL,
+                username: seeded?.username ?? "",
+                password: seeded?.password ?? ""
+            ),
+            // The probe may reuse this same-origin service token; the wizard
+            // re-verifies the origin itself before sending it and never
+            // displays, edits, or persists it.
+            initialCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seedURL),
+            initialCloudflareOriginURL: seedURL
+        ) { result in
+            let plan = ConnectionSetupApplication.plan(
+                result: result,
+                currentDashboardURL: seedURL,
+                savedCredentials: saved,
+                savedCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seedURL)
+            )
+            plan.perform(appState: appState)
+            pendingAppliedNotice = !plan.isEmpty
         }
     }
 
@@ -638,21 +702,37 @@ private struct SettingsHome: View {
             Haptics.selection()
             path.append(destination)
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon).font(.subheadline.weight(.semibold)).foregroundStyle(.conduitAccent).frame(width: 25)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.subheadline.weight(.semibold))
-                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
+            settingsRowLabel(icon: icon, title: title, detail: detail)
         }
         .buttonStyle(.plain)
         .accessibilityHint(detail)
+    }
+
+    private func settingsActionRow(icon: String, title: String, detail: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.selection()
+            action()
+        } label: {
+            settingsRowLabel(icon: icon, title: title, detail: detail)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+        .accessibilityHint(detail)
+    }
+
+    private func settingsRowLabel(icon: String, title: String, detail: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).font(.subheadline.weight(.semibold)).foregroundStyle(.conduitAccent).frame(width: 25)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
     }
 }
 

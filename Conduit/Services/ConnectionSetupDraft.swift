@@ -50,6 +50,19 @@ struct ConnectionSetupDraft: Equatable, CustomStringConvertible, CustomDebugStri
                                      password: password)
     }
 
+    /// The staged connection test's target: the built address plus whatever
+    /// credentials are present, without requiring them. Provider discovery —
+    /// not form presence — decides whether a password applies, and an
+    /// interactive-auth dashboard legitimately has none to type. Review
+    /// acceptance is still strict: a credential-less draft can only complete
+    /// through the interactive-auth outcome (`ConnectionSetupFlow.acceptedResult`).
+    func testConfiguration() throws -> ConnectionSetupResult {
+        let address = try ConnectionSetupAddressBuilder.build(self)
+        return ConnectionSetupResult(serverURL: address,
+                                     username: username,
+                                     password: password)
+    }
+
     // Do not let ordinary diagnostic interpolation disclose credentials or
     // an unvalidated pasted URL (which could itself contain credentials).
     var description: String { "ConnectionSetupDraft(redacted)" }

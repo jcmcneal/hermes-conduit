@@ -2227,7 +2227,29 @@ final class AppState: ObservableObject {
 
     // MARK: - Connection management
 
+#if DEBUG
+    /// UI-test-only connected state: a snapshot connection with no client and
+    /// no transport. Reconnect paths refuse to run while it is active (see
+    /// `reconnectForRetry`), so the stubbed session is inert by construction
+    /// and Settings-UI tests never touch a network or a real dashboard.
+    private static func uiTestConnectedStub() -> HermesConnection? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD"),
+              index + 1 < arguments.count else { return nil }
+        return HermesConnection(baseUrl: arguments[index + 1], ticket: "ui-test-stub")
+    }
+#endif
+
     func loadSavedConnection() {
+        #if DEBUG
+        if let stub = Self.uiTestConnectedStub() {
+            connection = stub
+            isConnected = true
+            isConnecting = false
+            showLogin = false
+            return
+        }
+        #endif
         if let credentials = KeychainHelper.loadCredentials() {
             Task { await restoreSavedCredentials(credentials) }
         } else if let saved = KeychainHelper.loadConnection() {
@@ -4539,6 +4561,11 @@ final class AppState: ObservableObject {
     }
 
     func reconnectForRetry(purpose requestedPurpose: ChatResumeSyncPurpose) async {
+        #if DEBUG
+        // The UI-test stubbed session has no transport to restore; every
+        // automatic or explicit reconnect is a deterministic no-op for it.
+        guard Self.uiTestConnectedStub() == nil else { return }
+        #endif
         guard let savedConnection = connection else { return }
         let purpose = beginChatResumeRecovery(purpose: requestedPurpose)
         let automaticWorkToken = purpose == .automaticReturn

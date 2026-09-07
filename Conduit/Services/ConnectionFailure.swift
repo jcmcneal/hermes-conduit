@@ -194,6 +194,10 @@ enum ConnectionHelpDestination: Equatable, Hashable, Identifiable, CaseIterable 
     case network
     case tls
     case cloudflare
+    /// Round 5: the Settings entry for an already-connected user. Skips the
+    /// first-run readiness questions and seeds the wizard from the current
+    /// configuration instead.
+    case currentConnection
 
     var id: Self { self }
 }
