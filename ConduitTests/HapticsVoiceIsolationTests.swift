@@ -147,6 +147,81 @@ final class HapticsVoiceIsolationTests: XCTestCase {
             "response-start haptics outside a voice session may use the custom pattern"
         )
     }
+
+    func testAudioInterruptionReleasesHapticSuppression() async {
+        // Regression: after a terminal audio interruption the controller sits
+        // in .failed with no live voice operation, so haptic suppression must
+        // clear even though the failed UI state is not .idle.
+        let suiteName = "HapticsVoiceIsolation.Interruption.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            XCTFail("Failed to create test UserDefaults suite")
+            return
+        }
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+
+        let appState = AppState(defaults: defaults, loadSavedConnection: false)
+        let capture = StubPermissionCapture()
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: StubPlayback(),
+            gateway: StubVoiceGateway(),
+            submit: { _ in true },
+            interrupt: {}
+        )
+        appState.voiceConversationController = controller
+
+        await controller.startListening()
+        XCTAssertFalse(appState.responseHapticsMayUseCoreHaptics, "a live voice session suppresses Core Haptics")
+
+        capture.emit(.interrupted)
+        await waitUntil { controller.state == .failed("Audio was interrupted.") }
+
+        XCTAssertFalse(controller.hasLiveVoiceSession, "an interrupted session is terminal: no voice operation is live")
+        XCTAssertTrue(
+            appState.responseHapticsMayUseCoreHaptics,
+            "a failed UI state by itself must not imply live audio ownership"
+        )
+    }
+
+    func testProviderTestInterruptionReleasesHapticSuppression() async {
+        // Regression: a provider test interrupted mid-capture must terminate,
+        // clear its ownership flags, and release haptic suppression —
+        // regardless of whether the UI ends up back on .idle or .failed.
+        let capture = StubPermissionCapture()
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: StubPlayback(),
+            gateway: StubVoiceGateway(),
+            submit: { _ in true },
+            interrupt: {}
+        )
+
+        let testTask = Task { await controller.runTranscriptionTest(duration: 1) }
+        await waitUntil { controller.state == .listening }
+
+        capture.emit(.interrupted)
+        let result = await testTask.value
+
+        XCTAssertFalse(result.passed, "an interrupted provider test must not report success")
+        XCTAssertFalse(
+            controller.hasLiveVoiceSession,
+            "the interrupted provider test must release its ownership flags after terminating"
+        )
+    }
+
+    private func waitUntil(
+        _ condition: @MainActor () -> Bool,
+        timeout: TimeInterval = 2
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() >= deadline {
+                XCTFail("Timed out waiting for condition")
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
 }
 
 @MainActor
@@ -183,9 +258,18 @@ private final class RecordingVoiceAudioSession: VoiceAudioSessionControlling {
 @MainActor
 private final class StubPermissionCapture: AudioCaptureService {
     let events: AsyncStream<VoiceCaptureEvent>
+    private var continuation: AsyncStream<VoiceCaptureEvent>.Continuation?
 
     init() {
-        events = AsyncStream { _ in }
+        var captured: AsyncStream<VoiceCaptureEvent>.Continuation?
+        events = AsyncStream { captured = $0 }
+        continuation = captured
+    }
+
+    /// Delivers a capture event through the same stream the real service
+    /// uses, so tests can drive interruption handling end to end.
+    func emit(_ event: VoiceCaptureEvent) {
+        continuation?.yield(event)
     }
 
     func requestPermission() async -> Bool { true }
