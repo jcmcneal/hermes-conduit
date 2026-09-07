@@ -393,18 +393,7 @@ struct ComposerBar: View {
         .animation(ConduitMotion.transition, value: action)
         .preferredColorScheme(appState.themePreference.colorScheme)
         .sheet(item: $repairContext) { context in
-            ConnectionSetupView(
-                initialDestination: .repairConnection,
-                initialDraft: context.draft,
-                initialCloudflareAccess: context.cloudflareAccess,
-                initialCloudflareOriginURL: context.cloudflareOriginURL,
-                repairFailure: context.failure,
-                onComplete: { _ in
-                    // Unreachable in Repair mode: the Review's final actions
-                    // are Reconnect Now / Sign In to Reconnect.
-                },
-                onRepair: appState.connectionRepairActivationHandler()
-            )
+            ConnectionRepairSetupSheet(context: context)
         }
     }
 
@@ -435,13 +424,15 @@ struct ComposerBar: View {
             }
 
             // Round 6: Repair Connection appears only once the connection is
-            // actually down AND a failed attempt has surfaced its error —
-            // never during normal automatic recovery, and never uninvited.
+            // actually down AND a failed attempt has surfaced — through the
+            // typed classified failure or the visible error banner — never
+            // during normal automatic recovery, and never uninvited.
             // Entering repair hands recovery authority to the user; the
             // automatic retry loop stays stopped until the repair reconnects
             // or the user retries manually.
             if appState.connection != nil, !appState.isConnected,
-               let error = appState.errorMessage, !error.isEmpty {
+               appState.lastConnectionFailure != nil
+                   || !(appState.errorMessage ?? "").isEmpty {
                 Button {
                     Haptics.light()
                     repairContext = appState.beginConnectionRepair()

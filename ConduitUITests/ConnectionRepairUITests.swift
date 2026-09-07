@@ -150,6 +150,50 @@ final class ConnectionRepairUITests: XCTestCase {
         XCTAssertFalse(app.buttons[Identity.reconnectNow].exists)
     }
 
+    func testFailedActivationShowsClassifiedFailureAndForcesFreshTest() {
+        // A test success is not a guarantee the world is unchanged: when the
+        // explicit activation fails, the classified failure is shown on
+        // Review, the candidate is consumed, and the only way forward is a
+        // fresh Test Connection — no automatic retry.
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-CONDUIT_UI_TEST_FAILED_CONNECTION", Identity.stubDashboardURL,
+            "-CONNECTION_SETUP_TEST_RESULT", "success",
+            "-CONDUIT_REPAIR_ACTIVATION", "transportFailure"
+        ]
+        app.launch()
+
+        let repair = app.buttons[Identity.repairButton]
+        XCTAssertTrue(repair.waitForExistence(timeout: 10))
+        tapVisible(repair, in: app)
+
+        let urlField = app.textFields[Identity.urlField]
+        XCTAssertTrue(urlField.waitForExistence(timeout: 5))
+        XCTAssertEqual(urlField.value as? String, Identity.stubDashboardURL)
+        tapVisible(app.buttons[Identity.next], in: app)
+
+        let username = app.textFields[Identity.username]
+        XCTAssertTrue(username.waitForExistence(timeout: 5))
+        tapVisible(username, in: app)
+        username.typeText("repair-user")
+        let password = app.secureTextFields[Identity.password]
+        tapVisible(password, in: app)
+        password.typeText("repair-fixture")
+        dismissKeyboard(app)
+        tapVisible(app.buttons[Identity.next], in: app)
+
+        XCTAssertTrue(app.buttons[Identity.testRun].waitForExistence(timeout: 5))
+        tapVisible(app.buttons[Identity.testRun], in: app)
+        XCTAssertTrue(app.staticTexts["setup.test.ready"].waitForExistence(timeout: 5))
+        tapVisible(app.buttons[Identity.reconnectNow], in: app)
+
+        // Still on Review with the classified failure — never a silent drop
+        // to a wiped test screen, never a retry.
+        XCTAssertTrue(app.buttons[Identity.reconnectNow].waitForExistence(timeout: 5), "Wizard did not stay on Review. Tree:\n\(app.debugDescription)")
+        XCTAssertFalse(app.staticTexts["setup.test.ready"].exists, "A failed reconnect must not claim the connection is ready")
+        XCTAssertFalse(app.textFields["login.server-url"].exists, "A failed activation must never strand the user on the login card")
+    }
+
     // MARK: - Walk helpers
 
     private func tapVisible(_ element: XCUIElement, in app: XCUIApplication) {

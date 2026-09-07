@@ -1,23 +1,5 @@
 import SwiftUI
 
-/// Round 6: the Repair review's action model, built by ConnectionSetupView
-/// when the wizard runs in Repair mode. The view evaluates candidate
-/// currency; the form only renders states and forwards taps.
-struct ConnectionSetupRepairReview {
-    /// The staged test ended in the browser sign-in outcome — the final
-    /// action is Sign In to Reconnect, not Reconnect Now.
-    let isInteractive: Bool
-    /// A validated native transaction exists and is still current. Reconnect
-    /// Now requires it; a consumed candidate forces a fresh test.
-    let isCandidateAvailable: Bool
-    /// The classified failure of the last explicit activation attempt.
-    let activationFailure: ConnectionFailure?
-    let isActivating: Bool
-    let reconnectNow: () -> Void
-    let signInToReconnect: () -> Void
-    let testAgain: () -> Void
-}
-
 /// Form rendering only: navigation and final validation stay in the flow.
 struct ConnectionSetupForm: View {
     @Binding var flow: ConnectionSetupFlow

@@ -320,9 +320,13 @@ protocol ConnectionSetupTesting {
 /// successful staged test. The probe commits nothing itself:
 /// `commitCookies()` happens only when an explicit reconnect later promotes
 /// this acquisition into the active connection.
-struct ConnectionSetupTestAcquisition {
+struct ConnectionSetupTestAcquisition: CustomStringConvertible, CustomDebugStringConvertible {
     let configuration: ConnectionSetupResult
     let nativeConnection: NativeAuthConnection
+
+    // Redacted: the transaction carries a ticket and cookies.
+    var description: String { "ConnectionSetupTestAcquisition(redacted)" }
+    var debugDescription: String { description }
 }
 
 /// The production probe. Reuses `NativeAuthClient` unchanged for every

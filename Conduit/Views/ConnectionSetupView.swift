@@ -16,6 +16,32 @@
 import SwiftUI
 import UIKit
 
+// MARK: - Round-6 Repair sheet
+
+/// The shared Repair-mode presentation used by every failure surface (the
+/// composer banner and the login card), so seeding, the intentionally
+/// unreachable login handoff, and the activation handler cannot drift
+/// between them.
+struct ConnectionRepairSetupSheet: View {
+    let context: ConnectionRepairContext
+    @EnvironmentObject private var appState: AppState
+
+    var body: some View {
+        ConnectionSetupView(
+            initialDestination: .repairConnection,
+            initialDraft: context.draft,
+            initialCloudflareAccess: context.cloudflareAccess,
+            initialCloudflareOriginURL: context.cloudflareOriginURL,
+            repairFailure: context.failure,
+            onComplete: { _ in
+                // Unreachable in Repair mode: the Review's final actions are
+                // Reconnect Now / Sign In to Reconnect.
+            },
+            onRepair: appState.connectionRepairActivationHandler()
+        )
+    }
+}
+
 struct ConnectionSetupView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var flow: ConnectionSetupFlow
@@ -226,8 +252,11 @@ struct ConnectionSetupView: View {
                 notification: .announcement,
                 argument: failure.userTitle
             )
+            // Stay on Review: the candidate is consumed (Reconnect Now can
+            // neither re-fire nor be retried automatically), and the footer
+            // renders the classified failure with Test Connection Again —
+            // which invalidates the staged result only when the user asks.
             activationFailure = failure
-            flow.invalidateTestForRepairRetry()
         }
     }
 
@@ -236,7 +265,9 @@ struct ConnectionSetupView: View {
     private func startTestRun() {
         // Credentials are optional here: provider discovery decides whether a
         // password applies, so an interactive-auth dashboard is testable
-        // without typing one first.
+        // without typing one first. A fresh run also clears the spent
+        // activation failure of any previous reconnect attempt.
+        activationFailure = nil
         guard let run = try? flow.draft.testConfiguration(),
               let generation = flow.beginTest() else { return }
         let access = flow.cloudflareAccessForDraft()
@@ -292,11 +323,15 @@ struct ConnectionSetupView: View {
     private func stopTestRun() {
         testTask?.cancel()
         testTask = nil
-        // Leaving the test step resets the staged state; the candidate is
-        // invalidated with it (new runs and cancellation rotate the
-        // generation regardless — correctness never relies on this nil).
-        repairCandidate = nil
+        // Leaving the test step resets RUNNING work. A sealed success (and
+        // its candidate) survives non-editing Back/forward walks — the
+        // candidate's currency is still enforced at use time — so the view
+        // and the flow model never disagree about whether a test is current.
+        let wasRunning = flow.testState.isRunning
         flow.cancelTest()
+        if wasRunning {
+            repairCandidate = nil
+        }
     }
 
     // MARK: - Step routing

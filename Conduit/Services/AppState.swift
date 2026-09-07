@@ -773,8 +773,10 @@ final class AppState: ObservableObject {
     /// attempt (saved-credential reconnect, repair activation, or a failed
     /// explicit connect). Typed — never recovered from user-facing strings —
     /// so Repair Connection can seed its routing from the actual problem.
-    /// Cleared by any successful connection and by explicit disconnect.
-    @Published private(set) var lastConnectionFailure: ConnectionFailure?
+    /// Cleared by any successful connection, by explicit disconnect, and
+    /// when the user starts a manual login (which abandons the prior
+    /// failure's repair context).
+    @Published var lastConnectionFailure: ConnectionFailure?
     @Published var showLogin = true
     @Published private(set) var composerPrefillText = ""
     @Published private(set) var composerPrefillToken = UUID()
@@ -2519,9 +2521,10 @@ final class AppState: ObservableObject {
     /// Builds the Repair seed from the configuration that actually failed:
     /// the active (failed) connection's exact URL, safely available
     /// credentials for it, and the origin-matched Cloudflare token. Nil when
-    /// there is no failed target to repair.
+    /// there is no failed target — a healthy connected session is never a
+    /// repair candidate.
     func makeConnectionRepairContext() -> ConnectionRepairContext? {
-        guard let failedURL = connection?.baseUrl else { return nil }
+        guard let failedURL = connection?.baseUrl, !isConnected else { return nil }
         return repairContext(for: failedURL)
     }
 
@@ -2550,6 +2553,17 @@ final class AppState: ObservableObject {
             cloudflareOriginURL: failedURL,
             failure: lastConnectionFailure
         )
+    }
+
+    /// Repair entry for a failed SAVED-credential reconnect (login screen).
+    /// Like the composer entry, this is an explicit user takeover: any
+    /// outstanding automatic recovery loses authority before the wizard
+    /// opens, so it can never install a connection underneath the repair.
+    @discardableResult
+    func beginSavedConnectionRepair() -> ConnectionRepairContext? {
+        guard let context = makeSavedConnectionRepairContext() else { return nil }
+        cancelChatResumeTransportRecovery()
+        return context
     }
 
     /// Entering Repair is an explicit user takeover of connection recovery:
@@ -2594,7 +2608,11 @@ final class AppState: ObservableObject {
             // The one-shot candidate is consumed here, whether activation
             // succeeds or fails: its cookies are committed exactly once, and
             // a failed activation requires a fresh test, never a retry of a
-            // spent transaction.
+            // spent transaction. If activation fails after the commit, the
+            // committed cookies belong to a genuinely authenticated session
+            // (login and ticket mint both succeeded first) — they are
+            // naturally superseded by the next explicit test or sign-in and
+            // are deliberately not rolled back.
             candidate.nativeConnection.commitCookies()
             outcome = await activateRepairedConnection(with: HermesConnection(
                 baseUrl: candidate.configuration.serverURL,

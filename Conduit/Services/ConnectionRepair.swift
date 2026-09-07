@@ -40,7 +40,7 @@ struct ConnectionRepairContext: Equatable, Identifiable {
 /// successful staged test in Repair mode. Bound to the flow revision and
 /// generation that produced the staged success so a stale candidate can
 /// never reconnect a newer edited draft.
-struct ConnectionRepairCandidate {
+struct ConnectionRepairCandidate: CustomStringConvertible, CustomDebugStringConvertible {
     let configuration: ConnectionSetupResult
     let nativeConnection: NativeAuthConnection
     let validatedRevision: Int
@@ -59,6 +59,9 @@ struct ConnectionRepairCandidate {
             && validatedRevision == testSucceededAtRevision
     }
 
+    // Intentionally non-Equatable, and redacted against accidental
+    // interpolation or dump: the value carries an authenticated transaction
+    // (ticket + transaction cookies) and a password-bearing configuration.
     var description: String { "ConnectionRepairCandidate(redacted)" }
     var debugDescription: String { description }
 }
@@ -66,12 +69,35 @@ struct ConnectionRepairCandidate {
 /// The wizard's handoff on an explicit final Repair action. Reconnect Now
 /// and Sign In to Reconnect are the only connection-changing actions in
 /// Repair mode, and both are user-initiated.
-enum ConnectionRepairHandoff {
+enum ConnectionRepairHandoff: CustomStringConvertible, CustomDebugStringConvertible {
     /// A validated native transaction from the staged test (Reconnect Now).
     case native(ConnectionRepairCandidate)
     /// A browser sign-in completed over the existing AuthWebView
     /// (Sign In to Reconnect).
     case browserSignIn(ticket: String, baseURL: String, configuration: ConnectionSetupResult)
+
+    // Redacted: the native case carries a ticket-bearing transaction and the
+    // browser case a raw ticket.
+    var description: String { "ConnectionRepairHandoff(redacted)" }
+    var debugDescription: String { description }
+}
+
+/// Round 6: the Repair review's action model, built by ConnectionSetupView
+/// when the wizard runs in Repair mode. The view evaluates candidate
+/// currency; the form only renders states and forwards taps.
+struct ConnectionSetupRepairReview {
+    /// The staged test ended in the browser sign-in outcome — the final
+    /// action is Sign In to Reconnect, not Reconnect Now.
+    let isInteractive: Bool
+    /// A validated native transaction exists and is still current. Reconnect
+    /// Now requires it; a consumed candidate forces a fresh test.
+    let isCandidateAvailable: Bool
+    /// The classified failure of the last explicit activation attempt.
+    let activationFailure: ConnectionFailure?
+    let isActivating: Bool
+    let reconnectNow: () -> Void
+    let signInToReconnect: () -> Void
+    let testAgain: () -> Void
 }
 
 /// The result of an explicit repair activation. Session identity questions
