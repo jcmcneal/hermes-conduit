@@ -14,13 +14,10 @@ final class HapticsTests: XCTestCase {
         super.tearDown()
     }
 
-    func testResponseEngineDoesNotBindSharedAudioSession() {
-        // Ordinary response haptics must not bind AVAudioSession
-        // sharedInstance(): a shared-session-bound CHHapticEngine activates
-        // the app session when it starts, which interrupts external media
-        // (Spotify/Audible) around every text-chat response lifecycle
-        // (issue #140). The engine stays haptics-only.
-        XCTAssertFalse(Haptics.enginePolicy.usesSharedAudioSession)
+    func testResponseEngineIsHapticsOnly() {
+        // The response lifecycle's Core Haptics engine is haptics-only and
+        // session-free: it must never bind or activate the shared voice
+        // AVAudioSession (issue #140).
         XCTAssertTrue(Haptics.enginePolicy.playsHapticsOnly)
     }
 

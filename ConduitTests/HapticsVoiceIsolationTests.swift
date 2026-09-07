@@ -29,6 +29,12 @@ final class HapticsVoiceIsolationTests: XCTestCase {
         super.tearDown()
     }
 
+    /// The degraded (voice-safe) response-start path exercises the full
+    /// lifecycle — emission, fallback pattern, cancellation — while
+    /// asserting zero Core Haptics engine creation and zero interaction
+    /// with any voice audio session. Deliberately no test here starts the
+    /// real Core Haptics engine: hardware-dependent behavior belongs to the
+    /// PR's device checklist, and this suite must stay deterministic.
     func testResponseHapticLifecycleLeavesVoiceAudioSessionUntouched() {
         let previousHandler = Haptics.testEmissionHandler
         let previousSuppressesHardware = Haptics.testSuppressesHardware
@@ -39,11 +45,12 @@ final class HapticsVoiceIsolationTests: XCTestCase {
         Haptics.testEmissionHandler = { _ in }
         Haptics.testSuppressesHardware = false
 
-        Haptics.responseStarted(coreHapticsAllowed: true)
+        Haptics.responseStarted(coreHapticsAllowed: false)
         Haptics.toolStarted()
         Haptics.responseConcluded()
         Haptics.cancelLifecyclePattern()
 
+        XCTAssertEqual(Haptics.coreHapticsEngineCreationCount, 0)
         XCTAssertEqual(session.categoryCalls.count, 0)
         XCTAssertEqual(session.activationCalls.count, 0)
         XCTAssertNil(coordinator.appliedPolicy)

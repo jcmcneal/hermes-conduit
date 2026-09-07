@@ -6,34 +6,22 @@
 //  calibrated response lifecycle patterns and subordinate tool activity.
 //
 
-import AVFAudio
 import CoreHaptics
 import SwiftUI
 import UIKit
 
+/// The response lifecycle's Core Haptics engine is haptics-only and
+/// deliberately unbound: it neither creates a binding to nor activates
+/// Conduit's shared voice `AVAudioSession` (issue #140 — a shared-session
+/// engine activates the app session on start, interrupting external media
+/// on every text-chat response). While a voice session may hold the session,
+/// the custom pattern is suppressed entirely (see
+/// `responseStarted(coreHapticsAllowed:)`) — the #48 coexistence guarantee
+/// is enforced by suppression, not by shared ownership.
 struct HapticsEnginePolicy: Equatable {
-    let usesSharedAudioSession: Bool
     let playsHapticsOnly: Bool
 
-    /// Ordinary response haptics deliberately do NOT bind
-    /// `AVAudioSession.sharedInstance()`. A shared-session-bound
-    /// CHHapticEngine activates the app session when it starts, so a plain
-    /// text-chat response interrupted Spotify/Audible around every response
-    /// lifecycle (issue #140). An unbound, haptics-only engine neither
-    /// claims the voice session nor holds an audio route.
-    ///
-    /// History: #48 bound this engine to the shared session because the
-    /// *unconfigured* engine (no `playsHapticsOnly`) created its own audio
-    /// session whose contention broke voice-capture startup (-10868) after
-    /// haptic activity. The haptics-only flag addresses the routing half of
-    /// that failure, and `responseStarted(coreHapticsAllowed:)` keeps the
-    /// custom engine entirely out of the picture while a voice session may
-    /// hold the session — so the #48 coexistence guarantee is now enforced
-    /// by suppression instead of by shared ownership.
-    static let response = Self(
-        usesSharedAudioSession: false,
-        playsHapticsOnly: true
-    )
+    static let response = Self(playsHapticsOnly: true)
 }
 
 enum HapticsEngineStopPolicy {
@@ -405,12 +393,12 @@ enum Haptics {
 #if DEBUG
         coreHapticsEngineCreationCount += 1
 #endif
-        let engine: CHHapticEngine
-        if enginePolicy.usesSharedAudioSession {
-            engine = try CHHapticEngine(audioSession: AVAudioSession.sharedInstance())
-        } else {
-            engine = try CHHapticEngine()
-        }
+        // Deliberately the session-free initializer: binding this engine to
+        // AVAudioSession.sharedInstance() re-introduces the issue #140
+        // media interruption (the engine activates the shared session on
+        // start). Coexistence with voice capture is enforced by suppression
+        // in responseStarted(coreHapticsAllowed:), not by session sharing.
+        let engine = try CHHapticEngine()
         engine.playsHapticsOnly = enginePolicy.playsHapticsOnly
         engine.isAutoShutdownEnabled = true
         engine.resetHandler = { [weak engine] in
