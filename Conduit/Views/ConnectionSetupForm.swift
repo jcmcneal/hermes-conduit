@@ -258,6 +258,10 @@ struct ConnectionSetupForm: View {
                         .font(.headline)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier("setup.test.interactive-ready")
+                } else if repairReview?.activationFailure != nil {
+                    // Repair: the explicit reconnect failed after a verified
+                    // test. The failure text below carries the meaning — the
+                    // "ready to use" headline would contradict it.
                 } else {
                     Text(ConnectionSetupTestState.readyMessage)
                         .font(.headline)
