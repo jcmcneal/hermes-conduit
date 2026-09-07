@@ -58,10 +58,20 @@ final class SystemVoiceAudioSession: VoiceAudioSessionControlling {
 /// (stop, cancellation, backgrounding) can never underflow another owner.
 struct VoiceAudioLease: Equatable {
     fileprivate let id: UUID
+    /// Internal so tests can synthesize unknown leases; production callers
+    /// only ever receive leases from `acquire`.
+    init(id: UUID = UUID()) { self.id = id }
 }
 
 @MainActor
 final class VoiceAudioSessionCoordinator {
+    /// Shared instance: the underlying `AVAudioSession` is itself a
+    /// process-global singleton, so one coordinator mirrors reality. Tests
+    /// construct isolated instances with a mocked session seam.
+    /// Both audio services are app-lifetime objects owned by AppState and
+    /// must release leases on every terminal path (stop, cancellation,
+    /// failure) — a lease still held at service deinit would leave a
+    /// permanent owner entry here.
     static let shared = VoiceAudioSessionCoordinator()
 
     /// The session policy currently applied to the system session, or nil
@@ -80,8 +90,11 @@ final class VoiceAudioSessionCoordinator {
     private let session: VoiceAudioSessionControlling
     private var leases: [UUID: VoiceAudioIntent] = [:]
 
-    init(session: VoiceAudioSessionControlling = SystemVoiceAudioSession()) {
-        self.session = session
+    /// Optional injection instead of a default-constructed argument: default
+    /// parameter values are evaluated in a nonisolated context, which cannot
+    /// construct the MainActor-isolated `SystemVoiceAudioSession`.
+    init(session: VoiceAudioSessionControlling? = nil) {
+        self.session = session ?? SystemVoiceAudioSession()
     }
 
     func acquire(_ intent: VoiceAudioIntent) throws -> VoiceAudioLease {

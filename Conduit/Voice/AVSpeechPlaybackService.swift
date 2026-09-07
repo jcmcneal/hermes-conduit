@@ -15,6 +15,11 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
     private var pendingBuffers = 0
     private var drainWaiters: [CheckedContinuation<Void, Never>] = []
     private var encodedPlayer: AVAudioPlayer?
+    /// Set once `finish()` is requested: when the last scheduled buffer (or
+    /// the encoded player) then drains, playback is terminal and ownership
+    /// must be released. Mid-stream buffer gaps keep ownership so the session
+    /// does not flap while the gateway prepares the next chunk.
+    private var isFinishing = false
     private let coordinator: VoiceAudioSessionCoordinator
     private var lease: VoiceAudioLease?
     /// Which audio-session ownership this service claims while playing.
@@ -23,8 +28,11 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
     var ownershipIntent: VoiceAudioIntent = .standalonePlayback
     private(set) var isPlaying = false
 
-    init(coordinator: VoiceAudioSessionCoordinator = .shared) {
-        self.coordinator = coordinator
+    /// Optional injection instead of a default `.shared` argument: default
+    /// parameter values are evaluated in a nonisolated context, which cannot
+    /// read the MainActor-isolated singleton.
+    init(coordinator: VoiceAudioSessionCoordinator? = nil) {
+        self.coordinator = coordinator ?? .shared
         super.init()
         engine.attach(player)
         NotificationCenter.default.addObserver(
@@ -112,11 +120,15 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
         // An odd tail is invalid PCM16 and is intentionally discarded rather
         // than shifted into the next response.
         remainder.removeAll(keepingCapacity: true)
+        isFinishing = true
     }
 
     func drain() async {
         guard pendingBuffers > 0 || encodedPlayer != nil else {
             isPlaying = false
+            // Nothing was ever scheduled (or the queue drained between
+            // checks): a finishing stream must still release ownership.
+            if isFinishing { stop() }
             return
         }
         await withCheckedContinuation { continuation in
@@ -125,6 +137,7 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
     }
 
     func stop() {
+        isFinishing = false
         player.stop()
         encodedPlayer?.stop()
         encodedPlayer = nil
@@ -149,33 +162,52 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
         coordinator.release(lease)
     }
 
+    /// Both notification handlers hop through `Task { @MainActor }`: session
+    /// notifications are not guaranteed to arrive on the main thread, and
+    /// every reachable entry point below (stop, coordinator release, waiter
+    /// resumption) is MainActor-isolated state.
     @objc private func handleInterruption(_ notification: Notification) {
         guard let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
-        if type == .began {
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue), type == .began else { return }
+        Task { @MainActor [weak self] in
             // Playback can no longer continue: settle buffers and drain
             // waiters so awaiting controllers never hang, and release session
             // ownership so other media recovers. Resuming after the
             // interruption ends is deliberate follow-up work, not silent
             // breakage.
-            stop()
+            self?.stop()
         }
     }
 
     @objc private func handleEngineConfigurationChange(_ notification: Notification) {
-        // A route change can stop the rendering engine under a live lease
-        // (AirPods disconnect, dock/undock). Settle instead of leaving
-        // buffers undrained and ownership claimed by audio that can never
-        // play. A conversation drain self-heals: the next PCM buffer
-        // reacquires ownership and restarts the engine on the new route.
-        guard lease != nil, !engine.isRunning else { return }
-        stop()
+        Task { @MainActor [weak self] in
+            // A route change can stop the rendering engine under a live lease
+            // (AirPods disconnect, dock/undock). Settle instead of leaving
+            // buffers undrained and ownership claimed by audio that can never
+            // play. A conversation drain self-heals: the next PCM buffer
+            // reacquires ownership and restarts the engine on the new route.
+            guard let self, self.lease != nil, !self.engine.isRunning else { return }
+            self.stop()
+        }
     }
 
     private func bufferDidDrain() {
-        pendingBuffers = max(0, pendingBuffers - 1)
+        guard pendingBuffers > 0 else { return }
+        pendingBuffers -= 1
         guard pendingBuffers == 0 else { return }
-        isPlaying = false
+        if isFinishing {
+            // Terminal: everything queued has rendered. stop() tears the
+            // engine down, resumes drain waiters exactly once, and releases
+            // session ownership so standalone speech un-ducks other media the
+            // moment it ends.
+            stop()
+        } else {
+            isPlaying = false
+            settleDrainWaiters()
+        }
+    }
+
+    private func settleDrainWaiters() {
         let waiters = drainWaiters
         drainWaiters.removeAll()
         waiters.forEach { $0.resume() }
@@ -186,11 +218,10 @@ extension AVSpeechPlaybackService: AVAudioPlayerDelegate {
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in
             guard self.encodedPlayer === player else { return }
-            self.encodedPlayer = nil
-            self.isPlaying = false
-            let waiters = self.drainWaiters
-            self.drainWaiters.removeAll()
-            waiters.forEach { $0.resume() }
+            // Natural completion is terminal for the encoded path: stop()
+            // clears the player, resumes drain waiters, and releases the
+            // session lease.
+            self.stop()
         }
     }
 }

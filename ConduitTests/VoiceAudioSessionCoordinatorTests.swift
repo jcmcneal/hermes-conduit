@@ -90,6 +90,33 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(session.activationCount, 1)
     }
 
+    func testStandalonePlaybackCannotDowngradeActiveConversation() throws {
+        _ = try coordinator.acquire(.conversationCapture)
+        session.resetRecordings()
+
+        _ = try coordinator.acquire(.standalonePlayback)
+
+        XCTAssertEqual(coordinator.appliedPolicy, .conversation)
+        XCTAssertEqual(session.categoryCalls.count, 0, "standalone playback must not reconfigure an active conversation session")
+        XCTAssertEqual(session.deactivationCount, 0)
+    }
+
+    func testReleasingConversationOwnerHandsOffToStandaloneWithoutDeactivation() throws {
+        // Read aloud cannot start mid-conversation today (AppState mutual
+        // exclusion), but if a standalone lease ever overlaps a conversation
+        // lease, the handoff must transition policies without an
+        // intermediate deactivation.
+        let captureLease = try coordinator.acquire(.conversationCapture)
+        _ = try coordinator.acquire(.standalonePlayback)
+        session.resetRecordings()
+
+        coordinator.release(captureLease)
+
+        XCTAssertEqual(coordinator.appliedPolicy, .standalonePlayback)
+        XCTAssertEqual(session.deactivationCount, 0)
+        XCTAssertEqual(session.categoryCalls.last?.category, .playback)
+    }
+
     func testStandaloneReleaseDeactivatesImmediately() throws {
         let lease = try coordinator.acquire(.standalonePlayback)
 
@@ -100,9 +127,10 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         XCTAssertNil(coordinator.appliedPolicy)
     }
 
-    func testPolicySwitchDeactivatesThenAppliesNewPolicy() throws {
+    func testSequentialPolicySwitchDeactivatesThenReactivatesStandalone() throws {
         let conversationLease = try coordinator.acquire(.conversationPlayback)
         coordinator.release(conversationLease)
+        XCTAssertEqual(session.deactivationCount, 1, "the all-owners-gone transition deactivates before the next policy")
         session.resetRecordings()
 
         _ = try coordinator.acquire(.standalonePlayback)
@@ -142,13 +170,30 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(session.deactivationCount, 1)
     }
 
-    func testEngineStartFailureAfterAcquireReleasesOwnership() throws {
-        // Models the playback service path: acquire succeeds, engine start
-        // fails, the service must release so the session can deactivate.
+    func testReleaseAfterAcquireDeactivatesAndIsRepeatable() throws {
         let lease = try coordinator.acquire(.standalonePlayback)
         coordinator.release(lease)
 
         XCTAssertNil(coordinator.appliedPolicy)
+        XCTAssertEqual(session.deactivationCount, 1)
+
+        let second = try coordinator.acquire(.standalonePlayback)
+        _ = second
+        XCTAssertEqual(session.activationCount, 2)
+    }
+
+    func testActivationFailureAfterCategorySucceedsDoesNotLeakOwnership() throws {
+        session.activateError = VoiceAudioSessionMockError.activationFailed
+
+        XCTAssertThrowsError(try coordinator.acquire(.conversationCapture))
+        XCTAssertNil(coordinator.appliedPolicy, "a failed activation must not mark the policy applied")
+
+        session.activateError = nil
+        let lease = try coordinator.acquire(.conversationCapture)
+
+        XCTAssertEqual(session.categoryCalls.count, 2, "the retry must re-run configuration")
+        XCTAssertEqual(session.activationCount, 1)
+        coordinator.release(lease)
         XCTAssertEqual(session.deactivationCount, 1)
     }
 
@@ -204,6 +249,7 @@ private final class MockVoiceAudioSession: VoiceAudioSessionControlling {
     private(set) var categoryCalls: [CategoryCall] = []
     private(set) var activationCalls: [(active: Bool, options: AVAudioSession.SetActiveOptions)] = []
     var categoryError: Error?
+    var activateError: Error?
     var deactivateError: Error?
 
     var activationCount: Int { activationCalls.filter(\.active).count }
@@ -227,6 +273,7 @@ private final class MockVoiceAudioSession: VoiceAudioSessionControlling {
     }
 
     func setActive(_ active: Bool, options: AVAudioSession.SetActiveOptions) throws {
+        if active, let activateError { throw activateError }
         if !active, let deactivateError { throw deactivateError }
         activationCalls.append((active, options))
     }
@@ -234,5 +281,6 @@ private final class MockVoiceAudioSession: VoiceAudioSessionControlling {
 
 private enum VoiceAudioSessionMockError: Error {
     case configurationFailed
+    case activationFailed
     case deactivationFailed
 }

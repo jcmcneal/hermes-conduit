@@ -12510,6 +12510,10 @@ final class AppState: ObservableObject {
         guard let gateway = makeVoiceGateway() else {
             return .failure("Conduit could not connect this test to the selected profile.")
         }
+        // Mutual exclusion: the transcription test claims conversation-capture
+        // session ownership, so a still-playing read aloud must stop first —
+        // otherwise the dominant audio policy would flip under live playback.
+        messageReadAloudController.stop()
         voiceConversationController.setGateway(gateway)
         let result = await voiceConversationController.runTranscriptionTest()
         appleSpeechAvailability = AppleOnDeviceSpeechTranscriber.currentAvailability()

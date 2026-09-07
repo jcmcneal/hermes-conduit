@@ -42,8 +42,11 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
     private var captureLease: VoiceAudioLease?
     let events: AsyncStream<VoiceCaptureEvent>
 
-    init(coordinator: VoiceAudioSessionCoordinator = .shared) {
-        self.coordinator = coordinator
+    /// Optional injection instead of a default `.shared` argument: default
+    /// parameter values are evaluated in a nonisolated context, which cannot
+    /// read the MainActor-isolated singleton.
+    init(coordinator: VoiceAudioSessionCoordinator? = nil) {
+        self.coordinator = coordinator ?? .shared
         var capturedContinuation: AsyncStream<VoiceCaptureEvent>.Continuation?
         events = AsyncStream { capturedContinuation = $0 }
         continuation = capturedContinuation
@@ -284,16 +287,25 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
         }
     }
 
+    /// Hopped through `Task { @MainActor }`: session notifications are not
+    /// guaranteed to arrive on the main thread, and stop() now releases the
+    /// capture lease through the MainActor coordinator.
     @objc private func handleInterruption(_ notification: Notification) {
         guard let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
-        if type == .began {
-            stop()
-            continuation?.yield(.interrupted)
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue), type == .began else { return }
+        Task { @MainActor [weak self] in
+            self?.stop()
+            self?.continuation?.yield(.interrupted)
         }
     }
 
+    /// Hopped through `Task { @MainActor }` for the same reason as
+    /// `handleInterruption`; `coordinator.reassert()` is MainActor-isolated.
     @objc private func handleRouteChange(_ notification: Notification) {
+        Task { @MainActor [weak self] in self?.handleRouteChangeOnMain() }
+    }
+
+    private func handleRouteChangeOnMain() {
         // A nil-format tap follows the input node's actual route format. Rebuild
         // the converter lazily without churning an already-running engine.
         converter = nil
