@@ -135,15 +135,34 @@ final class MessageNormalizerTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            NotificationSessionResolver.resumableSessionID(for: "runtime-123", in: [session]),
-            "stored-123"
+            NotificationSessionResolver.route(
+                target: ConduitNotificationTarget(profile: nil, sessionId: "runtime-123", type: nil),
+                catalog: [session],
+                identityIndex: ConversationIdentityIndex(),
+                profile: "default"
+            ),
+            NotificationSessionResolver.Route(
+                resumeTargetID: "stored-123",
+                durableSessionID: "stored-123",
+                basis: .catalogAlias
+            )
         )
     }
 
     func testNotificationResolverTrimsUnknownRuntimeID() {
         XCTAssertEqual(
-            NotificationSessionResolver.resumableSessionID(for: "  runtime-123  ", in: []),
-            "runtime-123"
+            NotificationSessionResolver.route(
+                target: ConduitNotificationTarget(profile: nil, sessionId: "  runtime-123  ", type: nil),
+                catalog: [],
+                identityIndex: ConversationIdentityIndex(),
+                profile: "default"
+            ),
+            NotificationSessionResolver.Route(
+                resumeTargetID: "runtime-123",
+                durableSessionID: nil,
+                basis: .legacyRuntime
+            ),
+            "An unknown runtime id flows through as itself — never reinterpreted as a durable id"
         )
     }
 
