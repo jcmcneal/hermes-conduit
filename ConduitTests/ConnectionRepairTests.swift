@@ -402,13 +402,13 @@ final class ConnectionRepairTests: XCTestCase {
         let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
             connectClient: { _ in connectCount.value += 1 },
             loadCatalog: { _, _ in [self.session("stored-a")] },
-            openSession: { _, id, _ in
-                SessionResumeResult(sessionId: id, messages: [],
-                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
-            },
             mintTicket: { _ in
                 await mintGate.suspend()
                 return "late-ticket"
+            },
+            openSession: { _, id, _ in
+                SessionResumeResult(sessionId: id, messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
             },
             refreshContext: { _, _ in },
             loadProfiles: {},
@@ -510,7 +510,7 @@ final class RepairControlledReconnectScheduler {
 
     func schedule(
         after delay: TimeInterval,
-        operation: @MainActor () async -> Void
+        operation: @escaping @MainActor () async -> Void
     ) -> ChatResumeReconnectCancellation {
         pending.append(Pending(operation: operation))
         return { [weak self] in
