@@ -334,7 +334,6 @@ final class ConnectionRepairTests: XCTestCase {
         var mintAttempts = 0
         let scheduler = RepairControlledReconnectScheduler()
         let harness = makeHarness(
-            reconnectScheduler: scheduler.schedule(after:operation:),
             lifecycleOperations: ChatResumeLifecycleOperations(
             connectClient: { _ in },
             loadCatalog: { _, _ in [self.session("stored-a")] },
@@ -354,7 +353,9 @@ final class ConnectionRepairTests: XCTestCase {
             loadBusyInputMode: { _ in },
             loadProfileDisplayPreferences: {},
             loadSlashCommands: {}
-        ))
+        ),
+            reconnectScheduler: scheduler.schedule(after:operation:)
+        )
         harness.appState.connection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
         harness.appState.client = HermesClient(connection: HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "t"), profile: "default")
 
