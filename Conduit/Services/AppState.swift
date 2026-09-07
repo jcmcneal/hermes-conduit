@@ -5041,8 +5041,12 @@ final class AppState: ObservableObject {
                   let activeClient = self.client, activeClient === client else { return }
             isConnected = true
             isConnecting = false
-            // A fresh healthy session never inherits an older banner error.
+            // A fresh healthy session never inherits an older banner error —
+            // including the typed classification Repair Connection seeds
+            // from: a successful reconnect makes any previous failure stale,
+            // so a LATER unrelated failure must route repair from itself.
             errorMessage = nil
+            lastConnectionFailure = nil
             reconnectAttempts = 0
             connectedAt = Date()
             guard let continuation = await synchronizeTransportContinuation(

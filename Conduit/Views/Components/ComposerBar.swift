@@ -430,9 +430,10 @@ struct ComposerBar: View {
             // Entering repair hands recovery authority to the user; the
             // automatic retry loop stays stopped until the repair reconnects
             // or the user retries manually.
-            if appState.connection != nil, !appState.isConnected,
-               appState.lastConnectionFailure != nil
-                   || !(appState.errorMessage ?? "").isEmpty {
+            if appState.connection != nil,
+               !appState.isConnected,
+               (appState.lastConnectionFailure != nil
+                   || !(appState.errorMessage ?? "").isEmpty) {
                 Button {
                     Haptics.light()
                     repairContext = appState.beginConnectionRepair()

@@ -21,7 +21,8 @@ final class ConnectionRepairTests: XCTestCase {
     // MARK: - Harness (mirrors AppStateChatResumeTests)
 
     private func makeHarness(
-        lifecycleOperations: ChatResumeLifecycleOperations = .live
+        lifecycleOperations: ChatResumeLifecycleOperations = .live,
+        reconnectScheduler: ChatResumeReconnectScheduler? = nil
     ) -> (appState: AppState, coordinator: ChatResumeCoordinator, store: ChatResumeStore,
           recoverySequence: ChatResumeRecoverySequence, defaults: UserDefaults) {
         let suite = "ConnectionRepairTests.\(UUID().uuidString)"
@@ -37,6 +38,7 @@ final class ConnectionRepairTests: XCTestCase {
             chatResumeCoordinator: coordinator,
             recoverySequence: recoverySequence,
             loadSavedConnection: false,
+            reconnectScheduler: reconnectScheduler,
             chatResumeLifecycleOperations: lifecycleOperations
         )
         return (appState, coordinator, store, recoverySequence, defaults)
@@ -294,7 +296,10 @@ final class ConnectionRepairTests: XCTestCase {
         let reconnectSpy = RepairReconnectExecutionSpy()
         let scheduler = RepairControlledReconnectScheduler()
         let suite = "ConnectionRepairTests.scheduler.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            XCTFail("Failed to create test defaults suite")
+            return
+        }
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let coordinator = ChatResumeCoordinator(store: ChatResumeStore(defaults: defaults))
         let appState = AppState(
@@ -323,6 +328,54 @@ final class ConnectionRepairTests: XCTestCase {
         // connection target is untouched and no failure state appeared.
         XCTAssertNotNil(appState.connection)
         XCTAssertFalse(appState.isConnected)
+    }
+
+    func testFailedReconnectRetainsTypedFailureUntilRecoverySucceeds() async {
+        var mintAttempts = 0
+        let scheduler = RepairControlledReconnectScheduler()
+        let harness = makeHarness(
+            reconnectScheduler: scheduler.schedule(after:operation:),
+            lifecycleOperations: ChatResumeLifecycleOperations(
+            connectClient: { _ in },
+            loadCatalog: { _, _ in [self.session("stored-a")] },
+            mintTicket: { _ in
+                mintAttempts += 1
+                if mintAttempts == 1 {
+                    throw URLError(.cannotFindHost)
+                }
+                return "fresh-ticket"
+            },
+            openSession: { _, id, _ in
+                SessionResumeResult(sessionId: id, messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in },
+            loadProfiles: {},
+            loadBusyInputMode: { _ in },
+            loadProfileDisplayPreferences: {},
+            loadSlashCommands: {}
+        ))
+        harness.appState.connection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
+        harness.appState.client = HermesClient(connection: HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "t"), profile: "default")
+
+        // First reconnect fails: the typed classification must remain
+        // available for Repair seeding and routing.
+        await harness.appState.reconnectForRetry(purpose: .preserveCurrent)
+        XCTAssertFalse(harness.appState.isConnected)
+        XCTAssertNotNil(harness.appState.lastConnectionFailure,
+                        "A failed reconnect must leave the typed classification available for Repair")
+        XCTAssertNotNil(harness.appState.errorMessage)
+        XCTAssertEqual(scheduler.pendingCount, 1, "The failure arms the ordinary automatic retry")
+
+        // The later reconnect succeeds: the stale classification is cleared
+        // alongside the banner, so a future unrelated failure routes Repair
+        // from itself, not from this stale event.
+        await harness.appState.reconnectForRetry(purpose: .preserveCurrent)
+        XCTAssertTrue(harness.appState.isConnected)
+        XCTAssertNil(harness.appState.lastConnectionFailure,
+                     "A successful reconnect makes any previous classification stale")
+        XCTAssertNil(harness.appState.errorMessage)
+        XCTAssertEqual(mintAttempts, 2)
     }
 
     // MARK: - Activation (spec 13, 14, 16, 28, 30)
