@@ -41,10 +41,23 @@ struct ConnectionSetupDraft: Equatable, CustomStringConvertible, CustomDebugStri
 
     func result() throws -> ConnectionSetupResult {
         let address = try ConnectionSetupAddressBuilder.build(self)
-        guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let result = ConnectionSetupResult(serverURL: address,
+                                           username: username,
+                                           password: password)
+        guard result.hasUsableCredentials else {
             throw ConnectionSetupValidationError.credentialsRequired
         }
+        return result
+    }
+
+    /// The staged connection test's target: the built address plus whatever
+    /// credentials are present, without requiring them. Provider discovery —
+    /// not form presence — decides whether a password applies, and an
+    /// interactive-auth dashboard legitimately has none to type. Review
+    /// acceptance is still strict: a credential-less draft can only complete
+    /// through the interactive-auth outcome (`ConnectionSetupFlow.acceptedResult`).
+    func testConfiguration() throws -> ConnectionSetupResult {
+        let address = try ConnectionSetupAddressBuilder.build(self)
         return ConnectionSetupResult(serverURL: address,
                                      username: username,
                                      password: password)
@@ -60,6 +73,17 @@ struct ConnectionSetupResult: Equatable, CustomStringConvertible, CustomDebugStr
     let serverURL: String
     let username: String
     let password: String
+
+    /// Presence-only credential check with the SAME semantic requirement as
+    /// `ConnectionSetupDraft.result()`: a native password login needs both a
+    /// non-empty username and a non-empty password. Presence only — the
+    /// values themselves are never trimmed or rewritten. Used by the staged
+    /// probe to stop at the credentials-required outcome instead of sending
+    /// an empty-credential login attempt.
+    var hasUsableCredentials: Bool {
+        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
 
     var description: String { "ConnectionSetupResult(redacted)" }
     var debugDescription: String { description }

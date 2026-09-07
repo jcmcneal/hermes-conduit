@@ -44,7 +44,12 @@ final class VoiceConversationController: ObservableObject {
     private var isVoiceSessionActive = false
     private var isAwaitingVoiceAssistant = false
     private var awaitedAssistantResponseStarted = false
-    private var expectedAssistantSessionID: String?
+    /// Every session id POSITIVELY confirmed to route this conversation's
+    /// assistant stream: the id captured at `beginVoiceTurn` plus any runtime
+    /// rebind admitted while the turn is live. Hermes events carry runtime
+    /// routing ids, so raw equality with the captured id alone would silently
+    /// drop the assistant's voice the moment a resume rebinds the runtime.
+    private var expectedAssistantSessionIDs: Set<String> = []
     private var operationGeneration: UInt64 = 0
     private var utteranceTask: Task<Void, Never>?
     private var bargeInTask: Task<Void, Never>?
@@ -88,9 +93,27 @@ final class VoiceConversationController: ObservableObject {
         isVoiceSessionActive = true
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
-        expectedAssistantSessionID = sessionID
+        expectedAssistantSessionIDs = [sessionID]
         conversationTranscript.removeAll(keepingCapacity: true)
         activeAssistantTranscriptEntryID = nil
+    }
+
+    /// Adds session ids an admitted resume positively rebound to this
+    /// conversation while the voice turn is live (runtime-old → runtime-new).
+    /// `ofConversationContaining` is the reconciled conversation's accepted
+    /// id set: the extension only applies when the turn's captured ids
+    /// POSITIVELY overlap it, so a reconcile belonging to a different
+    /// conversation can never inject its runtime into this turn's ownership.
+    /// Inactive sessions ignore the call: a fresh turn's capture starts from
+    /// its own id only.
+    func extendAssistantSessionIDs(
+        _ sessionIDs: Set<String>,
+        ofConversationContaining knownIDs: Set<String>
+    ) {
+        guard isVoiceSessionActive,
+              !expectedAssistantSessionIDs.isEmpty,
+              !expectedAssistantSessionIDs.isDisjoint(with: knownIDs) else { return }
+        expectedAssistantSessionIDs.formUnion(sessionIDs.filter { !$0.isEmpty })
     }
 
     func endVoiceSession() { stop() }
@@ -190,7 +213,7 @@ final class VoiceConversationController: ObservableObject {
         isVoiceSessionActive = false
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
-        expectedAssistantSessionID = nil
+        expectedAssistantSessionIDs = []
         state = .idle
     }
 
@@ -358,8 +381,7 @@ final class VoiceConversationController: ObservableObject {
         }
         guard isVoiceSessionActive,
               isAwaitingVoiceAssistant,
-              let expectedAssistantSessionID,
-              sessionID == expectedAssistantSessionID else { return }
+              expectedAssistantSessionIDs.contains(sessionID) else { return }
         if case .idle = state { return }
         if case .failed = state { return }
         switch event {

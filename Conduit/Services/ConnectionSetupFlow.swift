@@ -149,6 +149,10 @@ struct ConnectionSetupFlow: Equatable {
     private(set) var inheritedCloudflareOriginURL: String
     private(set) var validationError: ConnectionSetupValidationError?
     private let entry: ConnectionHelpDestination
+    /// The draft exactly as the wizard was seeded. The Settings
+    /// current-connection entry compares against it so a tested-but-unchanged
+    /// configuration can offer plain Done instead of an apply.
+    private let seededDraft: ConnectionSetupDraft
 
     var accessMethod: ConnectionAccessMethod? { draft.accessMethod }
 
@@ -177,10 +181,11 @@ struct ConnectionSetupFlow: Equatable {
         inheritedCloudflareOriginURL: String = ""
     ) {
         self.entry = entry
+        self.seededDraft = draft
         self.draft = draft
         self.inheritedCloudflareAccess = inheritedCloudflareAccess
         self.inheritedCloudflareOriginURL = inheritedCloudflareOriginURL
-        path = [Self.entryStep(for: entry)]
+        path = Self.initialPath(for: entry, draft: draft)
     }
 
     /// Failure-driven Round-1 destinations land at sensible parts of the
@@ -193,8 +198,48 @@ struct ConnectionSetupFlow: Equatable {
         case .network: return .accessMethod
         case .tls: return .tlsTroubleshooting
         case .cloudflare: return .cloudflareTroubleshooting
+        case .currentConnection: return .connectionDetails
         }
     }
+
+    /// The path a fresh wizard starts on. The Settings current-connection
+    /// entry skips the first-run readiness questions entirely; its shape
+    /// depends on the seed:
+    ///
+    /// * Both credential fields empty means credentials are simply
+    ///   UNAVAILABLE to the wizard (nothing saved, or a browser-auth
+    ///   connection) — it is never an authentication mode. Provider
+    ///   discovery runs fine without credentials and decides the auth mode,
+    ///   so the wizard opens straight on the staged test, with the details
+    ///   screen kept underneath so Back reaches an editable address
+    ///   ("change your connection" must not require a failure first). A
+    ///   password-capable dashboard stops at the credentials-required
+    ///   partial outcome; an interactive one at browser sign-in required.
+    /// * A username with an empty password is a native deployment whose
+    ///   password was withheld (Face ID-protected record) or forgotten: it
+    ///   lands on the prefilled details/credentials screens so the user is
+    ///   asked for the password instead of testing without one. The
+    ///   invariant either way: no password login happens until BOTH
+    ///   credentials are present.
+    /// * An address that cannot even be built falls back to the details
+    ///   screen, which surfaces the validation.
+    static func initialPath(for destination: ConnectionHelpDestination, draft: ConnectionSetupDraft) -> [ConnectionSetupStep] {
+        guard destination == .currentConnection else {
+            return [entryStep(for: destination)]
+        }
+        let credentialsEmpty =
+            draft.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && draft.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard credentialsEmpty, (try? draft.testConfiguration()) != nil else {
+            return [entryStep(for: destination)]
+        }
+        return [.connectionDetails, .connectionTest]
+    }
+
+    /// True only for the Settings current-connection entry, so the few copy
+    /// distinctions that would otherwise sound wrong to an already-connected
+    /// user can be made without forking the wizard's wording.
+    var enteredFromCurrentConnection: Bool { entry == .currentConnection }
 
     mutating func back() {
         guard canGoBack else { return }
@@ -269,8 +314,21 @@ struct ConnectionSetupFlow: Equatable {
 
     mutating func submitCredentials() {
         guard step == .loginCredentials else { return }
+        // The Settings current-connection entry may proceed with no
+        // credentials at all: an interactive-auth dashboard signs in through
+        // the browser, so empty fields are its normal shape — including when
+        // returning here after editing a failed test's address. LoginView
+        // entries keep the strict requirement; a first-run user must not
+        // spend a real server's login attempt on empty credentials.
+        let credentialsOptional = enteredFromCurrentConnection
+            && draft.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && draft.password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         do {
-            _ = try draft.result()
+            if credentialsOptional {
+                _ = try draft.testConfiguration()
+            } else {
+                _ = try draft.result()
+            }
             advance(to: .connectionTest)
             // A test result validated against an OLDER draft must never
             // authorize this fresh entry: edits bump the revision, so any
@@ -295,8 +353,28 @@ struct ConnectionSetupFlow: Equatable {
     /// untested configuration is never handed off.
     mutating func complete() -> ConnectionSetupResult? {
         guard step == .review, canUseSettings else { return nil }
-        do { return try draft.result() }
-        catch { record(error); return nil }
+        switch acceptedResult() {
+        case .success(let result): return result
+        case .failure(let error): record(error); return nil
+        }
+    }
+
+    /// The result Review can hand off: the fully-validated draft, or — only
+    /// when the CURRENT staged outcome is the interactive-auth terminal — the
+    /// address-only configuration. Discovery, not form presence, proved how
+    /// that dashboard authenticates, so there is no password to require.
+    /// Every other validation failure stays a failure.
+    func acceptedResult() -> Result<ConnectionSetupResult, ConnectionSetupValidationError> {
+        do { return .success(try draft.result()) }
+        catch {
+            if (error as? ConnectionSetupValidationError) == .credentialsRequired,
+               hasCurrentInteractiveAuthOutcome,
+               let addressOnly = try? draft.testConfiguration() {
+                return .success(addressOnly)
+            }
+            let validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
+            return .failure(validationError)
+        }
     }
 
     /// Pure revalidation for rendering the Review card: the validated result
@@ -305,11 +383,7 @@ struct ConnectionSetupFlow: Equatable {
     /// failure can never silently blank the Review content — the view renders
     /// the failure branch instead.
     func reviewState() -> Result<ConnectionSetupResult, ConnectionSetupValidationError> {
-        do { return .success(try draft.result()) }
-        catch {
-            let validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
-            return .failure(validationError)
-        }
+        acceptedResult()
     }
 
     private mutating func record(_ error: Error) {
@@ -352,6 +426,17 @@ struct ConnectionSetupFlow: Equatable {
         hasCurrentSuccessfulTest || hasCurrentInteractiveAuthOutcome
     }
 
+    /// Round 5: the CURRENT staged test validated a configuration
+    /// byte-identical to the one the wizard was seeded with, so Review can
+    /// offer plain Done — there is nothing to apply. Gated to the Settings
+    /// current-connection entry: the LoginView wizard must always offer its
+    /// normal "Use these settings" handoff, even when the user edited
+    /// nothing. Any draft edit (address, credentials, route) breaks equality
+    /// exactly like it breaks the staged test's revision match.
+    var testedSettingsUnchanged: Bool {
+        enteredFromCurrentConnection && canUseSettings && draft == seededDraft
+    }
+
     /// The inherited Cloudflare token, ONLY when it is same-origin with the
     /// draft's current address. A service token entered for one dashboard is
     /// never sent to a different origin during the test (Round-3 origin
@@ -359,7 +444,7 @@ struct ConnectionSetupFlow: Equatable {
     func cloudflareAccessForDraft() -> CloudflareAccessCredentials? {
         guard let access = inheritedCloudflareAccess, access.isConfigured else { return nil }
         let origin = inheritedCloudflareOriginURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !origin.isEmpty, let result = try? draft.result() else { return nil }
+        guard !origin.isEmpty, let result = try? draft.testConfiguration() else { return nil }
         return LoginCloudflareHandoff.sameOrigin(result.serverURL, origin) ? access : nil
     }
 
@@ -380,7 +465,11 @@ struct ConnectionSetupFlow: Equatable {
     /// cancellation, a newer run, or a draft reset — are ignored, so a late
     /// completion can never overwrite newer state. A terminal event (full
     /// native success, or the interactive sign-in outcome) seals the result
-    /// at the current draft revision and advances to Review.
+    /// at the current draft revision and advances to Review. The
+    /// credentials-required partial outcome also terminates the RUN but
+    /// deliberately seals nothing and navigates nowhere: it authorizes
+    /// nothing (`canUseSettings` stays false) and stays on the test screen
+    /// with its Enter Credentials recovery.
     @discardableResult
     mutating func applyTestEvent(_ event: ConnectionSetupTestEvent, generation: Int) -> Bool {
         guard generation == testGeneration, step == .connectionTest else { return false }
