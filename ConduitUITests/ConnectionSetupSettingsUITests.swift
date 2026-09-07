@@ -40,8 +40,7 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
 
         // The Connection section carries the current dashboard (the Gateway
         // row) and the new Connection Setup entry.
-        XCTAssertTrue(app.buttons[Identity.settingsRow].waitForExistence(timeout: 5))
-        app.buttons[Identity.settingsRow].tap()
+        tapVisible(app.buttons[Identity.settingsRow], in: app)
 
         // The passwordless seed opens straight on the staged test with the
         // current URL preserved exactly — no first-run readiness questions,
@@ -107,8 +106,7 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
         app.launch()
 
         openSettings(app)
-        XCTAssertTrue(app.buttons[Identity.settingsRow].waitForExistence(timeout: 5))
-        app.buttons[Identity.settingsRow].tap()
+        tapVisible(app.buttons[Identity.settingsRow], in: app)
 
         let preview = row(app, Identity.addressPreview)
         XCTAssertTrue(preview.waitForExistence(timeout: 5), "Wizard did not open on the staged test. Tree:\n\(app.debugDescription)")
@@ -131,6 +129,50 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
         XCTAssertTrue(app.buttons[Identity.settingsRow].waitForExistence(timeout: 5), "Done did not return to Settings. Tree:\n\(app.debugDescription)")
         XCTAssertFalse(app.alerts.firstMatch.exists, "Done on unchanged settings applies nothing and needs no confirmation")
         XCTAssertFalse(app.textFields["login.server-url"].exists, "The live session must never be disrupted by the wizard")
+    }
+
+    func testNativeDashboardWithoutSavedCredentialsStopsAtCredentialsRequired() {
+        // The real no-saved-credentials native scenario: credential absence
+        // is NOT interactive auth. Discovery proves a password dashboard,
+        // the staged test stops at Credentials required — no empty-credential
+        // login request is ever sent — and Enter Credentials routes to the
+        // existing credentials step with the URL preserved.
+        let app = XCUIApplication()
+        app.launchArguments += [
+            "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", Identity.stubDashboardURL,
+            "-CONNECTION_SETUP_TEST_RESULT", "auth:credentialsRequired"
+        ]
+        app.launch()
+
+        openSettings(app)
+        tapVisible(app.buttons[Identity.settingsRow], in: app)
+
+        let preview = row(app, Identity.addressPreview)
+        XCTAssertTrue(preview.waitForExistence(timeout: 5), "Wizard did not open on the staged test. Tree:\n\(app.debugDescription)")
+        XCTAssertEqual(preview.label, Identity.stubDashboardURL)
+
+        tapVisible(app.buttons[Identity.testRun], in: app)
+
+        // The partial outcome: two passed stages, then Credentials required
+        // — never Login successful, never Browser sign-in required, and no
+        // ready claim.
+        let notice = app.staticTexts["setup.test.credentials-required"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        let authRow = row(app, "setup.test.stage.authentication")
+        XCTAssertTrue(authRow.exists)
+        XCTAssertTrue(authRow.label.lowercased().contains("credentials required"), "Got: \(authRow.label)")
+        XCTAssertFalse(app.staticTexts["setup.test.ready"].exists)
+        XCTAssertFalse(app.staticTexts["setup.test.interactive-ready"].exists)
+        XCTAssertFalse(app.buttons[Identity.useSettings].exists, "A partial test must not authorize the settings handoff")
+
+        // Enter Credentials routes to the existing credentials step with the
+        // current URL intact.
+        tapVisible(app.buttons["setup.test.enter-credentials"], in: app)
+        let username = app.textFields[Identity.username]
+        XCTAssertTrue(username.waitForExistence(timeout: 5), "Credentials step did not appear. Tree:\n\(app.debugDescription)")
+        let urlField = app.textFields[Identity.urlField]
+        XCTAssertFalse(urlField.exists, "The URL is owned by the details step; credentials step only asks for credentials")
+        XCTAssertTrue(app.buttons[Identity.back].exists, "Back returns toward the tested connection")
     }
 
     // MARK: - Walk helpers

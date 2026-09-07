@@ -128,6 +128,11 @@ struct ConnectionSetupView: View {
                         notification: .announcement,
                         argument: ConnectionSetupTestState.interactiveReadyMessage
                     )
+                case .requiresCredentials(.authentication):
+                    UIAccessibility.post(
+                        notification: .announcement,
+                        argument: ConnectionSetupTestState.credentialsRequiredMessage
+                    )
                 case .failed(_, let failure):
                     UIAccessibility.post(notification: .announcement, argument: failure.userTitle)
                 default:

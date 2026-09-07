@@ -69,6 +69,17 @@ final class ConnectionSetupTestTests: XCTestCase {
         return flow
     }
 
+    /// A flow at `.connectionTest` via the Settings current-connection entry
+    /// with an empty credential seed (credentials unavailable — the exact
+    /// shape of an actively-connected user who never saved credentials).
+    private func makeCredentialsLessSettingsFlowAtTestStep() -> ConnectionSetupFlow {
+        let flow = ConnectionSetupFlow(entry: .currentConnection, draft: ConnectionSetupDraft(
+            existingServerURL: "https://hermes.example:9443/hermes"
+        ))
+        XCTAssertEqual(flow.step, .connectionTest, "The credentials-unavailable Settings entry lands on the staged test")
+        return flow
+    }
+
     // MARK: - State machine (spec 19)
 
     func testFullSuccessSequenceReachesAcceptableState() {
@@ -556,11 +567,94 @@ final class ConnectionSetupTestTests: XCTestCase {
         XCTAssertEqual(state.rowLabel(for: .authentication), "Login successful")
     }
 
+    // MARK: - Credentials-required partial outcome (Round 5.1)
+
+    /// The staged credentials-required run: server and dashboard succeed and
+    /// authentication stops BEFORE any login attempt because the tested
+    /// configuration carries no usable credentials.
+    static let credentialsRequiredEvents: [ConnectionSetupTestEvent] = [
+        .started(.server), .succeeded(.server),
+        .started(.dashboard), .succeeded(.dashboard),
+        .started(.authentication),
+        .requiresCredentials(.authentication)
+    ]
+
+    func testCredentialsRequiredOutcomeIsNeitherSuccessNorFailureNorInteractive() throws {
+        var flow = makeCredentialsLessSettingsFlowAtTestStep()
+        let generation = try XCTUnwrap(flow.beginTest())
+        for event in Self.credentialsRequiredEvents {
+            XCTAssertTrue(flow.applyTestEvent(event, generation: generation))
+        }
+
+        XCTAssertEqual(flow.testState.server, .succeeded)
+        XCTAssertEqual(flow.testState.dashboard, .succeeded)
+        XCTAssertEqual(flow.testState.authentication, .requiresCredentials)
+        XCTAssertTrue(flow.testState.requiresCredentials)
+        XCTAssertFalse(flow.testState.allSucceeded, "A partial test is never a success")
+        XCTAssertFalse(flow.testState.requiresInteractiveSignIn, "Credential absence is never an authentication mode")
+        XCTAssertFalse(flow.canUseSettings, "A partial test never authorizes the settings handoff")
+        XCTAssertEqual(flow.step, .connectionTest, "The partial outcome does not advance to Review")
+        XCTAssertNil(flow.complete())
+        XCTAssertNil(flow.testSucceededAtRevision, "Nothing was sealed: the outcome authorizes nothing")
+    }
+
+    func testCredentialsRequiredOutcomeRoutesToCredentialsEntryAndResets() throws {
+        var flow = makeCredentialsLessSettingsFlowAtTestStep()
+        let generation = try XCTUnwrap(flow.beginTest())
+        for event in Self.credentialsRequiredEvents {
+            flow.applyTestEvent(event, generation: generation)
+        }
+        XCTAssertTrue(flow.testState.requiresCredentials)
+
+        flow.editAfterFailedTest(.loginCredentials)
+        XCTAssertEqual(flow.step, .loginCredentials)
+        XCTAssertEqual(flow.testState, ConnectionSetupTestState(), "Leaving the test step invalidates the partial result")
+
+        // With both credentials entered, the rerun takes the normal path.
+        flow.draft.username = "probe-user"
+        flow.draft.password = "in-memory-fixture"
+        flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionTest)
+        let rerun = try XCTUnwrap(flow.beginTest())
+        for event in StagedTestDriver.successEvents {
+            flow.applyTestEvent(event, generation: rerun)
+        }
+        XCTAssertEqual(flow.step, .review, "A full rerun with present credentials succeeds normally")
+    }
+
+    func testStaleCredentialsRequiredEventFromAnOlderRunIsDropped() throws {
+        var flow = makeCredentialsLessSettingsFlowAtTestStep()
+        let staleGeneration = try XCTUnwrap(flow.beginTest())
+        for event in Self.credentialsRequiredEvents {
+            flow.applyTestEvent(event, generation: staleGeneration)
+        }
+
+        // A newer run rotates the generation and resets the state.
+        let freshGeneration = try XCTUnwrap(flow.beginTest())
+        flow.applyTestEvent(.started(.server), generation: freshGeneration)
+        XCTAssertEqual(flow.testState.server, .running)
+
+        // The old run's late partial outcome cannot corrupt the newer run.
+        flow.applyTestEvent(.requiresCredentials(.authentication), generation: staleGeneration)
+        XCTAssertEqual(flow.testState.authentication, .pending, "The stale partial outcome is ignored")
+        XCTAssertFalse(flow.testState.requiresCredentials)
+    }
+
+    func testCredentialsRequiredRowCarriesDistinctMeaningAndSafeCopy() {
+        var state = ConnectionSetupTestState()
+        state.apply(Self.credentialsRequiredEvents[4]) // started(.authentication)
+        state.apply(.requiresCredentials(.authentication))
+        XCTAssertEqual(state.rowLabel(for: .authentication), "Credentials required")
+        XCTAssertEqual(state.accessibilityLabel(for: .authentication), "Authentication, credentials required")
+        XCTAssertNotEqual(state.rowLabel(for: .authentication), ConnectionSetupTestStage.authentication.successLabel)
+    }
+
     func testTestCopyContainsNoExposureOrCredentialLanguage() {
         var allStrings = [
             ConnectionSetupTestState.readyMessage,
             ConnectionSetupTestState.interactiveReadyMessage,
-            "Browser sign-in required"
+            "Browser sign-in required",
+            "Credentials required"
         ]
         for stage in ConnectionSetupTestStage.allCases {
             allStrings.append(contentsOf: [stage.objectiveLabel, stage.runningLabel, stage.successLabel])
@@ -729,6 +823,61 @@ final class ConnectionSetupTestTests: XCTestCase {
         task.cancel()
         await task.value
         XCTAssertEqual(events, [.started(.server)], "Cancellation must emit no failure events")
+    }
+
+    // MARK: - Credentials-required partial outcome (Round 5.1)
+
+    @MainActor
+    private func runProbeWithCredentials(
+        _ baseURL: String,
+        username: String,
+        password: String
+    ) async -> [ConnectionSetupTestEvent] {
+        let probe = ConnectionSetupProbe(sessionConfiguration: Self.makeProbeConfiguration())
+        var events: [ConnectionSetupTestEvent] = []
+        await probe.runTest(
+            result: ConnectionSetupResult(
+                serverURL: baseURL,
+                username: username,
+                password: password
+            ),
+            cloudflareAccess: nil,
+            onEvent: { events.append($0) }
+        )
+        return events
+    }
+
+    func testProbePasswordCapableDashboardWithoutCredentialsNeverAttemptsLogin() async {
+        // THE Round-5.1 invariant: a password-capable dashboard plus missing
+        // credentials performs EXACTLY ONE provider-discovery request and
+        // ZERO password-login and ws-ticket requests. An empty-credential
+        // login would be a real, rate-limited authentication attempt against
+        // a connection that may already be known to work.
+        let host = "probe-success.example"
+        let events = await runProbeWithCredentials("https://\(host)", username: "", password: "")
+        XCTAssertEqual(events, Array(StagedTestDriver.successEvents.prefix(5)) + [
+            .requiresCredentials(.authentication)
+        ])
+        XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/api/auth/providers", host: host), 1)
+        XCTAssertEqual(
+            SetupProbeURLProtocol.requestCount(forPath: "/auth/password-login", host: host), 0,
+            "No password-login request may occur without present credentials"
+        )
+        XCTAssertEqual(
+            SetupProbeURLProtocol.requestCount(forPath: "/api/auth/ws-ticket", host: host), 0,
+            "No ticket mint may occur without present credentials"
+        )
+    }
+
+    func testProbeWhitespaceOnlyCredentialsAlsoStopAtCredentialsRequired() async {
+        // Presence, not content: whitespace-only credentials are as unusable
+        // as empty ones, and neither is ever sent.
+        let host = "probe-success.example"
+        let events = await runProbeWithCredentials("https://\(host)", username: " ", password: " ")
+        XCTAssertEqual(events, Array(StagedTestDriver.successEvents.prefix(5)) + [
+            .requiresCredentials(.authentication)
+        ])
+        XCTAssertEqual(SetupProbeURLProtocol.requestCount(forPath: "/auth/password-login", host: host), 0)
     }
 
     // MARK: - Interactive sign-in outcome

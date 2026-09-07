@@ -39,10 +39,13 @@ final class ConnectionSetupSettingsTests: XCTestCase {
         )
     }
 
-    func testPasswordlessCurrentConnectionEntryOpensTheStagedTestDirectly() {
-        // An interactive-auth deployment legitimately has no stored password.
-        // Never park the user on a meaningless password field, and never make
-        // an already-connected user answer the first-run readiness questions.
+    func testCredentialsUnavailableEntryOpensTheStagedTestDirectly() {
+        // Both credential fields empty means credentials are simply
+        // UNAVAILABLE to the wizard — never an authentication mode. Provider
+        // discovery runs without credentials and decides the auth mode, so
+        // the wizard opens straight on the staged test. Never park the user
+        // on a meaningless password field, and never make an
+        // already-connected user answer the first-run readiness questions.
         let flow = ConnectionSetupFlow(
             entry: .currentConnection,
             draft: ConnectionSetupDraft(existingServerURL: currentURL)
@@ -54,6 +57,72 @@ final class ConnectionSetupSettingsTests: XCTestCase {
         var editable = flow
         editable.back()
         XCTAssertEqual(editable.step, .connectionDetails)
+    }
+
+    func testNativeDashboardWithoutSavedCredentialsStopsAtCredentialsRequiredAndNeverLogsIn() throws {
+        // THE Round-5.1 regression: an actively-connected native-password
+        // user who chose not to save credentials seeds an empty draft.
+        // Discovery proves a password dashboard; the staged test must stop
+        // at the credentials-required partial outcome — no empty-credential
+        // login attempt, no review authorization, live connection untouched.
+        var flow = ConnectionSetupFlow(
+            entry: .currentConnection,
+            draft: ConnectionSetupDraft(existingServerURL: currentURL)
+        )
+        XCTAssertEqual(flow.step, .connectionTest)
+        let generation = try XCTUnwrap(flow.beginTest())
+        for event in StagedTestDriver.successEvents.prefix(5) {
+            XCTAssertTrue(flow.applyTestEvent(event, generation: generation))
+        }
+        XCTAssertTrue(flow.applyTestEvent(.requiresCredentials(.authentication), generation: generation))
+
+        XCTAssertEqual(flow.testState.server, .succeeded)
+        XCTAssertEqual(flow.testState.dashboard, .succeeded)
+        XCTAssertEqual(flow.testState.authentication, .requiresCredentials)
+        XCTAssertTrue(flow.testState.requiresCredentials)
+        XCTAssertFalse(flow.testState.allSucceeded)
+        XCTAssertFalse(flow.testState.requiresInteractiveSignIn)
+        XCTAssertFalse(flow.canUseSettings, "A partial test never authorizes the settings handoff")
+        XCTAssertEqual(flow.step, .connectionTest, "The partial outcome stays on the test screen")
+        XCTAssertNil(flow.complete())
+
+        // Enter Credentials routes to the existing credentials step, leaving
+        // the test step, which resets the partial display for a fresh run.
+        flow.editAfterFailedTest(.loginCredentials)
+        XCTAssertEqual(flow.step, .loginCredentials)
+        XCTAssertEqual(flow.testState, ConnectionSetupTestState(), "The partial result never outlives the test step")
+        XCTAssertTrue(flow.draft.usesExistingAddress, "The current URL is preserved for the retry")
+    }
+
+    func testStaleCredentialsRequiredOutcomeCannotOutliveANewerRun() throws {
+        var flow = ConnectionSetupFlow(
+            entry: .currentConnection,
+            draft: ConnectionSetupDraft(existingServerURL: currentURL)
+        )
+        let staleGeneration = try XCTUnwrap(flow.beginTest())
+        for event in StagedTestDriver.successEvents.prefix(5) {
+            flow.applyTestEvent(event, generation: staleGeneration)
+        }
+        flow.applyTestEvent(.requiresCredentials(.authentication), generation: staleGeneration)
+        XCTAssertTrue(flow.testState.requiresCredentials)
+
+        // A fresh run resets the partial outcome and rotates the generation;
+        // the stale run's late terminal event must be dropped entirely.
+        let freshGeneration = try XCTUnwrap(flow.beginTest())
+        XCTAssertNotEqual(staleGeneration, freshGeneration)
+        XCTAssertEqual(flow.testState, ConnectionSetupTestState())
+        XCTAssertFalse(
+            flow.applyTestEvent(.requiresCredentials(.authentication), generation: staleGeneration),
+            "A stale credentials-required event is ignored, not applied"
+        )
+        XCTAssertEqual(flow.testState.authentication, .pending)
+
+        // The fresh run succeeds normally.
+        for event in StagedTestDriver.successEvents {
+            flow.applyTestEvent(event, generation: freshGeneration)
+        }
+        XCTAssertEqual(flow.step, .review)
+        XCTAssertTrue(flow.canUseSettings)
     }
 
     func testFaceIDWithheldSeedLandsOnDetailsInsteadOfAnEmptyPasswordProbe() {
@@ -187,6 +256,11 @@ final class ConnectionSetupSettingsTests: XCTestCase {
     // MARK: - Interactive auth from Settings
 
     func testInteractiveAuthDeploymentTestsAndCompletesWithoutAnyPassword() throws {
+        // Credential absence does NOT decide the auth mode — the discovery
+        // result does. A dashboard whose discovery reports interactive
+        // sign-in ends in the supported terminal outcome with no login, no
+        // ticket, and an address-only completion; the unchanged Settings
+        // entry may offer plain Done.
         var flow = ConnectionSetupFlow(
             entry: .currentConnection,
             draft: ConnectionSetupDraft(existingServerURL: currentURL)
@@ -258,7 +332,17 @@ final class ConnectionSetupSettingsTests: XCTestCase {
         XCTAssertEqual(configuration.serverURL, currentURL)
         XCTAssertTrue(configuration.username.isEmpty)
         XCTAssertTrue(configuration.password.isEmpty)
+        XCTAssertFalse(configuration.hasUsableCredentials)
         XCTAssertThrowsError(try draft.result(), "Full acceptance stays strict for empty credentials")
+
+        // Presence-only: whitespace-only fields are as unusable as empty
+        // ones, and the values themselves are never trimmed or rewritten.
+        let padded = ConnectionSetupResult(serverURL: currentURL, username: "  ", password: "\n")
+        XCTAssertFalse(padded.hasUsableCredentials)
+        let present = ConnectionSetupResult(serverURL: currentURL, username: " eric ", password: " secret ")
+        XCTAssertTrue(present.hasUsableCredentials)
+        XCTAssertEqual(present.username, " eric ")
+        XCTAssertEqual(present.password, " secret ")
     }
 
     // MARK: - Seeding

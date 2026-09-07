@@ -162,6 +162,11 @@ struct ConnectionSetupForm: View {
             if let failure = flow.testState.failedFailure,
                let stage = flow.testState.failedStage {
                 failedTestRecovery(stage: stage, failure: failure)
+            } else if flow.testState.requiresCredentials {
+                // Partial outcome, not a failure: server and dashboard
+                // passed, no login was attempted, and the missing secret is
+                // the only thing between the user and a full test.
+                credentialsRequiredRecovery
             } else if flow.canUseSettings {
                 // Reachable after returning Back from Review: a passing or
                 // interactive outcome is still current, so continue without
@@ -177,6 +182,29 @@ struct ConnectionSetupForm: View {
                     .frame(maxWidth: .infinity)
                     .accessibilityIdentifier("setup.test.run")
             }
+        }
+    }
+
+    /// The credentials-required partial outcome's recovery: Enter
+    /// Credentials is the primary action and routes to the existing
+    /// credentials step (leaving the test step invalidates the partial
+    /// result, so returning runs a fresh full test). Retry is deliberately
+    /// absent — retrying with the same missing credentials would be
+    /// pointless, and no login attempt occurred, so there is no
+    /// rate-limit concern.
+    @ViewBuilder
+    private var credentialsRequiredRecovery: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(ConnectionSetupTestState.credentialsRequiredMessage)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("setup.test.credentials-required")
+            Button("Enter Credentials") {
+                flow.editAfterFailedTest(.loginCredentials)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.conduitAccent)
+            .accessibilityIdentifier("setup.test.enter-credentials")
         }
     }
 
@@ -390,6 +418,13 @@ struct ConnectionSetupStageRow: View {
             // An open circle in the accent color: deliberately not a
             // checkmark (the user has not authenticated) and not an error
             // mark (nothing failed). Text and VoiceOver carry the meaning.
+            Image(systemName: "circle")
+                .font(.footnote)
+                .foregroundStyle(.conduitAccent)
+                .padding(.top, 2)
+        case .requiresCredentials:
+            // Same open-circle shape as the interactive outcome: a partial
+            // result, not an error and not a success.
             Image(systemName: "circle")
                 .font(.footnote)
                 .foregroundStyle(.conduitAccent)

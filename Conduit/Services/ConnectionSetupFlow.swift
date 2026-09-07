@@ -206,16 +206,21 @@ struct ConnectionSetupFlow: Equatable {
     /// entry skips the first-run readiness questions entirely; its shape
     /// depends on the seed:
     ///
-    /// * Both credential fields empty is the interactive-auth signature — no
-    ///   password exists to type — so the wizard opens straight on the
-    ///   staged test, with the details screen kept underneath so Back
-    ///   reaches an editable address ("change your connection" must not
-    ///   require a failure first).
+    /// * Both credential fields empty means credentials are simply
+    ///   UNAVAILABLE to the wizard (nothing saved, or a browser-auth
+    ///   connection) — it is never an authentication mode. Provider
+    ///   discovery runs fine without credentials and decides the auth mode,
+    ///   so the wizard opens straight on the staged test, with the details
+    ///   screen kept underneath so Back reaches an editable address
+    ///   ("change your connection" must not require a failure first). A
+    ///   password-capable dashboard stops at the credentials-required
+    ///   partial outcome; an interactive one at browser sign-in required.
     /// * A username with an empty password is a native deployment whose
     ///   password was withheld (Face ID-protected record) or forgotten: it
     ///   lands on the prefilled details/credentials screens so the user is
-    ///   asked for the password instead of spending an empty-credential
-    ///   login attempt on their own server.
+    ///   asked for the password instead of testing without one. The
+    ///   invariant either way: no password login happens until BOTH
+    ///   credentials are present.
     /// * An address that cannot even be built falls back to the details
     ///   screen, which surfaces the validation.
     static func initialPath(for destination: ConnectionHelpDestination, draft: ConnectionSetupDraft) -> [ConnectionSetupStep] {
@@ -460,7 +465,11 @@ struct ConnectionSetupFlow: Equatable {
     /// cancellation, a newer run, or a draft reset — are ignored, so a late
     /// completion can never overwrite newer state. A terminal event (full
     /// native success, or the interactive sign-in outcome) seals the result
-    /// at the current draft revision and advances to Review.
+    /// at the current draft revision and advances to Review. The
+    /// credentials-required partial outcome also terminates the RUN but
+    /// deliberately seals nothing and navigates nowhere: it authorizes
+    /// nothing (`canUseSettings` stays false) and stays on the test screen
+    /// with its Enter Credentials recovery.
     @discardableResult
     mutating func applyTestEvent(_ event: ConnectionSetupTestEvent, generation: Int) -> Bool {
         guard generation == testGeneration, step == .connectionTest else { return false }

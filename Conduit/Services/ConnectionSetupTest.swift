@@ -12,16 +12,16 @@
 //  status classification. Stage 1 (transport) and stage 2 (Hermes dashboard
 //  confirmation) ride on the same provider-discovery request the normal
 //  login flow performs first; stage 3 is the full native connect (password
-//  login + ws-ticket mint) for password-capable dashboards. A dashboard that
-//  answers discovery with an unauthenticated redirect to a sign-in page has
-//  proven everything the probe can test and ends the run in the supported
-//  `requiresInteractiveSignIn` outcome: no native login, no ticket, no
-//  WebView — the actual sign-in happens in LoginView after the handoff.
-//  The milestone for "Login successful" is exactly the milestone normal
-//  login reaches before it would commit anything — and the probe commits
-//  nothing: no cookie store write, no Keychain, no AppState mutation, no
-//  websocket, no screen changes. The resulting ticket and transaction
-//  cookies are discarded here.
+//  login + ws-ticket mint) for password-capable dashboards WITH present
+//  credentials. Two dashboards legitimately stop before stage 3's login: one
+//  that answers discovery with an unauthenticated redirect to a sign-in page
+//  ends in the supported `requiresInteractiveSignIn` outcome, and a
+//  password-capable dashboard whose tested configuration carries no usable
+//  credentials ends in the supported `requiresCredentials` partial outcome —
+//  credential absence is not an authentication mode, and an empty-credential
+//  login is never sent. The probe commits nothing: no cookie store write, no
+//  Keychain, no AppState mutation, no websocket, no screen changes. The
+//  resulting ticket and transaction cookies are discarded here.
 //
 
 import Foundation
@@ -85,6 +85,14 @@ enum ConnectionSetupStageState: Equatable {
     /// outcome — explicitly NOT a success (the user has not authenticated)
     /// and NOT a failure (nothing went wrong).
     case requiresInteractiveSignIn
+    /// The dashboard is a native password dashboard, but the test
+    /// configuration carries no usable credentials to test it with. A
+    /// supported partial outcome: transport and dashboard identity are
+    /// proven, no login attempt was made, and the user can enter
+    /// credentials to finish the test. Explicitly NOT a success, NOT a
+    /// failure, and NOT an authentication mode — credential availability is
+    /// a property of the seed, never of the dashboard.
+    case requiresCredentials
     case failed(ConnectionFailure)
 
     /// VoiceOver state word, so success/failure is never communicated by
@@ -95,6 +103,7 @@ enum ConnectionSetupStageState: Equatable {
         case .running: return "checking"
         case .succeeded: return "passed"
         case .requiresInteractiveSignIn: return "browser sign-in required"
+        case .requiresCredentials: return "credentials required"
         case .failed: return "failed"
         }
     }
@@ -111,6 +120,12 @@ enum ConnectionSetupTestEvent: Equatable {
     /// server and dashboard have succeeded. No password login, ticket mint,
     /// or WebView follows inside the probe.
     case requiresInteractiveSignIn(ConnectionSetupTestStage)
+    /// Terminal partial outcome: the dashboard is a native password
+    /// dashboard but the tested configuration carries no usable credentials.
+    /// Emitted once, at the authentication stage, after server and dashboard
+    /// have succeeded — INSTEAD of any login attempt. No password login and
+    /// no ticket mint follow; an empty-credential login is never sent.
+    case requiresCredentials(ConnectionSetupTestStage)
     case failed(ConnectionSetupTestStage, ConnectionFailure)
 }
 
@@ -132,6 +147,14 @@ struct ConnectionSetupTestState: Equatable {
     /// successful".
     static let interactiveReadyMessage = "This dashboard uses browser-based sign-in. "
         + "Conduit will open the sign-in page after you return to the login screen."
+
+    /// The credentials-required partial outcome's copy: server and dashboard
+    /// passed, but testing native login needs the user's credentials first.
+    /// Names the dashboard's auth mode (learned from provider discovery) and
+    /// asks for the missing secret — never a success, failure, or
+    /// "connection ready" claim.
+    static let credentialsRequiredMessage = "This dashboard uses username and password sign-in. "
+        + "Enter your credentials to finish testing the connection."
 
     subscript(stage: ConnectionSetupTestStage) -> ConnectionSetupStageState {
         get {
@@ -165,6 +188,9 @@ struct ConnectionSetupTestState: Equatable {
         case .requiresInteractiveSignIn(let stage):
             guard self[stage] == .pending || self[stage] == .running else { return }
             self[stage] = .requiresInteractiveSignIn
+        case .requiresCredentials(let stage):
+            guard self[stage] == .pending || self[stage] == .running else { return }
+            self[stage] = .requiresCredentials
         case .failed(let stage, let failure):
             guard self[stage] == .pending || self[stage] == .running else { return }
             self[stage] = .failed(failure)
@@ -188,6 +214,17 @@ struct ConnectionSetupTestState: Equatable {
             && authentication == .requiresInteractiveSignIn
     }
 
+    /// The staged test ended in the supported credentials-required partial
+    /// outcome: server and dashboard succeeded, and authentication stopped
+    /// before any login attempt because the tested configuration carries no
+    /// usable credentials. Never a success, never a failure, and never an
+    /// authentication mode — discovery decides that, not credential absence.
+    var requiresCredentials: Bool {
+        server == .succeeded
+            && dashboard == .succeeded
+            && authentication == .requiresCredentials
+    }
+
     /// The first failed stage in run order, if any.
     var failedStage: ConnectionSetupTestStage? {
         ConnectionSetupTestStage.allCases.first { stage in
@@ -208,6 +245,7 @@ struct ConnectionSetupTestState: Equatable {
         case .running: return stage.runningLabel
         case .succeeded: return stage.successLabel
         case .requiresInteractiveSignIn: return "Browser sign-in required"
+        case .requiresCredentials: return "Credentials required"
         case .pending, .failed: return stage.objectiveLabel
         }
     }
@@ -350,7 +388,18 @@ struct ConnectionSetupProbe: ConnectionSetupTesting {
         // commit cookies. The transaction (ticket + transaction cookies) is
         // deliberately discarded: the test persists nothing and connects
         // nothing.
+        //
+        // A password-capable dashboard WITHOUT present credentials stops
+        // here at the supported credentials-required outcome. Credential
+        // absence is not an authentication mode — it only means the Settings
+        // seed could not supply the secret — and an empty-credential login
+        // would be a real, rate-limited authentication attempt against a
+        // connection that may already be known to work.
         onEvent(.started(.authentication))
+        guard result.hasUsableCredentials else {
+            onEvent(.requiresCredentials(.authentication))
+            return
+        }
         do {
             // Deliberately discarded: commitCookies() is never called, so
             // the transaction never reaches the shared cookie store.
@@ -389,6 +438,7 @@ struct ConnectionSetupTestProbeStub: ConnectionSetupTesting {
     enum Script: String {
         case success
         case interactiveSignInRequired = "auth:interactiveSignInRequired"
+        case credentialsRequired = "auth:credentialsRequired"
         case serverHostNotFound = "server:hostNotFound"
         case dashboardUnexpected = "dashboard:unexpectedServerResponse"
         case authRejected = "auth:authenticationRejected"
@@ -410,6 +460,13 @@ struct ConnectionSetupTestProbeStub: ConnectionSetupTesting {
                 onEvent(.succeeded(.dashboard))
                 onEvent(.started(.authentication))
                 onEvent(.requiresInteractiveSignIn(.authentication))
+            case .credentialsRequired:
+                onEvent(.started(.server))
+                onEvent(.succeeded(.server))
+                onEvent(.started(.dashboard))
+                onEvent(.succeeded(.dashboard))
+                onEvent(.started(.authentication))
+                onEvent(.requiresCredentials(.authentication))
             case .serverHostNotFound:
                 onEvent(.started(.server))
                 onEvent(.failed(.server, .hostNotFound))
