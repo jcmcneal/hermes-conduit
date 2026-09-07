@@ -57,7 +57,9 @@ final class SystemVoiceAudioSession: VoiceAudioSessionControlling {
 /// unknown or already-released lease is a no-op, so repeated cleanup paths
 /// (stop, cancellation, backgrounding) can never underflow another owner.
 struct VoiceAudioLease: Equatable {
-    private let id: UUID
+    /// `fileprivate`, not `private`: the coordinator (same file, different
+    /// type) keys its lease table on this id.
+    fileprivate let id: UUID
     /// Internal so tests can synthesize unknown leases; production callers
     /// only ever receive leases from `acquire`.
     init(id: UUID = UUID()) { self.id = id }
