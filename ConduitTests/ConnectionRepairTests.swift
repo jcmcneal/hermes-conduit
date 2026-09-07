@@ -377,6 +377,9 @@ final class ConnectionRepairTests: XCTestCase {
                      "A successful reconnect makes any previous classification stale")
         XCTAssertNil(harness.appState.errorMessage)
         XCTAssertEqual(mintAttempts, 2)
+        // The retry armed by the failure was cancelled when the explicit
+        // reconnect began; a successful reconnect leaves nothing scheduled.
+        XCTAssertEqual(scheduler.pendingCount, 0)
     }
 
     // MARK: - Activation (spec 13, 14, 16, 28, 30)
