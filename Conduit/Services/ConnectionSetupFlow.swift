@@ -50,6 +50,9 @@ enum ConnectionSetupStep: Equatable {
     case reverseProxy
     case connectionDetails
     case loginCredentials
+    /// Round 4: the staged connection test between credentials and Review.
+    /// Review is only reachable through a current successful test.
+    case connectionTest
     case review
 
     // Direct troubleshooting surfaces (failure-driven entries).
@@ -122,7 +125,28 @@ struct ConnectionSetupFlow: Equatable {
     private(set) var path: [ConnectionSetupStep]
     private(set) var dashboardAnswer: ConnectionSetupAnswer?
     private(set) var credentialsAnswer: ConnectionSetupAnswer?
-    var draft: ConnectionSetupDraft
+    /// Session-only form values. Every mutation — from flow transitions or
+    /// direct view bindings — bumps `draftRevision`, which is the anchor for
+    /// invalidating a previous connection-test success (Round 4).
+    var draft: ConnectionSetupDraft {
+        didSet { draftRevision += 1 }
+    }
+    private(set) var draftRevision = 0
+    /// Round 4: the staged connection-test state, driven by probe events.
+    private(set) var testState = ConnectionSetupTestState()
+    /// Generation token for test runs. Any new run, cancellation, or stale
+    /// reset bumps it, so a late completion from an obsolete run can never
+    /// overwrite newer state (the same race class Conduit has been burned by
+    /// elsewhere).
+    private(set) var testGeneration = 0
+    /// The draft revision a successful test validated; nil while untested.
+    private(set) var testSucceededAtRevision: Int?
+    /// The login card's in-memory Cloudflare service token, inherited for the
+    /// probe only. Bound to `inheritedCloudflareOriginURL`: it is applied to
+    /// the test ONLY while the draft's address stays same-origin, and is
+    /// never displayed, edited, or persisted by the wizard.
+    private(set) var inheritedCloudflareAccess: CloudflareAccessCredentials?
+    private(set) var inheritedCloudflareOriginURL: String
     private(set) var validationError: ConnectionSetupValidationError?
     private let entry: ConnectionHelpDestination
 
@@ -140,15 +164,22 @@ struct ConnectionSetupFlow: Equatable {
         case .dashboard: return "Step 1 of 3"
         case .credentials: return "Step 2 of 3"
         case .accessMethod: return "Step 3 of 3"
-        case .lan, .tailscale, .reverseProxy, .connectionDetails, .loginCredentials, .review,
+        case .lan, .tailscale, .reverseProxy, .connectionDetails, .loginCredentials, .connectionTest, .review,
              .tlsTroubleshooting, .cloudflareTroubleshooting:
             return nil
         }
     }
 
-    init(entry: ConnectionHelpDestination = .start, draft: ConnectionSetupDraft = ConnectionSetupDraft()) {
+    init(
+        entry: ConnectionHelpDestination = .start,
+        draft: ConnectionSetupDraft = ConnectionSetupDraft(),
+        inheritedCloudflareAccess: CloudflareAccessCredentials? = nil,
+        inheritedCloudflareOriginURL: String = ""
+    ) {
         self.entry = entry
         self.draft = draft
+        self.inheritedCloudflareAccess = inheritedCloudflareAccess
+        self.inheritedCloudflareOriginURL = inheritedCloudflareOriginURL
         path = [Self.entryStep(for: entry)]
     }
 
@@ -240,7 +271,15 @@ struct ConnectionSetupFlow: Equatable {
         guard step == .loginCredentials else { return }
         do {
             _ = try draft.result()
-            advance(to: .review)
+            advance(to: .connectionTest)
+            // A test result validated against an OLDER draft must never
+            // authorize this fresh entry: edits bump the revision, so any
+            // stale success (or leftover failure display) resets to untested.
+            if testSucceededAtRevision != draftRevision {
+                testGeneration += 1
+                testState = ConnectionSetupTestState()
+                testSucceededAtRevision = nil
+            }
         } catch let error as ConnectionSetupValidationError {
             if error != .credentialsRequired {
                 advance(to: draft.usesExistingAddress || draft.accessMethod != nil ? .connectionDetails : .accessMethod)
@@ -249,9 +288,13 @@ struct ConnectionSetupFlow: Equatable {
         } catch { record(error) }
     }
 
-    /// Revalidate at the handoff boundary; producing values has no side effects.
+    /// Revalidate at the handoff boundary; producing values has no side
+    /// effects. Acceptance requires a connection test that validated the
+    /// CURRENT draft — either fully-tested native auth, or the supported
+    /// interactive sign-in outcome after successful dashboard detection. An
+    /// untested configuration is never handed off.
     mutating func complete() -> ConnectionSetupResult? {
-        guard step == .review else { return nil }
+        guard step == .review, canUseSettings else { return nil }
         do { return try draft.result() }
         catch { record(error); return nil }
     }
@@ -271,6 +314,128 @@ struct ConnectionSetupFlow: Equatable {
 
     private mutating func record(_ error: Error) {
         validationError = error as? ConnectionSetupValidationError ?? .policy(.invalidURL)
+    }
+
+    // MARK: - Round 4: staged connection test
+
+    /// True only when every stage succeeded against the CURRENT draft. Any
+    /// draft edit (address, port, scheme, username, password, access method)
+    /// immediately invalidates a prior success — the revision no longer
+    /// matches, so Review can no longer authorize the old result.
+    var hasCurrentSuccessfulTest: Bool {
+        testState.allSucceeded && testSucceededAtRevision == draftRevision
+    }
+
+    /// The same fact as `hasCurrentSuccessfulTest`, named for the auth-mode
+    /// distinction the interactive outcome introduced: native password
+    /// authentication fully succeeded (login + ticket) against the current
+    /// draft. Never true for the interactive outcome — there, the user has
+    /// not authenticated yet.
+    var fullyAuthenticated: Bool { hasCurrentSuccessfulTest }
+
+    /// The supported interactive-auth terminal outcome against the CURRENT
+    /// draft: server and dashboard succeeded and authentication stopped at
+    /// "browser sign-in required". Draft edits invalidate it exactly like a
+    /// native success, and it is deliberately not a failure — so the
+    /// recovery-plan machinery never treats it as one.
+    var hasCurrentInteractiveAuthOutcome: Bool {
+        testState.requiresInteractiveSignIn && testSucceededAtRevision == draftRevision
+    }
+
+    /// Review / "Use These Settings" authorization. Exactly two states
+    /// qualify: fully tested native auth, or interactive sign-in required
+    /// after successful dashboard detection. There is deliberately no
+    /// generic "use without testing" bypass — both qualifying states have
+    /// verified transport, dashboard identity, and the expected auth
+    /// behavior; only the user's own auth step can remain.
+    var canUseSettings: Bool {
+        hasCurrentSuccessfulTest || hasCurrentInteractiveAuthOutcome
+    }
+
+    /// The inherited Cloudflare token, ONLY when it is same-origin with the
+    /// draft's current address. A service token entered for one dashboard is
+    /// never sent to a different origin during the test (Round-3 origin
+    /// safety); the wizard never sends a token it cannot origin-verify.
+    func cloudflareAccessForDraft() -> CloudflareAccessCredentials? {
+        guard let access = inheritedCloudflareAccess, access.isConfigured else { return nil }
+        let origin = inheritedCloudflareOriginURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !origin.isEmpty, let result = try? draft.result() else { return nil }
+        return LoginCloudflareHandoff.sameOrigin(result.serverURL, origin) ? access : nil
+    }
+
+    /// Starts a staged test run: resets prior results and returns the new
+    /// generation token, or nil when a test cannot start. Tests never queue:
+    /// the wrong step or an already-running probe is a deterministic no-op
+    /// (the view also disables the Test button while running).
+    mutating func beginTest() -> Int? {
+        guard step == .connectionTest, !testState.isRunning else { return nil }
+        testGeneration += 1
+        testState = ConnectionSetupTestState()
+        testSucceededAtRevision = nil
+        return testGeneration
+    }
+
+    /// Applies one probe event to the staged state, returning whether it was
+    /// applied. Events from an obsolete generation — superseded by
+    /// cancellation, a newer run, or a draft reset — are ignored, so a late
+    /// completion can never overwrite newer state. A terminal event (full
+    /// native success, or the interactive sign-in outcome) seals the result
+    /// at the current draft revision and advances to Review.
+    @discardableResult
+    mutating func applyTestEvent(_ event: ConnectionSetupTestEvent, generation: Int) -> Bool {
+        guard generation == testGeneration, step == .connectionTest else { return false }
+        testState.apply(event)
+        switch event {
+        case .succeeded(.authentication), .requiresInteractiveSignIn(.authentication):
+            testSucceededAtRevision = draftRevision
+            advance(to: .review)
+        default:
+            break
+        }
+        return true
+    }
+
+    /// Cancels in-flight test work: any running stage resets to untested and
+    /// the generation invalidates so late probe events are dropped. A
+    /// completed success or failure display is left untouched — cancelling
+    /// only retracts unfinished work.
+    mutating func cancelTest() {
+        guard testState.isRunning else { return }
+        testGeneration += 1
+        testState = ConnectionSetupTestState()
+        testSucceededAtRevision = nil
+    }
+
+    /// Failure remediation: leave the test screen for the step that owns the
+    /// failed inputs (connection details for transport/dashboard failures,
+    /// credentials for authentication failures). Falls back to inserting the
+    /// details step after credentials for the short auth-recovery route,
+    /// which enters the wizard past the details screen. Leaving the test
+    /// step also invalidates any in-flight run's generation and resets the
+    /// staged state, so no leftover failure display or terminal outcome can
+    /// outlive the remediation.
+    mutating func editAfterFailedTest(_ target: ConnectionSetupStep) {
+        guard step == .connectionTest,
+              target == .connectionDetails || target == .loginCredentials else { return }
+        if let index = path.lastIndex(of: target) {
+            path.removeSubrange(path.index(after: index)...)
+        } else if let credentialsIndex = path.lastIndex(of: .loginCredentials) {
+            path.removeSubrange(path.index(after: credentialsIndex)...)
+            advance(to: target)
+        } else {
+            advance(to: target)
+        }
+        validationError = nil
+        testGeneration += 1
+        testState = ConnectionSetupTestState()
+        testSucceededAtRevision = nil
+    }
+
+    /// Continue from the test screen to Review when a current qualifying
+    /// test exists (e.g. after returning Back from Review).
+    mutating func continueToReview() {
+        guard step == .connectionTest, canUseSettings else { return }
+        advance(to: .review)
     }
 
     /// Topic switching on the troubleshooting surfaces (TLS ⇄ Cloudflare).

@@ -34,7 +34,11 @@ final class ConnectionSetupFlowTests: XCTestCase {
         flow.draft.username = "eric"
         flow.draft.password = "in-memory-fixture"
         flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionTest, "Credentials now lead to the staged connection test")
+        StagedTestDriver.runSuccessfulTest(on: &flow)
         XCTAssertEqual(flow.step, .review)
+        flow.back()
+        XCTAssertEqual(flow.step, .connectionTest)
         flow.back()
         XCTAssertEqual(flow.step, .loginCredentials)
         XCTAssertTrue(flow.draft.password == "in-memory-fixture")
@@ -43,6 +47,8 @@ final class ConnectionSetupFlowTests: XCTestCase {
         flow.draft.lan.port = "9120"
         flow.submitDetails()
         flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionTest)
+        StagedTestDriver.runSuccessfulTest(on: &flow)
         let result = try XCTUnwrap(flow.complete())
         XCTAssertEqual(result.serverURL, "http://192.168.1.28:9120")
         XCTAssertEqual(result.username, "eric")
@@ -79,7 +85,8 @@ final class ConnectionSetupFlowTests: XCTestCase {
         XCTAssertEqual(flow.step, .loginCredentials)
         flow.draft.password = "updated-fixture"
         flow.submitCredentials()
-        XCTAssertEqual(flow.step, .review)
+        XCTAssertEqual(flow.step, .connectionTest)
+        StagedTestDriver.runSuccessfulTest(on: &flow)
         XCTAssertEqual(try XCTUnwrap(flow.complete()).serverURL, "https://example.com:9443/hermes")
         XCTAssertNil(flow.dashboardAnswer)
         XCTAssertNil(flow.accessMethod)
@@ -97,6 +104,8 @@ final class ConnectionSetupFlowTests: XCTestCase {
         flow.draft.existingServerURL = "https://remote.example/hermes"
         flow.submitDetails()
         flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionTest)
+        StagedTestDriver.runSuccessfulTest(on: &flow)
         XCTAssertEqual(try XCTUnwrap(flow.complete()).serverURL, "https://remote.example/hermes")
     }
 
@@ -360,6 +369,8 @@ final class ConnectionSetupFlowTests: XCTestCase {
         flow.draft.username = "eric"
         flow.draft.password = "fixture"
         flow.submitCredentials()
+        XCTAssertEqual(flow.step, .connectionTest)
+        StagedTestDriver.runSuccessfulTest(on: &flow)
         XCTAssertEqual(flow.step, .review)
 
         guard case .success(let result) = flow.reviewState() else {
@@ -377,8 +388,9 @@ final class ConnectionSetupFlowTests: XCTestCase {
         XCTAssertEqual(error, .credentialsRequired)
         XCTAssertEqual(error.message, ConnectionSetupValidationError.credentialsRequired.message)
         XCTAssertEqual(flow.step, .review)
-        XCTAssertEqual(flow.path.count, 5, "Render-time revalidation must never mutate the path")
+        XCTAssertEqual(flow.path.count, 6, "Render-time revalidation must never mutate the path")
         XCTAssertNil(flow.validationError, "Render-time revalidation is pure and records nothing")
+        XCTAssertFalse(flow.hasCurrentSuccessfulTest, "The edit also invalidates the staged test")
     }
 
     // MARK: - Ask Hermes prompt safety

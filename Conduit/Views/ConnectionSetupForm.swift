@@ -3,6 +3,7 @@ import SwiftUI
 /// Form rendering only: navigation and final validation stay in the flow.
 struct ConnectionSetupForm: View {
     @Binding var flow: ConnectionSetupFlow
+    let onStartTest: () -> Void
     let onComplete: (ConnectionSetupResult) -> Void
     @FocusState private var focusedField: Field?
 
@@ -15,6 +16,7 @@ struct ConnectionSetupForm: View {
                     switch flow.step {
                     case .connectionDetails: details
                     case .loginCredentials: credentials
+                    case .connectionTest: connectionTest
                     case .review: review
                     default: EmptyView()
                     }
@@ -134,17 +136,96 @@ struct ConnectionSetupForm: View {
                     .accessibilityLabel("Dashboard password")
             }.id(Field.password)
             validationNotice
-            nextButton("Review") { flow.submitCredentials() }
+            nextButton("Continue") { flow.submitCredentials() }
+        }
+    }
+
+    // MARK: - Round 4: staged connection test
+
+    @ViewBuilder
+    private var connectionTest: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Test connection").font(.title2.weight(.semibold))
+            Text("Conduit will check the dashboard address and try your credentials now. Nothing is saved, and Conduit won’t connect yet — you’ll confirm everything on the Review screen.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            ConnectionSetupStageList(state: flow.testState)
+
+            if let failure = flow.testState.failedFailure,
+               let stage = flow.testState.failedStage {
+                failedTestRecovery(stage: stage, failure: failure)
+            } else if flow.canUseSettings {
+                // Reachable after returning Back from Review: a passing or
+                // interactive outcome is still current, so continue without
+                // re-testing.
+                Button("Continue") { flow.continueToReview() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.conduitAccent)
+                    .accessibilityIdentifier("setup.test.continue")
+            } else if !flow.testState.isRunning {
+                Button("Test Connection") { onStartTest() }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.conduitAccent)
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("setup.test.run")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func failedTestRecovery(stage: ConnectionSetupTestStage, failure: ConnectionFailure) -> some View {
+        let plan = ConnectionSetupTestRecoveryPlan.plan(for: stage, failure: failure)
+        VStack(alignment: .leading, spacing: 12) {
+            // The stable classified copy — never a raw error string.
+            Text(failure.userMessage)
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("setup.test.failure")
+            HStack(spacing: 16) {
+                Button(plan.remediationLabel) {
+                    flow.editAfterFailedTest(plan.remediationStep)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.conduitAccent)
+                .accessibilityIdentifier(
+                    plan.remediationStep == .connectionDetails ? "setup.test.edit-details" : "setup.test.edit-credentials"
+                )
+                if plan.offersRetry {
+                    Button("Try Again") { onStartTest() }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("setup.test.retry")
+                }
+            }
+            .font(.subheadline.weight(.semibold))
         }
     }
 
     private var review: some View {
         VStack(alignment: .leading, spacing: 20) {
             Text("Review").font(.title2.weight(.semibold))
+            // The staged result that authorizes this screen: a current
+            // successful test or the interactive-auth outcome, shown with
+            // its per-stage outcomes.
+            if flow.canUseSettings {
+                ConnectionSetupStageList(state: flow.testState)
+                if flow.testState.requiresInteractiveSignIn {
+                    // The user has NOT authenticated: say what happens next
+                    // instead of claiming success. Never "Login successful".
+                    Text(ConnectionSetupTestState.interactiveReadyMessage)
+                        .font(.headline)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("setup.test.interactive-ready")
+                } else {
+                    Text(ConnectionSetupTestState.readyMessage)
+                        .font(.headline)
+                        .accessibilityIdentifier("setup.test.ready")
+                }
+            }
             // Revalidate for rendering only: a draft that stopped validating
             // after reaching Review must never silently blank the card.
             reviewContent
-            Text("These settings will fill the login form. You’ll tap Connect there when you’re ready. This assistant has not tested the connection.")
+            Text("These settings will fill the login form. You’ll tap Connect there when you’re ready.")
                 .foregroundStyle(.secondary)
             validationNotice
             Button("Use these settings") {
@@ -177,6 +258,7 @@ struct ConnectionSetupForm: View {
     }
 
     private var reviewIsValid: Bool {
+        guard flow.canUseSettings else { return false }
         if case .success = flow.reviewState() { return true }
         return false
     }
@@ -220,5 +302,83 @@ struct ConnectionSetupForm: View {
     }
     private var portBinding: Binding<String> {
         flow.accessMethod == .lan ? $flow.draft.lan.port : $flow.draft.tailscale.port
+    }
+}
+
+/// The staged connection-test diagnostic list: one row per stage with a
+/// state marker. Meaning is carried by text and VoiceOver state words, never
+/// by color alone.
+struct ConnectionSetupStageList: View {
+    let state: ConnectionSetupTestState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(ConnectionSetupTestStage.allCases) { stage in
+                ConnectionSetupStageRow(
+                    stage: stage,
+                    stageState: state[stage],
+                    label: state.rowLabel(for: stage),
+                    accessibilityLabel: state.accessibilityLabel(for: stage)
+                )
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .conduitGlassSurface(cornerRadius: 18, tint: .conduitAura.opacity(0.06))
+    }
+}
+
+struct ConnectionSetupStageRow: View {
+    let stage: ConnectionSetupTestStage
+    let stageState: ConnectionSetupStageState
+    let label: String
+    let accessibilityLabel: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            marker
+            Text(label)
+                .font(.subheadline.weight(stageState == .pending ? .regular : .semibold))
+            Spacer(minLength: 0)
+        }
+        // One VoiceOver element per stage: the objective name plus a state
+        // word, so success/failure never rides on icon or color alone. The
+        // format comes from the model, which pins it in tests.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityIdentifier("setup.test.stage.\(stage.identifierName)")
+    }
+
+    @ViewBuilder
+    private var marker: some View {
+        switch stageState {
+        case .pending:
+            Image(systemName: "circle")
+                .font(.footnote)
+                .foregroundStyle(.tertiary)
+                .padding(.top, 2)
+        case .running:
+            ProgressView()
+                .controlSize(.small)
+                .padding(.top, 3)
+        case .succeeded:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.footnote)
+                .foregroundStyle(.green)
+                .padding(.top, 2)
+        case .requiresInteractiveSignIn:
+            // An open circle in the accent color: deliberately not a
+            // checkmark (the user has not authenticated) and not an error
+            // mark (nothing failed). Text and VoiceOver carry the meaning.
+            Image(systemName: "circle")
+                .font(.footnote)
+                .foregroundStyle(.conduitAccent)
+                .padding(.top, 2)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .font(.footnote)
+                .foregroundStyle(.red)
+                .padding(.top, 2)
+        }
     }
 }
