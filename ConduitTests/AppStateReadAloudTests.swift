@@ -117,9 +117,13 @@ final class AppStateReadAloudTests: XCTestCase {
         }
         XCTAssertTrue(harness.readAloudPlayback.isPlaying)
 
-        let result = await harness.appState.runVoiceASRTest()
+        // The stop must happen before the transcription test claims capture.
+        // Only the stop contract is asserted here: runVoiceASRTest builds a
+        // real HermesVoiceGateway over the harness's fake bridge, so whether
+        // the transcription itself succeeds depends on live networking and
+        // is not this test's concern.
+        _ = await harness.appState.runVoiceASRTest()
 
-        XCTAssertTrue(result.passed)
         XCTAssertFalse(harness.readAloudPlayback.isPlaying)
         XCTAssertEqual(harness.readAloudController.state, .idle)
     }
