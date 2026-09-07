@@ -4,9 +4,85 @@ import XCTest
 
 @MainActor
 final class HapticsTests: XCTestCase {
-    func testResponseEngineUsesSharedHapticsOnlyPolicy() {
-        XCTAssertTrue(Haptics.enginePolicy.usesSharedAudioSession)
+    func testResponseEngineDoesNotBindSharedAudioSession() {
+        // Ordinary response haptics must not bind AVAudioSession
+        // sharedInstance(): a shared-session-bound CHHapticEngine activates
+        // the app session when it starts, which interrupts external media
+        // (Spotify/Audible) around every text-chat response lifecycle
+        // (issue #140). The engine stays haptics-only.
+        XCTAssertFalse(Haptics.enginePolicy.usesSharedAudioSession)
         XCTAssertTrue(Haptics.enginePolicy.playsHapticsOnly)
+    }
+
+    func testUIKitFallbackResponseStartedDoesNotCreateEngine() {
+        let previousHandler = Haptics.testEmissionHandler
+        let previousSuppressesHardware = Haptics.testSuppressesHardware
+        var events: [Haptics.Event] = []
+        defer {
+            Haptics.testEmissionHandler = previousHandler
+            Haptics.testSuppressesHardware = previousSuppressesHardware
+        }
+
+        Haptics.testEmissionHandler = { events.append($0) }
+        Haptics.testSuppressesHardware = false
+        Haptics.coreHapticsEngineCreationCount = 0
+
+        // While a voice session may hold the audio session, response haptics
+        // degrade to the UIKit fallback pattern and must not create — or
+        // start — a Core Haptics engine at all.
+        Haptics.responseStarted(coreHapticsAllowed: false)
+
+        XCTAssertEqual(events, [.responseStarted])
+        XCTAssertEqual(
+            Haptics.coreHapticsEngineCreationCount, 0,
+            "degraded response haptics must not create a Core Haptics engine"
+        )
+    }
+
+    func testUnsuppressedResponseStartedAttemptsCoreHapticsEngine() {
+        let previousHandler = Haptics.testEmissionHandler
+        let previousSuppressesHardware = Haptics.testSuppressesHardware
+        var events: [Haptics.Event] = []
+        defer {
+            Haptics.testEmissionHandler = previousHandler
+            Haptics.testSuppressesHardware = previousSuppressesHardware
+        }
+
+        Haptics.testEmissionHandler = { events.append($0) }
+        Haptics.testSuppressesHardware = false
+        Haptics.coreHapticsEngineCreationCount = 0
+
+        Haptics.responseStarted(coreHapticsAllowed: true)
+
+        XCTAssertEqual(events, [.responseStarted])
+        XCTAssertEqual(
+            Haptics.coreHapticsEngineCreationCount, 1,
+            "unsuppressed response haptics attempt the custom Core Haptics pattern"
+        )
+    }
+
+    func testHapticsDisabledPreventsEngineCreation() {
+        let defaults = UserDefaults.standard
+        let previousValue = defaults.object(forKey: Haptics.preferenceKey)
+        defer {
+            if let previousValue {
+                defaults.set(previousValue, forKey: Haptics.preferenceKey)
+            } else {
+                defaults.removeObject(forKey: Haptics.preferenceKey)
+            }
+        }
+
+        Haptics.enabled = false
+        Haptics.coreHapticsEngineCreationCount = 0
+
+        Haptics.responseStarted(coreHapticsAllowed: true)
+        Haptics.toolStarted()
+        Haptics.responseConcluded()
+
+        XCTAssertEqual(
+            Haptics.coreHapticsEngineCreationCount, 0,
+            "a disabled haptics preference must never create Core Haptics resources"
+        )
     }
 
     func testEngineStopPolicyDiscardsOnlyRecoveryCriticalStops() {
