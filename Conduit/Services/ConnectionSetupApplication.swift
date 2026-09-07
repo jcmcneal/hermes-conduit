@@ -74,11 +74,12 @@ extension ConnectionSetupApplication {
         savedCredentials: DashboardCredentials?,
         savedCloudflareAccess: CloudflareAccessCredentials?
     ) -> ConnectionSetupApplication {
-        let newURL = result.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let currentURL = currentDashboardURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Both addresses are policy-normalized upstream (the wizard's result
-        // by ConnectionSetupAddressBuilder, the current one at save time), so
-        // string equality is exact equality of scheme, host, port, and path.
+        // Normalize both sides before comparing so a non-canonical spelling
+        // of an unchanged address can never plan a spurious rewrite.
+        let newURL = (try? ConnectionURLPolicy.normalizedBaseURL(result.serverURL))
+            ?? result.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentURL = (try? ConnectionURLPolicy.normalizedBaseURL(currentDashboardURL))
+            ?? currentDashboardURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let urlChanged = newURL != currentURL
 
         let hasResultCredentials =
@@ -152,7 +153,8 @@ enum ConnectionSetupSeeding {
         // that fails normalization compares trimmed-raw (fail closed).
         let wanted = (try? ConnectionURLPolicy.normalizedBaseURL(dashboardURL))
             ?? dashboardURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let stored = (try? ConnectionURLPolicy.normalizedBaseURL(saved.baseURL)) ?? saved.baseURL
+        let stored = (try? ConnectionURLPolicy.normalizedBaseURL(saved.baseURL))
+            ?? saved.baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard stored == wanted else { return nil }
         return (saved.username, saved.requiresFaceID ? "" : saved.password)
     }
