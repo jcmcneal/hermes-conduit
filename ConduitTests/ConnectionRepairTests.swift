@@ -85,7 +85,7 @@ final class ConnectionRepairTests: XCTestCase {
     }
 
     private func candidate(
-        serverURL: String = failedURL,
+        serverURL: String = ConnectionRepairTests.failedURL,
         ticket: String,
         revision: Int,
         generation: Int
@@ -102,7 +102,7 @@ final class ConnectionRepairTests: XCTestCase {
 
     func testRepairRoutingStartsNearTheClassifiedProblem() {
         let draft = ConnectionSetupDraft(
-            existingServerURL: failedURL, username: "u", password: "p"
+            existingServerURL: ConnectionRepairTests.failedURL, username: "u", password: "p"
         )
         XCTAssertEqual(
             ConnectionSetupFlow.initialPath(for: .repairConnection, draft: draft, repairFailure: .authenticationRejected),
@@ -141,7 +141,7 @@ final class ConnectionRepairTests: XCTestCase {
     }
 
     func testRepairEntryAlwaysKeepsTheAddressOneBackStepAway() throws {
-        let draft = ConnectionSetupDraft(existingServerURL: failedURL, username: "u", password: "p")
+        let draft = ConnectionSetupDraft(existingServerURL: ConnectionRepairTests.failedURL, username: "u", password: "p")
         var flow = ConnectionSetupFlow(
             entry: .repairConnection,
             draft: draft,
@@ -170,7 +170,7 @@ final class ConnectionRepairTests: XCTestCase {
         // full test runs.
         var flow = ConnectionSetupFlow(
             entry: .repairConnection,
-            draft: ConnectionSetupDraft(existingServerURL: failedURL)
+            draft: ConnectionSetupDraft(existingServerURL: ConnectionRepairTests.failedURL)
         )
         XCTAssertEqual(flow.step, .connectionTest)
         flow.back()
@@ -201,7 +201,7 @@ final class ConnectionRepairTests: XCTestCase {
 
     func testCandidateLifecycleTracksTheFlowRevisionAndGeneration() throws {
         let seed = ConnectionSetupDraft(
-            existingServerURL: failedURL, username: "u", password: "p"
+            existingServerURL: ConnectionRepairTests.failedURL, username: "u", password: "p"
         )
         var flow = ConnectionSetupFlow(entry: .repairConnection, draft: seed)
         XCTAssertEqual(flow.step, .connectionDetails)
@@ -263,7 +263,7 @@ final class ConnectionRepairTests: XCTestCase {
 
     func testInvalidateTestForRepairRetryRequiresAFreshTest() throws {
         let seed = ConnectionSetupDraft(
-            existingServerURL: failedURL, username: "u", password: "p"
+            existingServerURL: ConnectionRepairTests.failedURL, username: "u", password: "p"
         )
         var flow = ConnectionSetupFlow(entry: .repairConnection, draft: seed)
         flow.submitDetails()
@@ -298,7 +298,7 @@ final class ConnectionRepairTests: XCTestCase {
             reconnectScheduler: scheduler.schedule(after:operation:),
             reconnectExecutor: { purpose in reconnectSpy.purposes.append(purpose) }
         )
-        appState.connection = HermesConnection(baseUrl: failedURL, ticket: "failed-ticket")
+        appState.connection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "failed-ticket")
 
         // The existing system schedules its automatic retry.
         appState.scheduleReconnect(purpose: .preserveCurrent)
@@ -307,7 +307,7 @@ final class ConnectionRepairTests: XCTestCase {
         // Entering Repair hands recovery authority to the user: the loop
         // stops, and running the (cancelled) schedule executes nothing.
         let context = appState.beginConnectionRepair()
-        XCTAssertEqual(context?.draft.existingServerURL, failedURL)
+        XCTAssertEqual(context?.draft.existingServerURL, ConnectionRepairTests.failedURL)
         XCTAssertEqual(scheduler.pendingCount, 0)
         await scheduler.runAll()
         XCTAssertEqual(reconnectSpy.purposes, [], "No background connection attempt may follow repair entry")
@@ -325,7 +325,7 @@ final class ConnectionRepairTests: XCTestCase {
         let harness = makeHarness(lifecycleOperations: sessionPreservingFakes(connectClient: { _ in
             connectCount.value += 1
         }))
-        let failedConnection = HermesConnection(baseUrl: failedURL, ticket: "stale-ticket")
+        let failedConnection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
         harness.appState.connection = failedConnection
         harness.appState.client = HermesClient(connection: failedConnection, profile: "default")
         harness.appState.activeSessionId = "stored-a"
@@ -348,8 +348,8 @@ final class ConnectionRepairTests: XCTestCase {
             connectClient: { _ in },
             loadCatalog: { _, _ in [self.session("stored-new")] }
         ))
-        harness.appState.connection = HermesConnection(baseUrl: failedURL, ticket: "stale-ticket")
-        harness.appState.client = HermesClient(connection: HermesConnection(baseUrl: failedURL, ticket: "t"), profile: "default")
+        harness.appState.connection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
+        harness.appState.client = HermesClient(connection: HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "t"), profile: "default")
         harness.appState.activeSessionId = "old-session"
 
         let outcome = await harness.appState.performConnectionRepair(.native(candidate(
@@ -416,7 +416,7 @@ final class ConnectionRepairTests: XCTestCase {
             loadProfileDisplayPreferences: {},
             loadSlashCommands: {}
         ))
-        let failedConnection = HermesConnection(baseUrl: failedURL, ticket: "stale-ticket")
+        let failedConnection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
         harness.appState.connection = failedConnection
         harness.appState.client = HermesClient(connection: failedConnection, profile: "default")
         harness.appState.activeSessionId = "stored-a"
