@@ -80,6 +80,17 @@ struct NativeAuthConnection {
     }
 }
 
+#if DEBUG
+extension NativeAuthConnection {
+    /// Test/UI-test construction only: an in-memory transaction with an
+    /// empty (inert) cookie set, for repair-flow seams that script a
+    /// validated test without a real login. Never shipped.
+    static func debugStub(ticket: String) -> NativeAuthConnection {
+        NativeAuthConnection(ticket: ticket, cookies: [])
+    }
+}
+#endif
+
 /// What provider discovery learned about a dashboard's sign-in modes. The
 /// two zero-provider shapes are deliberately different outcomes: an
 /// unauthenticated redirect to a sign-in page is the NORMAL interactive-auth
