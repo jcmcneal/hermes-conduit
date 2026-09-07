@@ -255,6 +255,7 @@ private final class MockVoiceCapture: AudioCaptureService {
 @MainActor
 private final class MockVoicePlayback: SpeechPlaybackService {
     var isPlaying = false
+    var ownershipIntent: VoiceAudioIntent = .standalonePlayback
     private(set) var stopCount = 0
 
     func start(sampleRate: Double) throws { isPlaying = true }

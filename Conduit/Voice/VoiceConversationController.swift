@@ -163,6 +163,12 @@ final class VoiceConversationController: ObservableObject {
         do {
             try capture.resume()
             isMicrophonePaused = false
+            // Pause is a real resource pause, so resume opens a fresh
+            // listening window: speech timestamps from before the pause must
+            // not immediately finish an utterance or idle-pause again.
+            utteranceStartedAt = Date()
+            lastSpeechAt = nil
+            bargeInStartedAt = nil
         } catch {
             state = .failed(error.localizedDescription)
         }
@@ -262,6 +268,9 @@ final class VoiceConversationController: ObservableObject {
         }
         isVoiceSessionActive = true
         isProviderTestRunning = true
+        // The TTS provider test runs outside a voice conversation, so its
+        // playback must claim standalone (output-only) session ownership.
+        playback.ownershipIntent = .standalonePlayback
         let generation = operationGeneration
         defer {
             speechStream?.cancel()
@@ -584,6 +593,9 @@ final class VoiceConversationController: ObservableObject {
         do {
             guard isSpeechDrainCurrent(operation: operation, revision: revision), let gateway else { return }
             if speechStream == nil && !speechDeltas.isEmpty {
+                // Assistant speech during a live voice conversation joins the
+                // capture-owned session instead of reconfiguring it.
+                playback.ownershipIntent = .conversationPlayback
                 let openedStream = try await gateway.openSpeechStream(
                     onStart: { [weak self] rate in
                         guard let self,
