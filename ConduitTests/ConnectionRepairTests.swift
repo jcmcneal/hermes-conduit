@@ -335,25 +335,25 @@ final class ConnectionRepairTests: XCTestCase {
         let scheduler = RepairControlledReconnectScheduler()
         let harness = makeHarness(
             lifecycleOperations: ChatResumeLifecycleOperations(
-            connectClient: { _ in },
-            loadCatalog: { _, _ in [self.session("stored-a")] },
-            mintTicket: { _ in
-                mintAttempts += 1
-                if mintAttempts == 1 {
-                    throw URLError(.cannotFindHost)
-                }
-                return "fresh-ticket"
-            },
-            openSession: { _, id, _ in
-                SessionResumeResult(sessionId: id, messages: [],
-                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
-            },
-            refreshContext: { _, _ in },
-            loadProfiles: {},
-            loadBusyInputMode: { _ in },
-            loadProfileDisplayPreferences: {},
-            loadSlashCommands: {}
-        ),
+                connectClient: { _ in },
+                loadCatalog: { _, _ in [self.session("stored-a")] },
+                mintTicket: { _ in
+                    mintAttempts += 1
+                    if mintAttempts == 1 {
+                        throw URLError(.cannotFindHost)
+                    }
+                    return "fresh-ticket"
+                },
+                openSession: { _, id, _ in
+                    SessionResumeResult(sessionId: id, messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+                },
+                refreshContext: { _, _ in },
+                loadProfiles: {},
+                loadBusyInputMode: { _ in },
+                loadProfileDisplayPreferences: {},
+                loadSlashCommands: {}
+            ),
             reconnectScheduler: scheduler.schedule(after:operation:)
         )
         harness.appState.connection = HermesConnection(baseUrl: ConnectionRepairTests.failedURL, ticket: "stale-ticket")
