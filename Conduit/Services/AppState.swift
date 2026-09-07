@@ -813,6 +813,12 @@ final class AppState: ObservableObject {
     /// rather than kept.
     private var readAloudGatewayBridge: DashboardTicketBridge?
 
+    /// Test-only seam: when set, the voice capability refresh requests
+    /// through it instead of the dashboard bridge, keeping
+    /// `refreshVoiceCapabilities` hermetic in tests. Mirrors the
+    /// `installVoiceCapabilityStateForTesting` precedent.
+    var voiceCapabilityRequesterForTesting: VoiceConfigurationRequesting?
+
     // MARK: - Cron
 
     @Published var cronJobs: [CronJob] = []
@@ -12707,7 +12713,10 @@ final class AppState: ObservableObject {
         installVoiceAssistantObserverIfNeeded()
         isVoiceEnabled = defaults.bool(forKey: voiceEnabledPreferenceKey(profile: profile))
         appleSpeechAvailability = AppleOnDeviceSpeechTranscriber.currentAvailability()
-        let service = HermesVoiceConfigurationService(bridge: bridge, profile: profile)
+        let service = HermesVoiceConfigurationService(
+            requester: voiceCapabilityRequesterForTesting ?? bridge,
+            profile: profile
+        )
         await service.reload()
         guard profile == activeProfile, bridge === dashboardTicketBridge else { return }
         voiceCapabilitySnapshot = service.snapshot.capability
@@ -12823,6 +12832,11 @@ final class AppState: ObservableObject {
     }
 
     func runVoiceASRTest() async -> VoiceProviderTestResult {
+        // Ownership first: a playing read aloud must release its standalone
+        // lease before anything else in this flow — the capability refresh
+        // and the capture test itself — can claim conversation-capture
+        // ownership or await the network.
+        messageReadAloudController.stop()
         await refreshVoiceCapabilities()
         guard isVoiceEnabled else {
             return .failure("Enable voice for this profile before running a speech-to-text test.")

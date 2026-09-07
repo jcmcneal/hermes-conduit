@@ -128,6 +128,9 @@ final class MessageReadAloudController: ObservableObject {
             return
         }
         do {
+            // Pin output-only ownership per operation rather than inheriting
+            // whatever intent a shared playback instance last claimed.
+            playback.ownershipIntent = .standalonePlayback
             let stream = try await gateway.openSpeechStream(
                 onStart: { [weak self] sampleRate in
                     guard let self, self.isCurrent(generation) else { return }

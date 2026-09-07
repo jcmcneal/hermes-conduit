@@ -703,6 +703,78 @@ final class VoiceConversationControllerTests: XCTestCase {
 
         XCTAssertEqual(controller.state, .thinking)
     }
+
+    func testResumeAfterPauseResetsSpeechTimingSoStaleSilenceCannotFinishUtterance() async {
+        let capture = MockCapture(permissionGranted: true)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: MockGateway(),
+            submit: { _ in true },
+            interrupt: {}
+        )
+
+        await controller.startListening()
+        let speechStart = Date()
+        controller.ingestAudioLevel(0.5, at: speechStart)
+        controller.pauseMicrophone()
+        await controller.resumeMicrophone()
+
+        // The pre-pause speech timestamp is stale by more than the trailing
+        // silence window. Resume is a fresh listening window, so a silent
+        // level event right after resume must not finish an utterance.
+        let resumeDate = Date()
+        controller.ingestAudioLevel(0.0, at: resumeDate.addingTimeInterval(10))
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.finishUtteranceCount, 0)
+
+        // A fresh utterance still finishes normally on trailing silence.
+        controller.ingestAudioLevel(0.5, at: resumeDate.addingTimeInterval(2))
+        controller.ingestAudioLevel(0.0, at: resumeDate.addingTimeInterval(3.3))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(controller.state, .thinking)
+        XCTAssertEqual(capture.finishUtteranceCount, 1)
+    }
+
+    func testSpeechTestClaimsStandalonePlaybackOwnership() async {
+        let playback = MockPlayback()
+        let controller = VoiceConversationController(
+            capture: MockCapture(permissionGranted: true),
+            playback: playback,
+            gateway: MockGateway(startsPlaybackOnOpen: true),
+            submit: { _ in true },
+            interrupt: {}
+        )
+
+        let result = await controller.runSpeechTest(text: "test")
+
+        XCTAssertTrue(result.passed)
+        XCTAssertEqual(playback.intentAtLastStart, .standalonePlayback)
+    }
+
+    func testConversationSpeechClaimsConversationPlaybackOwnership() async {
+        let playback = MockPlayback()
+        let controller = VoiceConversationController(
+            capture: MockCapture(permissionGranted: true),
+            playback: playback,
+            gateway: MockGateway(startsPlaybackOnOpen: true),
+            submit: { _ in true },
+            interrupt: {}
+        )
+        controller.beginVoiceTurn(sessionID: "session")
+        await controller.startListening()
+        let utteranceStart = Date()
+        controller.ingestAudioLevel(0.1, at: utteranceStart)
+        controller.ingestAudioLevel(0, at: utteranceStart.addingTimeInterval(1.3))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        controller.receiveAssistantEvent(.started(sessionID: "session"))
+        controller.receiveAssistantEvent(.delta(sessionID: "session", text: "One turn."))
+        controller.receiveAssistantEvent(.completed(sessionID: "session", content: "One turn."))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(playback.intentAtLastStart, .conversationPlayback)
+    }
 }
 
 @MainActor
@@ -716,6 +788,7 @@ private final class MockCapture: AudioCaptureService {
     var didBeginMonitoring = false
     var didPause = false
     var resumeCount = 0
+    private(set) var finishUtteranceCount = 0
 
     init(permissionGranted: Bool, startError: Error? = nil) {
         self.permissionGranted = permissionGranted
@@ -734,7 +807,8 @@ private final class MockCapture: AudioCaptureService {
     func pause() { didPause = true }
     func resume() throws { resumeCount += 1 }
     func finishUtterance() throws -> VoiceCapturedAudio {
-        VoiceCapturedAudio(wavData: Data([1]), pcm16Data: Data([1, 0]), sampleRate: 16_000, duration: 0.01)
+        finishUtteranceCount += 1
+        return VoiceCapturedAudio(wavData: Data([1]), pcm16Data: Data([1, 0]), sampleRate: 16_000, duration: 0.01)
     }
     func stop() {}
     func emit(_ event: VoiceCaptureEvent) { continuation?.yield(event) }
@@ -743,9 +817,19 @@ private final class MockCapture: AudioCaptureService {
 @MainActor
 private final class MockPlayback: SpeechPlaybackService {
     var isPlaying = false
-    func start(sampleRate: Double) throws { isPlaying = true }
+    var ownershipIntent: VoiceAudioIntent = .standalonePlayback
+    /// The ownership intent in force when playback last started, so tests can
+    /// assert which session policy a flow claimed.
+    private(set) var intentAtLastStart: VoiceAudioIntent?
+    func start(sampleRate: Double) throws {
+        intentAtLastStart = ownershipIntent
+        isPlaying = true
+    }
     func enqueuePCM16(_ data: Data, sampleRate: Double) throws -> Int { data.count - (data.count % 2) }
-    func playEncodedAudioData(_ data: Data) throws { isPlaying = true }
+    func playEncodedAudioData(_ data: Data) throws {
+        intentAtLastStart = ownershipIntent
+        isPlaying = true
+    }
     func finish() throws {}
     func drain() async { isPlaying = false }
     func stop() { isPlaying = false }

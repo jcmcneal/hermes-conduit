@@ -436,6 +436,7 @@ private final class MockReadAloudPlayback: SpeechPlaybackService {
     private(set) var drainCount = 0
     private(set) var stopCount = 0
     var isPlaying = false
+    var ownershipIntent: VoiceAudioIntent = .standalonePlayback
     var startError: Error?
     var enqueueError: Error?
     /// When set, drain() suspends until stop() releases it — models audio

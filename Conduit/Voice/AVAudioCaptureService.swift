@@ -19,6 +19,7 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
 
     private let engine = AVAudioEngine()
     private let session = AVAudioSession.sharedInstance()
+    private let coordinator: VoiceAudioSessionCoordinator
     /// AVAudioEngine and AVAudioConverter use deinterleaved Float32 as their
     /// canonical PCM representation. Quantize to PCM16 only after resampling.
     private let outputFormat = AVAudioFormat(
@@ -34,9 +35,18 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
     private var shouldKeepEngineRunning = false
     private var lastCaptureFailure: String?
     private var continuation: AsyncStream<VoiceCaptureEvent>.Continuation?
+    /// Capture holds one lease for the whole capture window (listening,
+    /// barge-in monitoring) and releases it on stop — or on pause, which is a
+    /// real resource pause: engine, tap, and session ownership all go away
+    /// while the Voice Conversation stays logically open.
+    private var captureLease: VoiceAudioLease?
     let events: AsyncStream<VoiceCaptureEvent>
 
-    override init() {
+    /// Optional injection instead of a default `.shared` argument: default
+    /// parameter values are evaluated in a nonisolated context, which cannot
+    /// read the MainActor-isolated singleton.
+    init(coordinator: VoiceAudioSessionCoordinator? = nil) {
+        self.coordinator = coordinator ?? .shared
         var capturedContinuation: AsyncStream<VoiceCaptureEvent>.Continuation?
         events = AsyncStream { capturedContinuation = $0 }
         continuation = capturedContinuation
@@ -87,6 +97,7 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
     }
 
     func beginBargeInMonitoring() throws {
+        guard !paused else { return }
         do {
             try startCaptureIfNeeded()
         } catch {
@@ -98,7 +109,18 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
         shouldKeepEngineRunning = true
     }
 
-    func pause() { paused = true }
+    /// A real resource pause: the engine, tap, converter, and capture's
+    /// audio-session lease are released so microphone hardware and the
+    /// system session are not held while the user believes the mic is
+    /// paused. `resume()` reacquires everything. The Voice Conversation
+    /// stays logically open across the pause.
+    func pause() {
+        guard !paused else { return }
+        paused = true
+        shouldKeepEngineRunning = false
+        teardownRendering()
+        releaseLease()
+    }
 
     func resume() throws {
         do {
@@ -133,26 +155,18 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
         activelyRecording = false
         paused = false
         shouldKeepEngineRunning = false
-        let input = engine.inputNode
-        input.removeTap(onBus: 0)
-        engine.stop()
-        converter = nil
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        teardownRendering()
+        releaseLease()
     }
 
     private func startCaptureIfNeeded() throws {
-        try configureSession()
+        if captureLease == nil {
+            // Acquiring configures the conversation policy (category/mode/
+            // options) and activates the session through the coordinator, so
+            // concurrent owners can never fight over the singleton.
+            captureLease = try coordinator.acquire(.conversationCapture)
+        }
         if !engine.isRunning { try startEngine() }
-    }
-
-    private func configureSession() throws {
-        let configuration = VoiceAudioSessionConfiguration.capture
-        try session.setCategory(
-            configuration.category,
-            mode: configuration.mode,
-            options: configuration.options
-        )
-        try session.setActive(true)
     }
 
     private func handleStartupFailure(_ error: Error, stage: String) {
@@ -201,6 +215,19 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
         }
         engine.prepare()
         try engine.start()
+    }
+
+    private func teardownRendering() {
+        let input = engine.inputNode
+        input.removeTap(onBus: 0)
+        engine.stop()
+        converter = nil
+    }
+
+    private func releaseLease() {
+        guard let lease = captureLease else { return }
+        captureLease = nil
+        coordinator.release(lease)
     }
 
     private func consume(_ buffer: AVAudioPCMBuffer) {
@@ -260,22 +287,34 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
         }
     }
 
+    /// Hopped through `Task { @MainActor }`: session notifications are not
+    /// guaranteed to arrive on the main thread, and stop() now releases the
+    /// capture lease through the MainActor coordinator.
     @objc private func handleInterruption(_ notification: Notification) {
         guard let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
-        if type == .began {
-            stop()
-            continuation?.yield(.interrupted)
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue), type == .began else { return }
+        Task { @MainActor [weak self] in
+            self?.stop()
+            self?.continuation?.yield(.interrupted)
         }
     }
 
+    /// Hopped through `Task { @MainActor }` for the same reason as
+    /// `handleInterruption`; `coordinator.reassert()` is MainActor-isolated.
     @objc private func handleRouteChange(_ notification: Notification) {
+        Task { @MainActor [weak self] in self?.handleRouteChangeOnMain() }
+    }
+
+    private func handleRouteChangeOnMain() {
         // A nil-format tap follows the input node's actual route format. Rebuild
         // the converter lazily without churning an already-running engine.
         converter = nil
         if shouldKeepEngineRunning, !engine.isRunning {
             do {
-                try configureSession()
+                // The lease is still held, but the system may have torn the
+                // session down with the old route: reapply the conversation
+                // policy before restarting the engine.
+                try coordinator.reassert()
                 try startEngine()
             } catch {
                 handleStartupFailure(error, stage: "routeChange")

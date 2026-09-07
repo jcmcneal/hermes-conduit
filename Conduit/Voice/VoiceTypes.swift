@@ -201,6 +201,10 @@ protocol DeviceSpeechTranscriptionService: AnyObject {
 @MainActor
 protocol SpeechPlaybackService: AnyObject {
     var isPlaying: Bool { get }
+    /// Which audio-session ownership playback claims while it plays.
+    /// Conversation playback joins the capture-owned session; standalone
+    /// flows (Read Aloud, provider tests) own the session alone.
+    var ownershipIntent: VoiceAudioIntent { get set }
     func start(sampleRate: Double) throws
     func enqueuePCM16(_ data: Data, sampleRate: Double) throws -> Int
     func playEncodedAudioData(_ data: Data) throws
