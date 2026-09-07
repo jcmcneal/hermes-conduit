@@ -129,6 +129,29 @@ the rest of CI v2.
    legitimate when every isolated class completed successfully; any
    undiagnosed class fails the lane so unexecuted tests stay visible.
 
+### Destination readiness gate
+
+The build job pins one known simulator name (`SIMULATOR_NAME`, no `simctl`
+enumeration on the happy path). Fresh hosted runners occasionally reach the
+build step before CoreSimulator has settled its device pairs; xcodebuild then
+fails destination resolution with an **empty** available-destinations list
+("Unable to find a device matching the provided destination specifier") and
+every downstream lane is skipped. Before invoking xcodebuild,
+`ci-build-for-testing.sh` now runs `wait_for_destination_device`
+(`ci-lib.sh`): a bounded poll (default 180 s, `DESTINATION_SETTLE_TIMEOUT_S`)
+of `simctl list devices available` that absorbs the settlement race and, if
+the pinned device never appears, fails fast with the full device/runtime
+inventory instead of a misleading xcodebuild error. The gate never
+substitutes another device for the pinned name - an image refresh that
+renames devices still fails, with an explicit diagnostic. The lookup behind
+the gate (`simulator_udid`) is also OS-qualified: when `SIMULATOR_OS` is
+set, only a device with the pinned name on that exact runtime satisfies it
+(exact numeric-component match, so `26.1` never matches `26.10`), with no
+fallback to another runtime - the resolved UDID always belongs to the
+destination xcodebuild will use. `SIMULATOR_OS` must be numeric dotted
+components (e.g. `26.0`); xcodebuild-only values such as `latest` are not
+supported by the pin and fail the gate.
+
 ## Watchdogs
 
 Unit lanes: `timeout = max(min_timeout, ceil(predicted x 2.5))` with a 600 s

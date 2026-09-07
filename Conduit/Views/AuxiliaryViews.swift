@@ -589,6 +589,24 @@ private struct SettingsHome: View {
     let snapshot: SettingsSnapshot
     @Binding var path: [SettingsDestination]
     @EnvironmentObject private var appState: AppState
+    /// Round 5: the Settings entry into the existing Connection Setup
+    /// assistant, seeded from the current configuration.
+    @State private var connectionSetupSeed: ConnectionSetupSeed?
+    /// Set by the wizard's completion when the applied plan changes the
+    /// saved configuration; surfaced as an alert only after the wizard sheet
+    /// has dismissed (one presentation context at a time).
+    @State private var pendingAppliedNotice = false
+    @State private var appliedConnectionNotice = false
+
+    /// Per-presentation seed for the wizard, built once when the row is
+    /// tapped so the Keychain reads stay off the render path.
+    private struct ConnectionSetupSeed: Identifiable {
+        let url: String
+        let username: String
+        let password: String
+        let cloudflareAccess: CloudflareAccessCredentials?
+        var id: String { url }
+    }
 
     var body: some View {
         ZStack {
@@ -607,7 +625,23 @@ private struct SettingsHome: View {
                         settingsLink(.capabilities, icon: "puzzlepiece.extension", title: "Capabilities", detail: "Skills, toolsets, and categories")
                     }
                     homeSection("Connection", tint: .conduitAura) {
-                        settingsLink(.gateway, icon: "radio", title: "Gateway", detail: snapshot.server ?? "Not connected")
+                        settingsLink(.gateway, icon: "radio", title: "Gateway", detail: snapshot.server ?? "Not connected", identifier: "settings.gateway")
+                        settingsActionRow(
+                            icon: "checkmark.circle",
+                            title: "Connection Setup",
+                            detail: "Test, troubleshoot, or change your connection",
+                            identifier: "settings.connection-setup"
+                        ) {
+                            let seedURL = currentDashboardURL
+                            let saved = KeychainHelper.loadCredentials()
+                            let seeded = ConnectionSetupSeeding.wizardCredentials(for: seedURL, saved: saved)
+                            connectionSetupSeed = ConnectionSetupSeed(
+                                url: seedURL,
+                                username: seeded?.username ?? "",
+                                password: seeded?.password ?? "",
+                                cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seedURL)
+                            )
+                        }
                     }
                     homeSection("On this device", tint: .conduitAccent) {
                         settingsLink(.appearance, icon: "circle.lefthalf.filled", title: "Appearance", detail: "Theme and interface preferences")
@@ -623,6 +657,49 @@ private struct SettingsHome: View {
                 .padding(16)
             }
         }
+        .sheet(item: $connectionSetupSeed, onDismiss: {
+            guard pendingAppliedNotice else { return }
+            pendingAppliedNotice = false
+            appliedConnectionNotice = true
+        }) { seed in
+            ConnectionSetupView(
+                initialDestination: .currentConnection,
+                initialDraft: ConnectionSetupDraft(
+                    existingServerURL: seed.url,
+                    username: seed.username,
+                    password: seed.password
+                ),
+                // The probe may reuse this same-origin service token; the
+                // wizard re-verifies the origin itself before sending it and
+                // never displays, edits, or persists it.
+                initialCloudflareAccess: seed.cloudflareAccess,
+                initialCloudflareOriginURL: seed.url
+            ) { result in
+                // Reload the saved state at apply time: the plan must decide
+                // against what exists NOW, not what existed when the sheet
+                // was seeded.
+                let plan = ConnectionSetupApplication.plan(
+                    result: result,
+                    currentDashboardURL: seed.url,
+                    savedCredentials: KeychainHelper.loadCredentials(),
+                    savedCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seed.url)
+                )
+                plan.perform(appState: appState)
+                pendingAppliedNotice = !plan.isEmpty
+            }
+        }
+        .alert("Settings applied", isPresented: $appliedConnectionNotice) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Saved for your next reconnect. Your current session stays connected.")
+        }
+    }
+
+    /// The active connection's address — the live connection when one exists,
+    /// else the last configured dashboard. Seeding reads it; applying a
+    /// tested result never writes to the live session itself.
+    private var currentDashboardURL: String {
+        appState.connection?.baseUrl ?? appState.lastDashboardURL
     }
 
     private var profileDisplayName: String {
@@ -633,26 +710,43 @@ private struct SettingsHome: View {
         ConduitSettingsSection(title: title, symbol: title == "Profile" ? "person.crop.circle" : "gearshape.2", tint: tint, content: content)
     }
 
-    private func settingsLink(_ destination: SettingsDestination, icon: String, title: String, detail: String) -> some View {
+    private func settingsLink(_ destination: SettingsDestination, icon: String, title: String, detail: String, identifier: String = "") -> some View {
         Button {
             Haptics.selection()
             path.append(destination)
         } label: {
-            HStack(spacing: 12) {
-                Image(systemName: icon).font(.subheadline.weight(.semibold)).foregroundStyle(.conduitAccent).frame(width: 25)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.subheadline.weight(.semibold))
-                    Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                }
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.vertical, 5)
-            .contentShape(Rectangle())
+            settingsRowLabel(icon: icon, title: title, detail: detail)
         }
         .buttonStyle(.plain)
         .accessibilityHint(detail)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func settingsActionRow(icon: String, title: String, detail: String, identifier: String, action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.selection()
+            action()
+        } label: {
+            settingsRowLabel(icon: icon, title: title, detail: detail)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier(identifier)
+        .accessibilityHint(detail)
+    }
+
+    private func settingsRowLabel(icon: String, title: String, detail: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).font(.subheadline.weight(.semibold)).foregroundStyle(.conduitAccent).frame(width: 25)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.subheadline.weight(.semibold))
+                Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+            }
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 5)
+        .contentShape(Rectangle())
     }
 }
 
@@ -1371,9 +1465,11 @@ private struct AppearanceSettingsDetail: View {
     @EnvironmentObject private var appState: AppState
     let theme: ThemePreference
     let saveTheme: (ThemePreference) -> Void
+    @AppStorage("conduit.ipadPersistentSidebar") private var iPadPersistentSidebar = false
     @State private var selected: ThemePreference
     @State private var isChangingIcon = false
     init(theme: ThemePreference, saveTheme: @escaping (ThemePreference) -> Void) { self.theme = theme; self.saveTheme = saveTheme; _selected = State(initialValue: theme) }
+    private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
     var body: some View {
         SettingsDetailContainer {
             ConduitSettingsSection(title: "Theme", symbol: "circle.lefthalf.filled", tint: .conduitAccent) {
@@ -1426,6 +1522,16 @@ private struct AppearanceSettingsDetail: View {
                         .disabled(isChangingIcon)
                         .accessibilityLabel("Use \(choice.title.lowercased()) app icon")
                     }
+                }
+            }
+
+            if isPad {
+                ConduitSettingsSection(title: "Layout", symbol: "sidebar.left", tint: .conduitAura) {
+                    Toggle("Persistent session sidebar", isOn: $iPadPersistentSidebar)
+                        .tint(.conduitAccent)
+                    Text("Keep Sessions, Cron, and Kanban visible beside the current conversation when the window is wide enough.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
             }
         }.navigationTitle("Appearance")

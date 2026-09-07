@@ -40,6 +40,9 @@ struct ComposerBar: View {
     @State private var documentImportContext: AsyncAttachmentContext?
     @State private var attachmentGeneration: UInt64 = 0
     @State private var suppressNextTextChangeSuggestions = false
+    /// Round 6: non-nil presents the Repair Connection wizard seeded from
+    /// the failed connection.
+    @State private var repairContext: ConnectionRepairContext?
     /// Local, device-only input preference. Defaults to off so existing
     /// users keep Return inserting a newline after updating.
     @AppStorage(ComposerReturnKey.preferenceKey) private var returnKeySends = false
@@ -153,7 +156,10 @@ struct ComposerBar: View {
 
     /// The only sanctioned way to replace composer content programmatically.
     /// Advances the editor's programmatic revision alongside the text so the
-    /// change is applied to the UIKit editor exactly once.
+    /// change is applied to the UIKit editor exactly once, and so the bridge
+    /// can keep these replacements from ever surfacing as user input — the
+    /// user-edit ownership signal lives in that bridge's
+    /// `textViewDidChange`, guarded by the same machinery.
     private func replaceComposerText(_ newValue: String) {
         text = newValue
         composerRevision &+= 1
@@ -359,7 +365,8 @@ struct ComposerBar: View {
                         // failure mode is newline insertion, and
                         // submitFromReturnKey() re-checks the live gate.
                         canSubmitFromReturn: ComposerReturnKey.canSubmit(action: action),
-                        onSubmitFromReturn: { submitFromReturnKey() }
+                        onSubmitFromReturn: { submitFromReturnKey() },
+                        onUserEdit: { appState.noteComposerUserEdit() }
                     )
                     .id(editorIdentity)
                     .padding(.horizontal, 5)
@@ -385,6 +392,9 @@ struct ComposerBar: View {
         .opacity(appState.turnState == .unsupportedGateway ? 0.7 : 1)
         .animation(ConduitMotion.transition, value: action)
         .preferredColorScheme(appState.themePreference.colorScheme)
+        .sheet(item: $repairContext) { context in
+            ConnectionRepairSetupSheet(context: context)
+        }
     }
 
     @ViewBuilder
@@ -411,6 +421,33 @@ struct ComposerBar: View {
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Round 6: Repair Connection appears only once the connection is
+            // actually down AND a failed attempt has surfaced — through the
+            // typed classified failure or the visible error banner — never
+            // during normal automatic recovery, and never uninvited.
+            // Entering repair hands recovery authority to the user; the
+            // automatic retry loop stays stopped until the repair reconnects
+            // or the user retries manually.
+            if appState.connection != nil,
+               !appState.isConnected,
+               (appState.lastConnectionFailure != nil
+                   || !(appState.errorMessage ?? "").isEmpty) {
+                Button {
+                    Haptics.light()
+                    repairContext = appState.beginConnectionRepair()
+                } label: {
+                    Label("Repair Connection", systemImage: "wrench.and.screwdriver")
+                        .font(.footnote.weight(.semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.bordered)
+                .tint(.conduitAccent)
+                .accessibilityIdentifier("composer.repair-connection")
+                .accessibilityLabel("Repair Connection")
+                .accessibilityHint("Test and fix the failed connection, then reconnect")
             }
         }
         .padding(.horizontal, 14)

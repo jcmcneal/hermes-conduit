@@ -925,9 +925,11 @@ final class CompactResumeTranscriptTests: XCTestCase {
         let activeA = session("stored-a", alternateIDs: ["runtime-a"])
         let activeB = session("stored-b", alternateIDs: ["runtime-b"])
         let harness = try makeHarness(
-            openSession: { _, _, _ in
+            openSession: { _, requestedID, _ in
+                // Each row resumes to its own runtime alias; a shared echo
+                // would now be (correctly) rejected as a foreign runtime id.
                 SessionResumeResult(
-                    sessionId: "runtime-a",
+                    sessionId: requestedID == "stored-b" ? "runtime-b" : "runtime-a",
                     messages: [],
                     snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
                 )

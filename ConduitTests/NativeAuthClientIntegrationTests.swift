@@ -427,7 +427,7 @@ final class NativeAuthClientIntegrationTests: XCTestCase {
             ).connect(username: "chris", password: "correct-password")
             return XCTFail("Expected a ticket response without a ticket to fail")
         } catch let error as AuthClientError {
-            guard case .ticketFailed(let detail) = error else {
+            guard case .ticketFailed(_, let detail) = error else {
                 return XCTFail("Expected ticket failure, got \(error)")
             }
             XCTAssertEqual(detail, "No ticket in response")
@@ -507,11 +507,14 @@ final class NativeAuthClientIntegrationTests: XCTestCase {
         }
         defer { server.stop() }
 
-        let providers = try await NativeAuthClient(
+        let discovery = try await NativeAuthClient(
             baseURL: "http://127.0.0.1:\(server.port)",
             sessionConfiguration: realSessionConfiguration()
-        ).authProviders()
+        ).authProviderDiscovery()
 
+        guard case .providers(let providers) = discovery else {
+            return XCTFail("Expected a same-origin redirect to resolve to providers, got \(discovery)")
+        }
         XCTAssertEqual(providers.count, 1)
         XCTAssertEqual(providers.first?["name"] as? String, "basic")
         XCTAssertNotNil(server.lastRequest(path: "/api/auth/providers/redirected"))

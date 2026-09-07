@@ -9,8 +9,11 @@
 
 import SwiftUI
 import WebKit
+import os
 
 struct LoginView: View {
+    private static let logger = Logger(subsystem: "com.milim.relay", category: "login")
+
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @State private var serverUrl = ""
@@ -23,7 +26,20 @@ struct LoginView: View {
     @State var cloudflareClientSecret = ""
     @State private var isConnecting = false
     @State private var showWebView = false
-    @State private var error: String?
+    /// The presented failure state: classified connection failures with
+    /// recovery actions, or plain validation notices. The view never renders
+    /// raw Foundation error strings directly.
+    @State private var failure: ConnectionFailurePresentation?
+    /// Non-nil presents the Connection Setup shell, pre-seeded with the
+    /// classified help destination (or `.start` from the entry point).
+    @State private var connectionSetupDestination: ConnectionHelpDestination?
+    /// Round 6: non-nil presents Repair Connection, seeded from the failed
+    /// saved-credential reconnect.
+    @State private var connectionRepairContext: ConnectionRepairContext?
+    /// Whether a repairable saved connection exists, computed once when a
+    /// failure is presented (pure reads in `body`; the takeover happens at
+    /// tap time).
+    @State private var savedRepairAvailable = false
     /// Set only by the user's Cloudflare toggle (never by the onAppear
     /// Keychain restore), so a returning saved-token user is not scrolled
     /// away from the top of the form every time the login screen appears.
@@ -86,6 +102,53 @@ struct LoginView: View {
                 cloudflareClientSecret = access.clientSecret
             }
         }
+        .onReceive(appState.$pendingLoginFailure) { pending in
+            // Typed handoff from AppState (rejected saved password,
+            // requireSignIn). Unlike an onAppear string read, this fires even
+            // when the login card is already mounted; @Published guarantees
+            // the current value replays to this new subscriber on mount, so
+            // both orderings are covered. Consume once.
+            guard let pending else { return }
+            failure = pending
+            savedRepairAvailable = appState.makeSavedConnectionRepairContext() != nil
+            appState.pendingLoginFailure = nil
+        }
+        .sheet(item: $connectionSetupDestination) { destination in
+            ConnectionSetupView(
+                initialDestination: destination,
+                initialDraft: ConnectionSetupDraft(existingServerURL: serverUrl, username: username, password: password),
+                // The probe may reuse this same-origin service token; the
+                // wizard re-verifies the origin itself before sending it and
+                // never displays, edits, or persists it.
+                initialCloudflareAccess: configuredCloudflareAccess,
+                initialCloudflareOriginURL: serverUrl
+            ) { result in
+                // The tested handoff mapping: clears the in-memory Cloudflare
+                // token BEFORE the new address lands whenever the origin
+                // changes, so a retained token can never be applied against
+                // a dashboard it was not entered for.
+                let handoff = LoginCloudflareHandoff.apply(
+                    result,
+                    to: serverUrl,
+                    keeping: LoginCloudflareState(
+                        isEnabled: cloudflareEnabled,
+                        clientID: cloudflareClientID,
+                        clientSecret: cloudflareClientSecret
+                    )
+                )
+                cloudflareEnabled = handoff.cloudflare.isEnabled
+                cloudflareClientID = handoff.cloudflare.clientID
+                cloudflareClientSecret = handoff.cloudflare.clientSecret
+                serverUrl = handoff.serverURL
+                username = handoff.username
+                password = handoff.password
+                failure = nil
+                focusedField = nil
+            }
+        }
+        .sheet(item: $connectionRepairContext) { context in
+            ConnectionRepairSetupSheet(context: context)
+        }
         .sheet(isPresented: $showWebView) {
             AuthWebView(
                 url: serverUrl,
@@ -103,8 +166,15 @@ struct LoginView: View {
                     await appState.connect(with: HermesConnection(baseUrl: baseUrl, ticket: ticket))
                 }
                 },
-                onError: { message in
-                    error = message
+                onError: { classifiedFailure, detail in
+                    // Fixed classified copy only — the dashboard-provided
+                    // detail is logged for diagnosis (default os privacy
+                    // redacts it in release builds) and never reaches the
+                    // login card.
+                    Self.logger.error(
+                        "Auth WebView sign-in error: \(String(describing: classifiedFailure), privacy: .public) detail: \(detail)"
+                    )
+                    failure = .presenting(classifiedFailure)
                 }
             )
         }
@@ -141,6 +211,37 @@ struct LoginView: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.conduitAccent)
 
+                // Connection Setup entry point (visible, secondary to
+                // Connect, never auto-opened). Round 1 opens the shell;
+                // the guided assistant fills it in later.
+                Button {
+                    connectionSetupDestination = .start
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "questionmark.circle")
+                            .font(.body)
+                            .foregroundStyle(.conduitAccent)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Need help connecting?")
+                                .font(.footnote.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Text("Set up your Hermes connection")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .conduitGlassSurface(cornerRadius: 14, tint: .conduitAura.opacity(0.06))
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("login.connection-setup")
+
                 TextField("https://hermes.example", text: $serverUrl)
                     .textContentType(.URL)
                     .textInputAutocapitalization(.never)
@@ -159,6 +260,7 @@ struct LoginView: View {
                     .textContentType(.username)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .accessibilityIdentifier("login.username")
                     .submitLabel(LoginField.username.submitKeyboardLabel(cloudflareTokenEntryEnabled: cloudflareEnabled))
                     .focused($focusedField, equals: .username)
                     .onSubmit { handleSubmit(from: .username) }
@@ -169,6 +271,7 @@ struct LoginView: View {
 
                 SecureField("Password", text: $password)
                     .textContentType(.password)
+                    .accessibilityIdentifier("login.password")
                     .submitLabel(LoginField.password.submitKeyboardLabel(cloudflareTokenEntryEnabled: cloudflareEnabled))
                     .focused($focusedField, equals: .password)
                     .onSubmit { handleSubmit(from: .password) }
@@ -245,14 +348,55 @@ struct LoginView: View {
                     }
                 }
                 .padding(.horizontal, 2)
-                if let error {
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.footnote)
-                        Text(error)
-                            .font(.footnote)
-                            .multilineTextAlignment(.leading)
-                            .fixedSize(horizontal: false, vertical: true)
+                if let failure {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.footnote)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(failure.title)
+                                    .font(.footnote.weight(.semibold))
+                                    .multilineTextAlignment(.leading)
+                                    .accessibilityIdentifier("login.error.title")
+                                if !failure.message.isEmpty {
+                                    Text(failure.message)
+                                        .font(.footnote)
+                                        .multilineTextAlignment(.leading)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
+                        }
+                        if failure.offersRecoveryActions {
+                            HStack(spacing: 16) {
+                                Button("Try Again") {
+                                    Task { await connect() }
+                                }
+                                .disabled(isConnecting)
+                                .accessibilityIdentifier("login.error.try-again")
+
+                                if let destination = failure.helpDestination {
+                                    Button("Troubleshoot Connection") {
+                                        connectionSetupDestination = destination
+                                    }
+                                    .accessibilityIdentifier("login.error.troubleshoot")
+                                }
+
+                                // Round 6: a failed SAVED-credential reconnect
+                                // is a failed EXISTING connection — offer the
+                                // repair flow seeded from that record. The
+                                // typed failure proves provenance (manual
+                                // login failures never set it), and entering
+                                // repair revokes any outstanding automatic
+                                // recovery authority.
+                                if savedRepairAvailable, appState.lastConnectionFailure != nil {
+                                    Button("Repair Connection") {
+                                        connectionRepairContext = appState.beginSavedConnectionRepair()
+                                    }
+                                    .accessibilityIdentifier("login.repair-connection")
+                                }
+                            }
+                            .font(.footnote.weight(.semibold))
+                        }
                     }
                     .foregroundStyle(.red)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -311,13 +455,21 @@ struct LoginView: View {
 
     @MainActor
     private func connect() async {
+        // The Connect button is disabled while connecting, but Try Again and
+        // the return-key chain also reach this method: never let a second
+        // auth sequence run concurrently (Hermes throttles password login).
+        guard !isConnecting else { return }
+        // A manual login attempt abandons any prior existing-connection
+        // failure context: Repair Connection is for the connection that
+        // actually failed, not for whatever the user is typing now.
+        appState.lastConnectionFailure = nil
         let cleaned = serverUrl.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else {
             // The return-key chain can reach submit without the Connect
             // button ever being enabled (e.g. a whitespace-only URL).
             // Surface the standard invalid-URL feedback instead of a silent
             // no-op.
-            error = ConnectionURLPolicyError.invalidURL.localizedDescription
+            failure = .notice(title: "Enter a valid dashboard URL.")
             focusedField = .server
             return
         }
@@ -327,25 +479,51 @@ struct LoginView: View {
         // password value itself is sent untrimmed.
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            error = "Enter your dashboard username and password."
+            failure = .notice(title: "Enter your dashboard username and password.")
             focusedField = username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .username : .password
             return
         }
-        guard let normalized = try? ConnectionURLPolicy.normalizedBaseURL(cleaned) else {
-            error = ConnectionURLPolicyError.insecureTransport.localizedDescription
+        // Preserve WHICH URL-policy rule failed: a malformed address and an
+        // insecure remote transport are different mistakes with different
+        // fixes, so they classify differently instead of collapsing into one
+        // insecure-transport message.
+        let normalized: String
+        do {
+            normalized = try ConnectionURLPolicy.normalizedBaseURL(cleaned)
+        } catch {
+            // Log the type-safe classification, never the raw error: its
+            // associated values can carry server-provided detail text that
+            // must not reach the unified log unredacted.
+            Self.logger.error("Login URL normalization failed: \(String(describing: ConnectionFailureClassifier.classify(error)), privacy: .public)")
+            failure = .presenting(ConnectionFailureClassifier.classify(error))
             return
         }
         serverUrl = normalized
         appState.rememberDashboardURL(serverUrl)
-        error = nil
+        failure = nil
         isConnecting = true
         defer { isConnecting = false }
 
         do {
             let access = configuredCloudflareAccess
             let client = NativeAuthClient(baseURL: serverUrl, cloudflareAccess: access)
-            let providers = try await client.authProviders()
-            guard providers.contains(where: { $0["supports_password"] as? Bool == true }) else {
+            // Provider discovery is typed: only the unauthenticated redirect
+            // is THE interactive sign-in signal. A recognizable Hermes
+            // provider answer without password support (none configured, or
+            // only OAuth providers) intentionally routes to the browser too
+            // — an explicit decision, not the old "empty list" ambiguity. An
+            // unrecognized 2xx body keeps the same browser fallback it
+            // always had.
+            let requiresBrowserSignIn: Bool
+            switch try await client.authProviderDiscovery() {
+            case .interactiveSignInRequired:
+                requiresBrowserSignIn = true
+            case .providers(let providers):
+                requiresBrowserSignIn = !HermesProviderCheck.supportsPassword(providers)
+            case .unrecognized:
+                requiresBrowserSignIn = true
+            }
+            if requiresBrowserSignIn {
                 showWebView = true
                 if let access { KeychainHelper.saveCloudflareAccess(access, origin: serverUrl) }
                 return
@@ -368,7 +546,8 @@ struct LoginView: View {
         } catch is CancellationError {
             return
         } catch {
-            self.error = error.localizedDescription
+            Self.logger.error("Login connection failed: \(String(describing: ConnectionFailureClassifier.classify(error)), privacy: .public)")
+            failure = .presenting(ConnectionFailureClassifier.classify(error))
         }
     }
 
@@ -386,6 +565,54 @@ struct LoginView: View {
         case .system:
             return colorScheme == .dark ? AppIconChoice.dark.previewAssetName : AppIconChoice.light.previewAssetName
         }
+    }
+}
+
+// MARK: - Setup handoff Cloudflare state
+
+/// The login card's in-memory Cloudflare service-token fields, as a plain
+/// value so the setup-wizard handoff decision is unit-testable without
+/// hosting the view.
+struct LoginCloudflareState: Equatable {
+    var isEnabled: Bool
+    var clientID: String
+    var clientSecret: String
+}
+
+enum LoginCloudflareHandoff {
+    /// Decides the in-memory Cloudflare token state after the setup wizard
+    /// hands back a dashboard address. A retained service token is bound to
+    /// the origin it was entered for; when the handoff moves the dashboard to
+    /// a different origin (scheme, host, or effective port — path-only
+    /// changes are same-origin, per `ConnectionURLPolicy`), the token must
+    /// never be silently sent there, so the in-memory state clears. The
+    /// persisted Keychain token stays origin-scoped and is deliberately
+    /// untouched by this decision.
+    static func state(from oldServerURL: String, to newServerURL: String,
+                      keeping current: LoginCloudflareState) -> LoginCloudflareState {
+        if sameOrigin(oldServerURL, newServerURL) { return current }
+        return LoginCloudflareState(isEnabled: false, clientID: "", clientSecret: "")
+    }
+
+    static func sameOrigin(_ oldServerURL: String, _ newServerURL: String) -> Bool {
+        ConnectionURLPolicy.originMatches(
+            URL(string: oldServerURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+            expected: URL(string: newServerURL.trimmingCharacters(in: .whitespacesAndNewlines))
+        )
+    }
+
+    /// The complete login-field mapping for a wizard handoff, so the view's
+    /// completion closure stays a single tested call and a refactor cannot
+    /// silently drop the origin check while still assigning the new address.
+    static func apply(_ result: ConnectionSetupResult, to oldServerURL: String,
+                      keeping cloudflare: LoginCloudflareState)
+        -> (serverURL: String, username: String, password: String, cloudflare: LoginCloudflareState) {
+        (
+            result.serverURL,
+            result.username,
+            result.password,
+            state(from: oldServerURL, to: result.serverURL, keeping: cloudflare)
+        )
     }
 }
 
@@ -476,7 +703,10 @@ struct AuthWebView: UIViewRepresentable {
     let url: String
     let cloudflareAccess: CloudflareAccessCredentials?
     let onTicket: (String, String) -> Void
-    let onError: (String) -> Void
+    /// Classified failure + raw diagnostic detail. The dashboard controls the
+    /// detail text (e.g. `payload["error"]`), so it is never rendered — the
+    /// login card shows only the fixed copy for the classification.
+    let onError: (ConnectionFailure, String) -> Void
 
     func makeUIView(context: Context) -> WKWebView {
         let normalized = try? ConnectionURLPolicy.normalizedBaseURL(url)
@@ -493,15 +723,30 @@ struct AuthWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         guard let normalized else {
-            onError(ConnectionURLPolicyError.invalidURL.localizedDescription)
+            Self.reportConstructionFailure(onError, detail: "dashboard URL failed normalization in AuthWebView")
             return webView
         }
         if let request = try? Self.dashboardRequest(normalizedBaseURL: normalized, cloudflareAccess: cloudflareAccess) {
             webView.load(request)
         } else {
-            onError(ConnectionURLPolicyError.invalidURL.localizedDescription)
+            Self.reportConstructionFailure(onError, detail: "dashboard sign-in request construction failed")
         }
         return webView
+    }
+
+    /// Construction-time failures cannot synchronously mutate the owning
+    /// view's state: makeUIView runs inside SwiftUI's representable update
+    /// pass, and an immediate onError would write LoginView @State mid-render.
+    /// Report on the next main-runloop turn instead. Static with an injected
+    /// callback so the deferral contract stays unit-testable.
+    static func reportConstructionFailure(
+        _ onError: @escaping (ConnectionFailure, String) -> Void,
+        detail: String,
+        failure: ConnectionFailure = .invalidAddress
+    ) {
+        DispatchQueue.main.async {
+            onError(failure, detail)
+        }
     }
 
     /// The dashboard sign-in request the WebView boots with. Extracted so the
@@ -597,8 +842,13 @@ struct AuthWebView: UIViewRepresentable {
             let status = payload["status"] as? Int ?? 0
             guard status != 401 else { return } // The dashboard is still showing its sign-in route.
             guard let ticket = payload["ticket"] as? String, !ticket.isEmpty else {
+                // The classification is Conduit's, never the payload's: a
+                // completed dashboard sign-in that fails to mint a ticket is
+                // a session-ticket failure regardless of what the payload
+                // says. Payload text is carried as diagnostic detail only.
                 let detail = payload["error"] as? String
-                parent.onError(detail ?? "Unable to start the Hermes session\(status == 0 ? "" : " (\(status))").")
+                    ?? "Unable to start the Hermes session\(status == 0 ? "" : " (\(status))")"
+                parent.onError(.sessionTicketFailure, detail)
                 return
             }
             // Persist the HttpOnly dashboard session before dismissing this

@@ -44,7 +44,12 @@ final class VoiceConversationController: ObservableObject {
     private var isVoiceSessionActive = false
     private var isAwaitingVoiceAssistant = false
     private var awaitedAssistantResponseStarted = false
-    private var expectedAssistantSessionID: String?
+    /// Every session id POSITIVELY confirmed to route this conversation's
+    /// assistant stream: the id captured at `beginVoiceTurn` plus any runtime
+    /// rebind admitted while the turn is live. Hermes events carry runtime
+    /// routing ids, so raw equality with the captured id alone would silently
+    /// drop the assistant's voice the moment a resume rebinds the runtime.
+    private var expectedAssistantSessionIDs: Set<String> = []
     private var operationGeneration: UInt64 = 0
     private var utteranceTask: Task<Void, Never>?
     private var bargeInTask: Task<Void, Never>?
@@ -88,9 +93,27 @@ final class VoiceConversationController: ObservableObject {
         isVoiceSessionActive = true
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
-        expectedAssistantSessionID = sessionID
+        expectedAssistantSessionIDs = [sessionID]
         conversationTranscript.removeAll(keepingCapacity: true)
         activeAssistantTranscriptEntryID = nil
+    }
+
+    /// Adds session ids an admitted resume positively rebound to this
+    /// conversation while the voice turn is live (runtime-old → runtime-new).
+    /// `ofConversationContaining` is the reconciled conversation's accepted
+    /// id set: the extension only applies when the turn's captured ids
+    /// POSITIVELY overlap it, so a reconcile belonging to a different
+    /// conversation can never inject its runtime into this turn's ownership.
+    /// Inactive sessions ignore the call: a fresh turn's capture starts from
+    /// its own id only.
+    func extendAssistantSessionIDs(
+        _ sessionIDs: Set<String>,
+        ofConversationContaining knownIDs: Set<String>
+    ) {
+        guard isVoiceSessionActive,
+              !expectedAssistantSessionIDs.isEmpty,
+              !expectedAssistantSessionIDs.isDisjoint(with: knownIDs) else { return }
+        expectedAssistantSessionIDs.formUnion(sessionIDs.filter { !$0.isEmpty })
     }
 
     func endVoiceSession() { stop() }
@@ -98,6 +121,24 @@ final class VoiceConversationController: ObservableObject {
     func setProfilePreferences(_ preferences: VoiceProfilePreferences) {
         self.preferences = preferences
         isOutputMuted = preferences.outputMuted
+    }
+
+    /// True while a voice session or provider test is armed or live — i.e.
+    /// while voice audio ownership may exist or is being acquired — so
+    /// audio-adjacent side features (response haptics) stand down.
+    ///
+    /// Deliberately does NOT key off `state != .idle`: a terminal
+    /// `.failed("Audio was interrupted.")` has no live operation and must
+    /// not suppress Core Haptics indefinitely. The explicit ownership flags
+    /// cover every real ownership window: `startListening` raises
+    /// `isVoiceSessionActive` before its permission await (arming window),
+    /// all listening/thinking/speaking/muted/transcribing states occur with
+    /// it raised, and provider tests raise `isProviderTestRunning`. A failed
+    /// arming attempt keeps the flag until the session is stopped or
+    /// re-armed — bounded by the voice sheet's lifetime and conservative in
+    /// the safe direction.
+    var hasLiveVoiceSession: Bool {
+        isVoiceSessionActive || isProviderTestRunning
     }
 
     func setForegroundActive(_ active: Bool) {
@@ -163,6 +204,12 @@ final class VoiceConversationController: ObservableObject {
         do {
             try capture.resume()
             isMicrophonePaused = false
+            // Pause is a real resource pause, so resume opens a fresh
+            // listening window: speech timestamps from before the pause must
+            // not immediately finish an utterance or idle-pause again.
+            utteranceStartedAt = Date()
+            lastSpeechAt = nil
+            bargeInStartedAt = nil
         } catch {
             state = .failed(error.localizedDescription)
         }
@@ -184,7 +231,7 @@ final class VoiceConversationController: ObservableObject {
         isVoiceSessionActive = false
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
-        expectedAssistantSessionID = nil
+        expectedAssistantSessionIDs = []
         state = .idle
     }
 
@@ -262,6 +309,9 @@ final class VoiceConversationController: ObservableObject {
         }
         isVoiceSessionActive = true
         isProviderTestRunning = true
+        // The TTS provider test runs outside a voice conversation, so its
+        // playback must claim standalone (output-only) session ownership.
+        playback.ownershipIntent = .standalonePlayback
         let generation = operationGeneration
         defer {
             speechStream?.cancel()
@@ -349,8 +399,7 @@ final class VoiceConversationController: ObservableObject {
         }
         guard isVoiceSessionActive,
               isAwaitingVoiceAssistant,
-              let expectedAssistantSessionID,
-              sessionID == expectedAssistantSessionID else { return }
+              expectedAssistantSessionIDs.contains(sessionID) else { return }
         if case .idle = state { return }
         if case .failed = state { return }
         switch event {
@@ -503,6 +552,10 @@ final class VoiceConversationController: ObservableObject {
         isMicrophonePaused = false
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
+        // Terminal path: release session-ownership bookkeeping so audio-
+        // adjacent side features (response haptics) do not stand down
+        // forever after an interruption.
+        isVoiceSessionActive = false
         state = .failed("Audio was interrupted.")
     }
 
@@ -584,6 +637,9 @@ final class VoiceConversationController: ObservableObject {
         do {
             guard isSpeechDrainCurrent(operation: operation, revision: revision), let gateway else { return }
             if speechStream == nil && !speechDeltas.isEmpty {
+                // Assistant speech during a live voice conversation joins the
+                // capture-owned session instead of reconfiguring it.
+                playback.ownershipIntent = .conversationPlayback
                 let openedStream = try await gateway.openSpeechStream(
                     onStart: { [weak self] rate in
                         guard let self,
@@ -636,6 +692,11 @@ final class VoiceConversationController: ObservableObject {
                 }
                 return
             }
+            // Terminal drain failure: settle playback like every other
+            // terminal path so the lease and engine do not outlive the turn.
+            // (The cancellation branch above intentionally keeps ownership —
+            // an interrupted stream's already-scheduled audio renders out.)
+            playback.stop()
             if state == .speaking || state == .thinking { state = .failed(error.localizedDescription) }
             return
         }

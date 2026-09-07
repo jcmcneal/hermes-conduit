@@ -99,6 +99,50 @@ final class AppStateReadAloudTests: XCTestCase {
         harness.readAloudController.stop()
     }
 
+    func testRunningASRTestStopsActiveReadAloudBeforeCapabilityRefresh() async {
+        // The ASR test claims conversation-capture session ownership, so it
+        // must stop a still-playing read aloud first — the mirror of
+        // testStartingReadAloudStopsInFlightSpeechTest.
+        let recorder = CallOrderRecorder()
+        let harness = makeHarness(
+            snapshot: VoiceCapabilitySnapshot(
+                isGatewayConnected: true,
+                supportsTranscription: true,
+                supportsSpeech: true,
+                unavailableReason: nil
+            ),
+            orderRecorder: recorder
+        )
+        harness.appState.voiceCapabilityRequesterForTesting = RecordingCapabilityRequester(recorder: recorder)
+        let messageA = ChatMessage(id: "msg-a", role: .assistant, content: "Response A", timestamp: "1")
+
+        harness.appState.toggleReadAloud(message: messageA)
+        await awaitUntil("read aloud to reach playing") {
+            harness.readAloudController.state == .playing(messageID: "msg-a")
+        }
+        XCTAssertTrue(harness.readAloudPlayback.isPlaying)
+
+        // The transcription outcome itself depends on the configured provider
+        // and is deliberately not asserted. The ownership contract is fully
+        // deterministic: during the ASR test the playing read aloud is
+        // stopped (releasing its standalone lease) BEFORE the capability
+        // refresh begins. The refresh's incidental teardown would otherwise
+        // stop the read aloud only after the reload — so deleting the
+        // production stop line flips the ordering assertion below.
+        let eventBaseline = recorder.events.count
+        _ = await harness.appState.runVoiceASRTest()
+        let asrTestEvents = Array(recorder.events.dropFirst(eventBaseline))
+
+        XCTAssertTrue(asrTestEvents.contains("readAloudStopped"), "a playing read aloud must be stopped by the ASR test")
+        XCTAssertFalse(harness.readAloudPlayback.isPlaying)
+        XCTAssertEqual(harness.readAloudController.state, .idle)
+        XCTAssertLessThan(
+            asrTestEvents.firstIndex(of: "readAloudStopped") ?? Int.max,
+            asrTestEvents.firstIndex(of: "capabilityReloadStarted") ?? Int.max,
+            "read aloud must stop before the capability refresh begins"
+        )
+    }
+
     func testTTSOnlyAvailabilityIsIndependentOfTranscription() {
         let harness = makeHarness(snapshot: ttsOnlySnapshot)
 
@@ -153,7 +197,10 @@ final class AppStateReadAloudTests: XCTestCase {
         )
     }
 
-    private func makeHarness(snapshot: VoiceCapabilitySnapshot) -> Harness {
+    private func makeHarness(
+        snapshot: VoiceCapabilitySnapshot,
+        orderRecorder: CallOrderRecorder? = nil
+    ) -> Harness {
         let suite = "AppStateReadAloudTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
             fatalError("Failed to create test UserDefaults suite")
@@ -179,6 +226,7 @@ final class AppStateReadAloudTests: XCTestCase {
         appState.voiceConversationController = voiceController
 
         let readAloudPlayback = MockVoicePlayback()
+        readAloudPlayback.orderRecorder = orderRecorder
         let readAloudGateway = MockVoiceGateway(pausesAfterEmission: true)
         let readAloudController = MessageReadAloudController(
             playback: readAloudPlayback,
@@ -233,6 +281,31 @@ private struct Harness {
     let readAloudGateway: MockVoiceGateway
 }
 
+/// Records ownership-relevant events from the injected mocks and test
+/// stubs so tests can assert ordering (e.g. read aloud stops before the
+/// capability refresh begins) hermetically. Tests snapshot `events.count`
+/// at a phase boundary and only inspect events after it.
+@MainActor
+private final class CallOrderRecorder {
+    private(set) var events: [String] = []
+
+    func record(_ event: String) { events.append(event) }
+}
+
+/// Throws without touching the network, so the capability refresh in tests
+/// is hermetic while still recording when it begins.
+@MainActor
+private final class RecordingCapabilityRequester: VoiceConfigurationRequesting {
+    let recorder: CallOrderRecorder
+
+    init(recorder: CallOrderRecorder) { self.recorder = recorder }
+
+    func requestJSON(path: String, method: String, body: [String: Any]?) async throws -> [String: Any] {
+        recorder.record("capabilityReloadStarted")
+        throw URLError(.unsupportedURL)
+    }
+}
+
 @MainActor
 private final class MockVoiceCapture: AudioCaptureService {
     let events: AsyncStream<VoiceCaptureEvent>
@@ -255,7 +328,11 @@ private final class MockVoiceCapture: AudioCaptureService {
 @MainActor
 private final class MockVoicePlayback: SpeechPlaybackService {
     var isPlaying = false
+    var ownershipIntent: VoiceAudioIntent = .standalonePlayback
     private(set) var stopCount = 0
+    /// When set, records "readAloudStopped" so tests can assert ordering
+    /// against other ownership events.
+    var orderRecorder: CallOrderRecorder?
 
     func start(sampleRate: Double) throws { isPlaying = true }
     func enqueuePCM16(_ data: Data, sampleRate: Double) throws -> Int { data.count / 2 }
@@ -265,6 +342,7 @@ private final class MockVoicePlayback: SpeechPlaybackService {
     func stop() {
         isPlaying = false
         stopCount += 1
+        orderRecorder?.record("readAloudStopped")
     }
 }
 

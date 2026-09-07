@@ -60,7 +60,7 @@ final class NativeAuthClientTests: XCTestCase {
             _ = try await client.connect(username: "chris", password: "correct-password")
             return XCTFail("Expected the ticket request without an applicable login cookie to be rejected")
         } catch let error as AuthClientError {
-            guard case .ticketFailed(let detail) = error else {
+            guard case .ticketFailed(_, let detail) = error else {
                 return XCTFail("Expected ticket failure, got \(error)")
             }
             XCTAssertEqual(detail, "Unauthorized")
@@ -70,15 +70,15 @@ final class NativeAuthClientTests: XCTestCase {
         )
     }
 
-    func testProviderDiscoveryRedirectFallsBackToWebView() async throws {
+    func testProviderDiscoveryRedirectFallsBackToInteractiveSignIn() async throws {
         let client = NativeAuthClient(
             baseURL: "https://redirect.example",
             sessionConfiguration: makeSessionConfiguration()
         )
 
-        let providers = try await client.authProviders()
+        let discovery = try await client.authProviderDiscovery()
 
-        XCTAssertTrue(providers.isEmpty)
+        XCTAssertEqual(discovery, .interactiveSignInRequired, "An unauthenticated redirect is THE interactive-auth signal")
         XCTAssertEqual(NativeAuthURLProtocol.responseStatusCode(for: "redirect.example"), 302)
         XCTAssertEqual(
             NativeAuthURLProtocol.responseHeader(for: "redirect.example", name: "Location"),
@@ -88,6 +88,86 @@ final class NativeAuthClientTests: XCTestCase {
         XCTAssertEqual(NativeAuthURLProtocol.requestCount(for: "tenant.cloudflareaccess.com"), 0)
     }
 
+    func testProviderDiscovery200WithEmptyProviderArrayIsNotInteractiveSignIn() async throws {
+        // A 200 whose providers array is empty is a valid Hermes answer with
+        // zero providers — recognizable structure, NOT the interactive-auth
+        // redirect signal.
+        let client = NativeAuthClient(
+            baseURL: "https://empty-providers.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        let discovery = try await client.authProviderDiscovery()
+
+        XCTAssertEqual(discovery, .providers([]))
+    }
+
+    func testProviderDiscovery200WithMalformedBodyIsUnrecognized() async throws {
+        // Arbitrary web content (or malformed JSON) answered 200: never
+        // interactive auth, never providers.
+        let client = NativeAuthClient(
+            baseURL: "https://malformed.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        let discovery = try await client.authProviderDiscovery()
+
+        XCTAssertEqual(discovery, .unrecognized)
+    }
+
+    func testProviderDiscovery200WithoutProvidersKeyIsUnrecognized() async throws {
+        let client = NativeAuthClient(
+            baseURL: "https://nokey.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        let discovery = try await client.authProviderDiscovery()
+
+        XCTAssertEqual(discovery, .unrecognized)
+    }
+
+    func testProviderDiscoveryWrongElementShapeIsUnrecognized() async throws {
+        let client = NativeAuthClient(
+            baseURL: "https://wrongshape.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        let discovery = try await client.authProviderDiscovery()
+
+        XCTAssertEqual(discovery, .unrecognized)
+    }
+
+    func testProviderDiscoveryNonDictionaryRootIsUnrecognized() async throws {
+        let client = NativeAuthClient(
+            baseURL: "https://arrayroot.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        let discovery = try await client.authProviderDiscovery()
+
+        XCTAssertEqual(discovery, .unrecognized)
+    }
+
+    func testProviderDiscoveryRedirectWithoutLocationIsDiscoveryFailure() async throws {
+        // A 3xx without a Location header cannot drive a browser login: it
+        // is a broken server response, never the interactive-auth signal.
+        let client = NativeAuthClient(
+            baseURL: "https://locationless.example",
+            sessionConfiguration: makeSessionConfiguration()
+        )
+
+        do {
+            _ = try await client.authProviderDiscovery()
+            return XCTFail("Expected a Location-less redirect to fail discovery")
+        } catch let error as AuthClientError {
+            guard case .providerDiscoveryFailed(let status, let detail) = error else {
+                return XCTFail("Expected providerDiscoveryFailed, got \(error)")
+            }
+            XCTAssertEqual(status, 302)
+            XCTAssertEqual(detail, "Redirect without Location")
+        }
+    }
+
     func testProviderDiscoveryPreservesNonRedirect3xxResponses() async throws {
         let client = NativeAuthClient(
             baseURL: "https://multiple.example",
@@ -95,10 +175,10 @@ final class NativeAuthClientTests: XCTestCase {
         )
 
         do {
-            _ = try await client.authProviders()
+            _ = try await client.authProviderDiscovery()
             XCTFail("Expected provider discovery to fail for a non-redirect 3xx response")
         } catch let error as AuthClientError {
-            guard case .providerDiscoveryFailed(let detail) = error else {
+            guard case .providerDiscoveryFailed(_, let detail) = error else {
                 return XCTFail("Expected provider discovery failure, got \(error)")
             }
             XCTAssertEqual(detail, "HTTP 300")
@@ -111,8 +191,11 @@ final class NativeAuthClientTests: XCTestCase {
             sessionConfiguration: makeSessionConfiguration()
         )
 
-        let providers = try await client.authProviders()
+        let discovery = try await client.authProviderDiscovery()
 
+        guard case .providers(let providers) = discovery else {
+            return XCTFail("Expected a password provider answer, got \(discovery)")
+        }
         XCTAssertEqual(providers.count, 1)
         XCTAssertEqual(providers[0]["name"] as? String, "basic")
         XCTAssertEqual(providers[0]["supports_password"] as? Bool, true)
@@ -125,10 +208,10 @@ final class NativeAuthClientTests: XCTestCase {
         )
 
         do {
-            _ = try await client.authProviders()
+            _ = try await client.authProviderDiscovery()
             XCTFail("Expected provider discovery to fail for a server error")
         } catch let error as AuthClientError {
-            guard case .providerDiscoveryFailed(let detail) = error else {
+            guard case .providerDiscoveryFailed(_, let detail) = error else {
                 return XCTFail("Expected provider discovery failure, got \(error)")
             }
             XCTAssertEqual(detail, "origin unavailable")
@@ -146,8 +229,11 @@ final class NativeAuthClientTests: XCTestCase {
             sessionConfiguration: makeSessionConfiguration()
         )
 
-        let providers = try await client.authProviders()
+        let discovery = try await client.authProviderDiscovery()
 
+        guard case .providers(let providers) = discovery else {
+            return XCTFail("Expected a provider answer, got \(discovery)")
+        }
         XCTAssertEqual(providers.count, 1)
         XCTAssertEqual(providers[0]["name"] as? String, "basic")
     }
@@ -163,9 +249,9 @@ final class NativeAuthClientTests: XCTestCase {
             sessionConfiguration: makeSessionConfiguration()
         )
 
-        let providers = try await client.authProviders()
+        let discovery = try await client.authProviderDiscovery()
 
-        XCTAssertTrue(providers.isEmpty, "Unconfigured credentials must keep the WebView fallback signal")
+        XCTAssertEqual(discovery, .interactiveSignInRequired, "Unconfigured credentials must keep the interactive-auth fallback signal")
         XCTAssertNil(
             NativeAuthURLProtocol.requestHeader(forPath: "/api/auth/providers", name: "CF-Access-Client-Id"),
             "Unconfigured credentials must send no service-token id"
@@ -188,7 +274,7 @@ final class NativeAuthClientTests: XCTestCase {
         )
 
         do {
-            _ = try await client.authProviders()
+            _ = try await client.authProviderDiscovery()
             XCTFail("Expected the Cloudflare redirect despite a configured token to be a typed rejection")
         } catch let error as AuthClientError {
             guard case .cloudflareServiceTokenRejected = error else {
@@ -222,11 +308,12 @@ final class NativeAuthClientTests: XCTestCase {
             sessionConfiguration: makeSessionConfiguration()
         )
 
-        let providers = try await client.authProviders()
+        let discovery = try await client.authProviderDiscovery()
 
         // A redirect from a non-Cloudflare edge is not evidence the service
-        // token was rejected; the WebView fallback must stay available.
-        XCTAssertTrue(providers.isEmpty)
+        // token was rejected; the interactive-auth fallback must stay
+        // available.
+        XCTAssertEqual(discovery, .interactiveSignInRequired)
     }
 
     func testServiceTokenAppliesToLoginAndTicketRequests() async throws {
@@ -241,7 +328,7 @@ final class NativeAuthClientTests: XCTestCase {
 
         // The full shipped connect sequence: LoginView probes providers
         // first, then connects natively, then mints the ticket.
-        _ = try await client.authProviders()
+        _ = try await client.authProviderDiscovery()
         let connection = try await client.connect(username: "chris", password: "correct-password")
 
         XCTAssertEqual(connection.ticket, "fresh-ticket")
@@ -305,7 +392,7 @@ final class NativeAuthClientTests: XCTestCase {
             sessionConfiguration: makeSessionConfiguration()
         )
 
-        _ = try await client.authProviders()
+        _ = try await client.authProviderDiscovery()
         let connection = try await client.connect(username: "chris", password: "correct-password")
 
         XCTAssertEqual(connection.ticket, "lan-ticket")
@@ -390,7 +477,7 @@ final class NativeAuthClientTests: XCTestCase {
             _ = try await client.connect(username: "chris", password: "correct-password")
             XCTFail("Expected connect to fail when no host-scoped session cookie is accepted")
         } catch let error as AuthClientError {
-            guard case .ticketFailed(let detail) = error else {
+            guard case .ticketFailed(_, let detail) = error else {
                 return XCTFail("Expected ticket failure, got \(error)")
             }
             XCTAssertEqual(detail, "Login succeeded but no host-scoped session cookie was accepted")
@@ -484,7 +571,13 @@ private final class NativeAuthURLProtocol: URLProtocol {
             "cookieless.example",
             "cfreject.example",
             "ssoedge.example",
-            "cftoken.example"
+            "cftoken.example",
+            "empty-providers.example",
+            "malformed.example",
+            "nokey.example",
+            "wrongshape.example",
+            "arrayroot.example",
+            "locationless.example"
         ].contains(host)
     }
 
@@ -704,6 +797,29 @@ private final class NativeAuthURLProtocol: URLProtocol {
             default:
                 return nil
             }
+        case "empty-providers.example":
+            // Recognizable Hermes structure with zero providers: a valid
+            // answer, never the interactive-auth signal.
+            return Fixture(statusCode: 200, headers: [:], body: Data(#"{"providers":[]}"#.utf8))
+        case "malformed.example":
+            // Arbitrary web content answered 200.
+            return Fixture(
+                statusCode: 200,
+                headers: ["Content-Type": "text/html"],
+                body: Data("<html><body>not hermes</body></html>".utf8)
+            )
+        case "nokey.example":
+            // JSON without a providers array.
+            return Fixture(statusCode: 200, headers: [:], body: Data(#"{"ok":true}"#.utf8))
+        case "wrongshape.example":
+            // A providers key whose elements are not dictionaries.
+            return Fixture(statusCode: 200, headers: [:], body: Data(#"{"providers":["basic"]}"#.utf8))
+        case "arrayroot.example":
+            // A non-dictionary JSON root.
+            return Fixture(statusCode: 200, headers: [:], body: Data("[]".utf8))
+        case "locationless.example":
+            // A redirect-shaped answer with no Location header.
+            return Fixture(statusCode: 302, headers: [:], body: Data())
         case "headers.example":
             let hasExpectedHeaders = request.value(forHTTPHeaderField: "CF-Access-Client-Id") == "test-client-id"
                 && request.value(forHTTPHeaderField: "CF-Access-Client-Secret") == "test-client-secret"

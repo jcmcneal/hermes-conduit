@@ -18,9 +18,13 @@ struct DashboardCredentials: Codable, Equatable {
 
 enum AuthClientError: LocalizedError {
     case invalidURL
-    case loginFailed(String)
-    case ticketFailed(String)
-    case providerDiscoveryFailed(String)
+    /// `status` is the HTTP status the dashboard answered with, or `nil` when
+    /// no HTTP response arrived. Carried on the error (rather than folded
+    /// into `detail`) so failure classification is code-based: 401/403 at the
+    /// password stage mean rejected credentials, while 5xx does not.
+    case loginFailed(status: Int?, detail: String)
+    case ticketFailed(status: Int?, detail: String)
+    case providerDiscoveryFailed(status: Int?, detail: String)
     /// A configured Cloudflare Access service token did not satisfy the
     /// edge: provider discovery was still answered with a redirect to the
     /// Cloudflare Access login page. Distinct from `.loginFailed`/`.ticketFailed`
@@ -32,11 +36,26 @@ enum AuthClientError: LocalizedError {
         switch self {
         case .invalidURL:
             return "Invalid dashboard URL."
-        case .loginFailed(let detail):
-            return "Login failed: \(detail)"
-        case .ticketFailed(let detail):
-            return "Could not get session ticket: \(detail)"
-        case .providerDiscoveryFailed(let detail):
+        case .loginFailed(let status, _):
+            // Never expose a bare "HTTP 401" as the credential-rejection
+            // message; other statuses keep the status for diagnosis (the
+            // presentation layer owns user-facing copy). 429 must not read
+            // as a credentials problem wherever this string surfaces.
+            if status == 429 {
+                return "Too many login attempts. Try again shortly."
+            }
+            guard let status else {
+                // No HTTP response arrived; the credentials were never
+                // evaluated and must not be blamed.
+                return "Login failed: no response from the dashboard."
+            }
+            if !(401...403).contains(status) {
+                return "Login failed: HTTP \(status)"
+            }
+            return "Login failed. Check your dashboard credentials and try again."
+        case .ticketFailed(_, let detail):
+            return "Could not start the Hermes session: \(detail)"
+        case .providerDiscoveryFailed(_, let detail):
             return "Could not check dashboard sign-in options: \(detail)"
         case .cloudflareServiceTokenRejected:
             return "Cloudflare Access did not accept the configured service token. "
@@ -58,6 +77,66 @@ struct NativeAuthConnection {
     /// connection they are about to make active.
     func commitCookies() {
         NativeAuthCookiePolicy.persist(cookies)
+    }
+}
+
+#if DEBUG
+extension NativeAuthConnection {
+    /// Test/UI-test construction only: an in-memory transaction with an
+    /// empty (inert) cookie set, for repair-flow seams that script a
+    /// validated test without a real login. Never shipped.
+    static func debugStub(ticket: String) -> NativeAuthConnection {
+        NativeAuthConnection(ticket: ticket, cookies: [])
+    }
+}
+#endif
+
+/// What provider discovery learned about a dashboard's sign-in modes. The
+/// two zero-provider shapes are deliberately different outcomes: an
+/// unauthenticated redirect to a sign-in page is the NORMAL interactive-auth
+/// signal, while a 2xx answer without recognizable Hermes provider structure
+/// is an unexpected server response. Collapsing them back into "an empty
+/// provider list" would re-create the ambiguity that made browser-auth
+/// deployments unclassifiable.
+enum AuthProviderDiscoveryResult {
+    /// The dashboard answered `/api/auth/providers` with recognizable Hermes
+    /// provider JSON. The array may be empty (a valid Hermes answer meaning
+    /// "no providers configured") or name non-password providers only.
+    case providers([[String: Any]])
+    /// Discovery was answered by a redirect to a sign-in page — the expected
+    /// unauthenticated behavior of a dashboard/edge that routes to
+    /// interactive (browser) authentication.
+    case interactiveSignInRequired
+    /// A 2xx response arrived, but it carries no recognizable Hermes
+    /// auth/provider structure: malformed JSON, a JSON object without a
+    /// `providers` array, or arbitrary web content.
+    case unrecognized
+}
+
+extension AuthProviderDiscoveryResult: Equatable {
+    /// Provider arrays are dictionaries of JSON values, so structural
+    /// equality goes through NSArray/NSDictionary's recursive isEqual. This
+    /// conformance exists for tests and the typed switch above; production
+    /// code never compares provider arrays for equality.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        switch (lhs, rhs) {
+        case (.interactiveSignInRequired, .interactiveSignInRequired),
+             (.unrecognized, .unrecognized):
+            return true
+        case (.providers(let lhsProviders), .providers(let rhsProviders)):
+            return (lhsProviders as NSArray).isEqual(to: rhsProviders)
+        default:
+            return false
+        }
+    }
+}
+
+/// The single definition of "this dashboard offers password login", shared by
+/// the normal login flow and the Connection Setup probe so the compatibility
+/// check can never drift between them.
+enum HermesProviderCheck {
+    static func supportsPassword(_ providers: [[String: Any]]) -> Bool {
+        providers.contains { $0["supports_password"] as? Bool == true }
     }
 }
 
@@ -97,39 +176,60 @@ struct NativeAuthClient {
         self.session = URLSession(configuration: configuration, delegate: redirectDelegate, delegateQueue: nil)
     }
 
-    func authProviders() async throws -> [[String: Any]] {
+    func authProviderDiscovery() async throws -> AuthProviderDiscoveryResult {
         let request = try request(path: "/api/auth/providers")
         let result = try await perform(request)
         guard let http = result.response as? HTTPURLResponse else {
-            throw AuthClientError.providerDiscoveryFailed("No response")
+            throw AuthClientError.providerDiscoveryFailed(status: nil, detail: "No response")
         }
         switch http.statusCode {
         case 301, 302, 303, 307, 308:
-            // The SecureRedirectDelegate cancels cross-origin redirects, so a
-            // 3xx final response here is the edge bouncing us to its sign-in
-            // page. Without a configured token that is the expected
-            // interactive-auth signal (empty list → WebView fallback). With
-            // an actually configured service token it means Cloudflare
-            // rejected that token — say so instead of presenting the same
-            // login page that should have been bypassed. Match
-            // `applying(to:)`'s configuration state: a non-nil but empty
-            // credentials value sends no headers and must fall back too.
+            // A redirect response without a Location header cannot drive a
+            // browser login — it is a broken server response, not an auth
+            // mode. Classify it as discovery failure like any other
+            // non-Hermes answer.
+            guard http.value(forHTTPHeaderField: "Location") != nil else {
+                throw AuthClientError.providerDiscoveryFailed(
+                    status: http.statusCode,
+                    detail: "Redirect without Location"
+                )
+            }
+            // The SecureRedirectDelegate cancels cross-origin redirects, so
+            // a 3xx final response here is the edge bouncing us to its
+            // sign-in page. Without a configured token that is the expected
+            // interactive-auth signal. With an actually configured service
+            // token it means Cloudflare rejected that token — say so instead
+            // of presenting the same login page that should have been
+            // bypassed. Match `applying(to:)`'s configuration state: a
+            // non-nil but empty credentials value sends no headers and must
+            // fall back too.
             if cloudflareAccess?.isConfigured == true,
                Self.redirectsToCloudflareAccessLogin(http) {
                 throw AuthClientError.cloudflareServiceTokenRejected
             }
-            return []
+            return .interactiveSignInRequired
         default:
             break
         }
         guard (200...299).contains(http.statusCode) else {
-            throw AuthClientError.providerDiscoveryFailed(parseError(result.data) ?? "HTTP \(http.statusCode)")
+            throw AuthClientError.providerDiscoveryFailed(
+                status: http.statusCode,
+                detail: parseError(result.data) ?? "HTTP \(http.statusCode)"
+            )
         }
 
-        if let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any] {
-            return json["providers"] as? [[String: Any]] ?? []
+        // A 2xx answer only means "Hermes providers" when the body carries
+        // the provider array. An empty array is a valid Hermes answer; a
+        // body without the array (arbitrary web content, malformed JSON) is
+        // an unrecognized server response and must never read as the
+        // interactive-auth signal.
+        guard let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any] else {
+            return .unrecognized
         }
-        return []
+        guard let providers = json["providers"] as? [[String: Any]] else {
+            return .unrecognized
+        }
+        return .providers(providers)
     }
 
     func login(username: String, password: String) async throws -> [HTTPCookie] {
@@ -144,13 +244,16 @@ struct NativeAuthClient {
 
         let result = try await perform(request)
         guard let http = result.response as? HTTPURLResponse else {
-            throw AuthClientError.loginFailed("No response")
+            throw AuthClientError.loginFailed(status: nil, detail: "No response")
         }
         guard (200...299).contains(http.statusCode) else {
-            throw AuthClientError.loginFailed(parseError(result.data) ?? "HTTP \(http.statusCode)")
+            throw AuthClientError.loginFailed(
+                status: http.statusCode,
+                detail: parseError(result.data) ?? "HTTP \(http.statusCode)"
+            )
         }
         guard http.url != nil else {
-            throw AuthClientError.loginFailed("Response URL missing")
+            throw AuthClientError.loginFailed(status: http.statusCode, detail: "Response URL missing")
         }
 
         // Redirect responses may set the session before the final JSON landing.
@@ -177,15 +280,18 @@ struct NativeAuthClient {
 
         let result = try await perform(request)
         guard let http = result.response as? HTTPURLResponse else {
-            throw AuthClientError.ticketFailed("No response")
+            throw AuthClientError.ticketFailed(status: nil, detail: "No response")
         }
         guard (200...299).contains(http.statusCode) else {
-            throw AuthClientError.ticketFailed(parseError(result.data) ?? "HTTP \(http.statusCode)")
+            throw AuthClientError.ticketFailed(
+                status: http.statusCode,
+                detail: parseError(result.data) ?? "HTTP \(http.statusCode)"
+            )
         }
         guard let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any],
               let ticket = json["ticket"] as? String,
               !ticket.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw AuthClientError.ticketFailed("No ticket in response")
+            throw AuthClientError.ticketFailed(status: http.statusCode, detail: "No ticket in response")
         }
 
         // A deployment may rotate its session while minting the ticket. Keep
@@ -206,7 +312,8 @@ struct NativeAuthClient {
             // Fail here so an operator sees why, instead of an
             // indistinguishable ticket 401 downstream.
             throw AuthClientError.ticketFailed(
-                "Login succeeded but no host-scoped session cookie was accepted"
+                status: nil,
+                detail: "Login succeeded but no host-scoped session cookie was accepted"
             )
         }
         return try await mintWsTicket(authenticatedCookies: authenticatedCookies)

@@ -311,11 +311,18 @@ enum ChatMessageScrollTargets {
 
         fingerprint.append(message.tool?.name)
 
-        fingerprint.append(message.clarify?.question)
-        fingerprint.append(message.clarify?.choices.count)
-        message.clarify?.choices.forEach { choice in
-            fingerprint.append(choice.label)
-            fingerprint.append(choice.value)
+        // Row identity only: statuses and answers mutate while the user works
+        // through a batch and must not re-anchor the scroll position.
+        fingerprint.append(message.clarify?.requestId)
+        fingerprint.append(message.clarify?.questions.count)
+        message.clarify?.questions.forEach { question in
+            fingerprint.append(question.id)
+            fingerprint.append(question.question)
+            fingerprint.append(question.choices.count)
+            question.choices.forEach { choice in
+                fingerprint.append(choice.label)
+                fingerprint.append(choice.value)
+            }
         }
 
         fingerprint.append(message.approval?.command)
@@ -342,7 +349,10 @@ enum ChatMessageScrollTargets {
     }
 }
 
-private enum ChatScrollIdentityNormalization {
+/// Canonical identity normalization shared by every session-keyed store:
+/// profiles trim and case-fold, session ids trim. Internal so the resume
+/// store, identity index, and AppState speak the same normalized language.
+enum ChatScrollIdentityNormalization {
     static func profile(_ profile: String?) -> String? {
         guard let value = profile?.trimmingCharacters(in: .whitespacesAndNewlines),
               !value.isEmpty else { return nil }
@@ -523,6 +533,7 @@ enum ChatScrollSessionIdentityResolver {
         catalog: [ChatScrollSessionCatalogIdentity],
         requestedSessionID: String? = nil,
         resolvedSessionID: String? = nil,
+        resolvedDurableSessionID: String? = nil,
         previousIdentity current: ChatScrollSessionIdentity,
         isReconciling: Bool,
         advanceSettledRevision: Bool = false
@@ -568,6 +579,12 @@ enum ChatScrollSessionIdentityResolver {
         let canonicalSessionID: String?
         if let matchedSession {
             canonicalSessionID = matchedSession.canonicalSessionID
+        } else if let resolvedDurable = ChatScrollIdentityNormalization.sessionID(resolvedDurableSessionID) {
+            // An admitted resume explicitly established the conversation's
+            // durable identity (a runtime-only conversation whose stored key
+            // was revealed). The catalog had no row to resolve through, so
+            // the positive claim wins over the raw runtime ids.
+            canonicalSessionID = resolvedDurable
         } else if continuesPreviousIdentity {
             canonicalSessionID = previous.canonicalSessionID
         } else if !reconciliationIDs.isEmpty {
@@ -581,6 +598,9 @@ enum ChatScrollSessionIdentityResolver {
         var equivalentSessionIDs = candidates
         if let matchedSession {
             equivalentSessionIDs.formUnion(matchedSession.identifiers)
+        }
+        if let resolvedDurable = ChatScrollIdentityNormalization.sessionID(resolvedDurableSessionID) {
+            equivalentSessionIDs.insert(resolvedDurable)
         }
         if continuesPreviousIdentity {
             equivalentSessionIDs.formUnion(previous.equivalentSessionIDs)

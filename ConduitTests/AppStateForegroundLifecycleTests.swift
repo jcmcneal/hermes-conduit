@@ -8,6 +8,151 @@ import XCTest
 /// stale local idle state is corrected before the next submission is routed.
 @MainActor
 final class AppStateForegroundLifecycleTests: XCTestCase {
+    func testFastSecondSendKeepsStoredConversationWhenRefreshedCatalogDropsRuntimeAlias() async {
+        var resumes: [String] = []
+        var sends: [String] = []
+        let rows: [[String: Any]] = [
+            ["id": "100", "role": "user", "content": "Earlier", "timestamp": "1"],
+            ["id": "101", "role": "assistant", "content": "Earlier answer", "timestamp": "2"]
+        ]
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, id, _ in
+                resumes.append(id)
+                return SessionResumeResult(sessionId: id == "stored-a" ? "runtime-a" : id,
+                    messages: [], snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            persistedTranscript: { _, _ in .payload([
+                "session_id": "stored-a", "messages": rows,
+                "pagination": ["limit": 120, "offset": 0, "order": "latest", "returned": 2]
+            ]) },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted },
+            verifyTransportHealth: { _ in }
+        ))
+        let box = await installConnectedClient(into: harness)
+        harness.appState.sessions = [session("stored-a", alternateIDs: ["runtime-a"])]
+        let opened = await harness.appState.openSession("stored-a")
+        XCTAssertTrue(opened)
+        let first = await harness.appState.submitComposer(text: "First")
+        XCTAssertTrue(first)
+        harness.appState.handleStreamEvent(.sessionBusy(sessionId: "runtime-a", busy: true))
+        harness.appState.handleStreamEvent(.messageComplete(sessionId: "runtime-a", messageId: nil,
+            content: "First answer", reasoning: nil))
+        harness.appState.handleStreamEvent(.sessionBusy(sessionId: "runtime-a", busy: false))
+        XCTAssertEqual(harness.appState.turnState, .idle)
+
+        let second = await harness.appState.submitComposer(text: "Second")
+
+        XCTAssertTrue(second)
+        XCTAssertEqual(resumes, ["stored-a", "stored-a"], "Lagging persistence must recover the selected conversation")
+        XCTAssertEqual(sends, ["runtime-a", "runtime-a"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-a")
+        XCTAssertEqual(harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a")
+        XCTAssertEqual(harness.appState.messages.last?.content, "Second")
+        box.client.disconnect()
+    }
+
+    func testComposerSubmissionSurvivesLegitimateRuntimeRotationDuringRecovery() async {
+        // Hermes legitimately rotates stored-a: runtime-old → runtime-new
+        // during the second send's freshness recovery. The in-flight
+        // submission keeps ownership (same profile, client, epoch, viewport
+        // generation, durable conversation) and routes to the NEW runtime id.
+        var resumes: [String] = []
+        var sends: [String] = []
+        let rows: [[String: Any]] = [
+            ["id": "100", "role": "user", "content": "Earlier", "timestamp": "1"],
+            ["id": "101", "role": "assistant", "content": "Earlier answer", "timestamp": "2"]
+        ]
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.session("unrelated"), self.session("stored-a")] },
+            openSession: { _, id, _ in
+                resumes.append(id)
+                let rotated = resumes.count > 1
+                return SessionResumeResult(
+                    sessionId: id == "stored-a" ? (rotated ? "runtime-new" : "runtime-old") : id,
+                    storedSessionId: id == "stored-a" && rotated ? "stored-a" : nil,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            persistedTranscript: { _, _ in .payload([
+                "session_id": "stored-a", "messages": rows,
+                "pagination": ["limit": 120, "offset": 0, "order": "latest", "returned": 2]
+            ]) },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted },
+            verifyTransportHealth: { _ in }
+        ))
+        let box = await installConnectedClient(into: harness)
+        harness.appState.sessions = [self.session("stored-a", alternateIDs: ["runtime-old"])]
+        let opened = await harness.appState.openSession("stored-a")
+        XCTAssertTrue(opened)
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-old")
+        let first = await harness.appState.submitComposer(text: "First")
+        XCTAssertTrue(first)
+        harness.appState.handleStreamEvent(.sessionBusy(sessionId: "runtime-old", busy: true))
+        harness.appState.handleStreamEvent(.messageComplete(sessionId: "runtime-old", messageId: nil,
+            content: "First answer", reasoning: nil))
+        harness.appState.handleStreamEvent(.sessionBusy(sessionId: "runtime-old", busy: false))
+        XCTAssertEqual(harness.appState.turnState, .idle)
+
+        let second = await harness.appState.submitComposer(text: "Second")
+
+        XCTAssertTrue(second)
+        XCTAssertEqual(resumes, ["stored-a", "stored-a"])
+        XCTAssertEqual(sends, ["runtime-old", "runtime-new"], "The rebound submission routes to the new runtime id")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-new")
+        XCTAssertEqual(
+            harness.appState.activeChatScrollSessionIdentity.canonicalSessionID, "stored-a",
+            "Rotation is a routing rebind, not navigation to another conversation"
+        )
+        XCTAssertEqual(harness.appState.messages.last?.content, "Second")
+        box.client.disconnect()
+    }
+
+    func testNavigationHandoffToSameConversationStillInvalidatesSubmission() async {
+        // A → B → A is a navigation handoff, not a runtime rebind: each
+        // explicit open bumps the viewport generation, so a suspended
+        // submission captured on A stays invalid even though the durable
+        // conversation is A again.
+        var sends: [String] = []
+        let a = self.session("stored-a")
+        let b = self.session("stored-b")
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [a, b] },
+            openSession: { _, id, _ in
+                SessionResumeResult(sessionId: "runtime-\(id)", messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)]))
+            },
+            refreshContext: { _, _ in },
+            sendPrompt: { _, id, _ in sends.append(id); return .accepted }
+        ))
+        _ = await installConnectedClient(into: harness)
+        harness.appState.sessions = [a, b]
+        let openedA = await harness.appState.openSession("stored-a")
+        XCTAssertTrue(openedA)
+        let handoffContext = harness.appState.composerSubmissionContext()
+
+        let openedB = await harness.appState.openSession("stored-b")
+        XCTAssertTrue(openedB)
+        let reopenedA = await harness.appState.openSession("stored-a")
+        XCTAssertTrue(reopenedA)
+
+        let submitted = await harness.appState.submitComposer(text: "Stale", context: handoffContext)
+
+        XCTAssertFalse(submitted, "Suspended work from before the handoff must not send after returning to A")
+        XCTAssertTrue(sends.isEmpty)
+
+        // Positive control: a FRESH context captured after reopening A sends
+        // normally — proving the rejection above comes from the ownership
+        // generation fence, not from a broken composer path.
+        let freshContext = harness.appState.composerSubmissionContext()
+        let freshSubmitted = await harness.appState.submitComposer(text: "Fresh after return", context: freshContext)
+        XCTAssertTrue(freshSubmitted)
+        XCTAssertEqual(sends, ["runtime-stored-a"])
+    }
+
 
     // MARK: - A. Healthy socket + active turn
 
@@ -7586,6 +7731,129 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
             harness.appState.turnStateIsStale,
             "The aliased steer advanced the evidence, so the recovery must not clear the boundary's staleness"
         )
+        box.client.disconnect()
+    }
+
+    // MARK: - Composer user-edit ownership
+
+    /// The slow/flaky health-check window: the foreground attempt suspends
+    /// inside the transport liveness check, the user starts typing into the
+    /// visible conversation, and the health check then fails. The failure's
+    /// fallback must no longer select a session by resume policy: the edit
+    /// invalidated the automatic-return token, so the recovery proceeds as a
+    /// `.preserveCurrent` repair — the transport is restored and the visible
+    /// session is resumed, never the saved (older) one. Without the edit the
+    /// same failure still falls back to `.automaticReturn` and restores the
+    /// saved session — the reported symptom.
+    func testForegroundHealthCheckFailureRespectsComposerUserEditOwnership() async throws {
+        try await assertForegroundHealthCheckFailureFallback(
+            userEditsDuringHealthCheck: true
+        )
+    }
+
+    /// Control: before any composer interaction, a foreground health-check
+    /// failure must still recover according to the configured resume
+    /// behavior (Continue Where I Left Off → the saved older session).
+    func testForegroundHealthCheckFailureWithoutComposerEditStillRestoresSavedSession() async throws {
+        try await assertForegroundHealthCheckFailureFallback(
+            userEditsDuringHealthCheck: false
+        )
+    }
+
+    private func assertForegroundHealthCheckFailureFallback(
+        userEditsDuringHealthCheck: Bool,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let visible = session("stored-a")
+        let savedOlder = session("stored-b")
+        let healthGate = LifecycleSuspension()
+        var mintCount = 0
+        var openedSessionIDs: [String] = []
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                connectClient: { _ in },
+                loadCatalog: { _, _ in [savedOlder, visible] },
+                mintTicket: { _ in
+                    mintCount += 1
+                    return "reconnect-ticket"
+                },
+                openSession: { _, sessionID, _ in
+                    openedSessionIDs.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: sessionID,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                persistedTranscript: { _, _ in
+                    .payload([
+                        "messages": [
+                            ["id": "user", "role": "user", "content": "Question", "timestamp": "1"]
+                        ],
+                        "pagination": ["limit": 120, "offset": 0, "order": "latest", "returned": 1]
+                    ])
+                },
+                refreshContext: { _, _ in },
+                verifyTransportHealth: { _ in
+                    await healthGate.suspend()
+                    throw URLError(.networkConnectionLost)
+                },
+                probeActiveSessions: { _ in [] },
+                loadProfiles: {},
+                loadBusyInputMode: { _ in },
+                loadProfileDisplayPreferences: {},
+                loadSlashCommands: {}
+            )
+        )
+        let box = await installConnectedClient(into: harness)
+        harness.appState.sessions = [savedOlder, visible]
+        harness.appState.activeSessionId = visible.id
+        // Seed through the real hydration path, then repoint the resume
+        // store at the older session — the one `.automaticReturn` would
+        // restore over the conversation the user is editing.
+        let seeded = await harness.appState.openSession(visible.id)
+        XCTAssertTrue(seeded, file: file, line: line)
+        openedSessionIDs.removeAll()
+        harness.coordinator.rememberSessionID(savedOlder.id, for: "default")
+
+        harness.appState.handleScenePhase(.background)
+        let activation = harness.appState.handleScenePhase(.active)
+        await healthGate.waitUntilSuspended()
+
+        if userEditsDuringHealthCheck {
+            harness.appState.noteComposerUserEdit()
+        }
+
+        healthGate.resume()
+        if let activation {
+            await activation.value
+        }
+
+        if userEditsDuringHealthCheck {
+            XCTAssertEqual(
+                mintCount, 1,
+                "The invalidated foreground attempt must still repair the transport, without resume-policy selection",
+                file: file, line: line
+            )
+            XCTAssertEqual(
+                openedSessionIDs, [visible.id],
+                "The repair must resume the visible session, never the saved one",
+                file: file, line: line
+            )
+            XCTAssertEqual(harness.appState.activeSessionId, visible.id, file: file, line: line)
+            XCTAssertEqual(
+                harness.recoverySequence.currentPurpose, .preserveCurrent,
+                "The repair recovery must proceed with .preserveCurrent",
+                file: file, line: line
+            )
+            XCTAssertTrue(harness.appState.isConnected, file: file, line: line)
+            XCTAssertEqual(harness.appState.turnState, .idle, file: file, line: line)
+        } else {
+            XCTAssertEqual(mintCount, 1, file: file, line: line)
+            XCTAssertEqual(openedSessionIDs, [savedOlder.id], file: file, line: line)
+            XCTAssertEqual(harness.appState.activeSessionId, savedOlder.id, file: file, line: line)
+        }
         box.client.disconnect()
     }
 
