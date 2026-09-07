@@ -81,6 +81,13 @@ final class VoiceAudioSessionCoordinator {
     /// and deterministic ownership tests.
     private(set) var appliedPolicy: Policy?
 
+    /// Raised when a policy transition failed partway — typically the
+    /// category changed but activation did not. The physical session can no
+    /// longer be trusted to match `appliedPolicy`, so the next transition
+    /// must re-apply the full configuration even if the dominant policy is
+    /// unchanged. Cleared whenever a transition completes successfully.
+    private var needsReapply = false
+
     enum Policy: Equatable {
         /// `.playAndRecord` + `.voiceChat`: Voice Conversation capture, and
         /// assistant speech that shares the capture-owned session.
@@ -107,8 +114,24 @@ final class VoiceAudioSessionCoordinator {
         } catch {
             leases.removeValue(forKey: lease.id)
             audioSessionLogger.error(
-                "audio session activation failed for \(Self.describe(intent), privacy: .public): \(String(describing: error), privacy: .public)"
+                "audio intent acquisition failed for \(Self.describe(intent), privacy: .public): \(String(describing: error), privacy: .public)"
             )
+            // The failed transition may have switched the category before
+            // activation failed, leaving the physical session partially
+            // switched under the remaining owners. needsReapply was raised by
+            // the failed transition, so this compensating call re-applies
+            // their dominant policy in full instead of trusting the
+            // unchanged bookkeeping. If the restore also fails, the flag
+            // stays raised and the next ownership transition retries.
+            if appliedPolicy != nil {
+                do {
+                    try applyDominantPolicy()
+                } catch {
+                    audioSessionLogger.error(
+                        "audio session rollback to the remaining policy failed: \(String(describing: error), privacy: .public)"
+                    )
+                }
+            }
             throw error
         }
         audioSessionLogger.debug(
@@ -122,10 +145,21 @@ final class VoiceAudioSessionCoordinator {
         do {
             try applyDominantPolicy()
         } catch {
-            // Deactivation and policy-transition failures must never crash
-            // the caller. The policy stays marked applied, so the next
-            // ownership transition retries it instead of assuming the session
-            // went inactive.
+            // Transition and deactivation failures must never crash the
+            // caller. applyDominantPolicy raised needsReapply for a partial
+            // transition; for the remaining owners' sake this compensating
+            // re-apply mirrors acquire's rollback. A failed deactivation to
+            // nil has no remaining owners and stays consistent under the
+            // retained applied policy, so no rollback is attempted there.
+            if dominantPolicy != nil {
+                do {
+                    try applyDominantPolicy()
+                } catch {
+                    audioSessionLogger.error(
+                        "audio session rollback to the remaining policy failed: \(String(describing: error), privacy: .public)"
+                    )
+                }
+            }
             audioSessionLogger.error(
                 "audio session policy transition failed on release: \(String(describing: error), privacy: .public)"
             )
@@ -140,17 +174,8 @@ final class VoiceAudioSessionCoordinator {
     /// the session underneath a live lease (route change restarting capture).
     func reassert() throws {
         guard !leases.isEmpty else { return }
-        let previous = appliedPolicy
-        appliedPolicy = nil
-        do {
-            try applyDominantPolicy()
-        } catch {
-            // Mirror release(): keep the last known-applied policy so a later
-            // ownership transition still diffs against it and retries the
-            // deactivation instead of assuming the session went inactive.
-            appliedPolicy = previous
-            throw error
-        }
+        needsReapply = true
+        try applyDominantPolicy()
     }
 
     /// Any conversation intent keeps the conversation configuration:
@@ -170,21 +195,33 @@ final class VoiceAudioSessionCoordinator {
 
     private func applyDominantPolicy() throws {
         let target = dominantPolicy
-        guard target != appliedPolicy else { return }
-        switch target {
-        case .conversation:
-            let configuration = VoiceAudioSessionConfiguration.capture
-            try session.setCategory(configuration.category, mode: configuration.mode, options: configuration.options)
-            try session.setActive(true, options: [])
-            appliedPolicy = .conversation
-        case .standalonePlayback:
-            let configuration = VoiceAudioSessionConfiguration.standalonePlayback
-            try session.setCategory(configuration.category, mode: configuration.mode, options: configuration.options)
-            try session.setActive(true, options: [])
-            appliedPolicy = .standalonePlayback
-        case nil:
-            try session.setActive(false, options: .notifyOthersOnDeactivation)
-            appliedPolicy = nil
+        guard target != appliedPolicy || needsReapply else { return }
+        do {
+            switch target {
+            case .conversation:
+                let configuration = VoiceAudioSessionConfiguration.capture
+                try session.setCategory(configuration.category, mode: configuration.mode, options: configuration.options)
+                try session.setActive(true, options: [])
+                appliedPolicy = .conversation
+            case .standalonePlayback:
+                let configuration = VoiceAudioSessionConfiguration.standalonePlayback
+                try session.setCategory(configuration.category, mode: configuration.mode, options: configuration.options)
+                try session.setActive(true, options: [])
+                appliedPolicy = .standalonePlayback
+            case nil:
+                try session.setActive(false, options: .notifyOthersOnDeactivation)
+                appliedPolicy = nil
+            }
+            needsReapply = false
+        } catch {
+            // An activation-path failure is partial: the category may have
+            // changed even though activation did not, so the physical session
+            // no longer matches appliedPolicy and the next transition must
+            // re-apply the full configuration. A failed deactivation, by
+            // contrast, leaves the session active under the applied policy —
+            // still consistent — so the flag is not raised there.
+            if target != nil { needsReapply = true }
+            throw error
         }
         audioSessionLogger.info("audio policy changed: \(Self.describe(target), privacy: .public)")
     }

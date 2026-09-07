@@ -12500,6 +12500,11 @@ final class AppState: ObservableObject {
     }
 
     func runVoiceASRTest() async -> VoiceProviderTestResult {
+        // Ownership first: a playing read aloud must release its standalone
+        // lease before anything else in this flow — the capability refresh
+        // and the capture test itself — can claim conversation-capture
+        // ownership or await the network.
+        messageReadAloudController.stop()
         await refreshVoiceCapabilities()
         guard isVoiceEnabled else {
             return .failure("Enable voice for this profile before running a speech-to-text test.")
@@ -12510,10 +12515,6 @@ final class AppState: ObservableObject {
         guard let gateway = makeVoiceGateway() else {
             return .failure("Conduit could not connect this test to the selected profile.")
         }
-        // Mutual exclusion: the transcription test claims conversation-capture
-        // session ownership, so a still-playing read aloud must stop first —
-        // otherwise the dominant audio policy would flip under live playback.
-        messageReadAloudController.stop()
         voiceConversationController.setGateway(gateway)
         let result = await voiceConversationController.runTranscriptionTest()
         appleSpeechAvailability = AppleOnDeviceSpeechTranscriber.currentAvailability()

@@ -260,6 +260,83 @@ final class VoiceAudioSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.appliedPolicy, .conversation)
     }
 
+    func testFailedStandaloneToConversationAcquisitionRollsBackAndRestoresPolicy() throws {
+        _ = try coordinator.acquire(.standalonePlayback)
+        session.resetRecordings()
+
+        // One-shot activation failure: the transition switches the category
+        // to conversation, then cannot activate.
+        session.pendingActivationFailures = 1
+        XCTAssertThrowsError(try coordinator.acquire(.conversationCapture))
+
+        // The rolled-back acquisition must not leave the physical session
+        // partially switched under the surviving standalone owner: the
+        // compensating transition re-applied the standalone policy in full
+        // (category restored, activation retried successfully).
+        XCTAssertEqual(session.categoryCalls.map(\.category), [.playAndRecord, .playback])
+        XCTAssertEqual(session.activationCount, 1, "the rollback re-activated the remaining policy")
+        XCTAssertEqual(session.deactivationCount, 0)
+        XCTAssertEqual(coordinator.appliedPolicy, .standalonePlayback)
+
+        // The failed lease was removed: an acquire matching the applied
+        // policy is a plain ownership no-op with no reconfiguration.
+        session.resetRecordings()
+        _ = try coordinator.acquire(.standalonePlayback)
+        XCTAssertEqual(session.categoryCalls.count, 0)
+        XCTAssertEqual(session.activationCount, 0)
+    }
+
+    func testFailedAcquisitionWithStickyFailureStaysRecoverable() throws {
+        _ = try coordinator.acquire(.standalonePlayback)
+        session.resetRecordings()
+
+        // Sticky failure: both the conversation transition and the rollback
+        // fail. The coordinator must keep the bookkeeping consistent with
+        // the surviving owner and keep demanding a full re-apply.
+        session.activateError = VoiceAudioSessionMockError.activationFailed
+        XCTAssertThrowsError(try coordinator.acquire(.conversationCapture))
+
+        XCTAssertEqual(session.categoryCalls.count, 2, "the transition and the rollback each attempted the category")
+        XCTAssertEqual(coordinator.appliedPolicy, .standalonePlayback)
+
+        // Once activations succeed again, the very next ownership transition
+        // — even one matching the applied policy — re-applies the full
+        // configuration instead of trusting the stale bookkeeping.
+        session.activateError = nil
+        session.resetRecordings()
+        _ = try coordinator.acquire(.standalonePlayback)
+        XCTAssertEqual(session.categoryCalls.count, 1)
+        XCTAssertEqual(session.activationCount, 1)
+        XCTAssertEqual(coordinator.appliedPolicy, .standalonePlayback)
+    }
+
+    func testFailedConversationToStandaloneHandoffWithExistingOwnersRecovers() throws {
+        let captureLease = try coordinator.acquire(.conversationCapture)
+        _ = try coordinator.acquire(.standalonePlayback)
+        session.resetRecordings()
+
+        // Releasing capture hands ownership to the surviving standalone
+        // owner: the category switches to .playback, then a one-shot
+        // activation failure hits.
+        session.pendingActivationFailures = 1
+        coordinator.release(captureLease)
+
+        // The release path immediately re-applied the remaining standalone
+        // policy in full, so bookkeeping and physical session agree again.
+        XCTAssertEqual(session.categoryCalls.map(\.category), [.playback, .playback])
+        XCTAssertEqual(session.activationCount, 1, "the release path restored the remaining standalone policy")
+        XCTAssertEqual(session.deactivationCount, 0, "a failed handoff must not deactivate the session")
+        XCTAssertEqual(coordinator.appliedPolicy, .standalonePlayback)
+
+        // Ownership is now cleanly standalone: acquiring conversation
+        // capture performs a normal policy transition.
+        session.resetRecordings()
+        _ = try coordinator.acquire(.conversationCapture)
+        XCTAssertEqual(session.categoryCalls.count, 1)
+        XCTAssertEqual(session.categoryCalls.last?.category, .playAndRecord)
+        XCTAssertEqual(coordinator.appliedPolicy, .conversation)
+    }
+
     func testReassertWithoutOwnersDoesNothing() throws {
         try coordinator.reassert()
 
@@ -298,6 +375,11 @@ private final class MockVoiceAudioSession: VoiceAudioSessionControlling {
     var categoryError: Error?
     var activateError: Error?
     var deactivateError: Error?
+    /// Fails the next N activation attempts before recording them, modelling
+    /// a one-shot activation failure (category succeeds, activation does
+    /// not). Failed attempts are deliberately not recorded, so counts reflect
+    /// successful system calls.
+    var pendingActivationFailures = 0
 
     var activationCount: Int { activationCalls.filter(\.active).count }
     var deactivationCount: Int { activationCalls.filter { !$0.active }.count }
@@ -320,7 +402,13 @@ private final class MockVoiceAudioSession: VoiceAudioSessionControlling {
     }
 
     func setActive(_ active: Bool, options: AVAudioSession.SetActiveOptions) throws {
-        if active, let activateError { throw activateError }
+        if active {
+            if pendingActivationFailures > 0 {
+                pendingActivationFailures -= 1
+                throw VoiceAudioSessionMockError.activationFailed
+            }
+            if let activateError { throw activateError }
+        }
         if !active, let deactivateError { throw deactivateError }
         activationCalls.append((active, options))
     }
