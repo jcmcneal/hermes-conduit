@@ -594,10 +594,15 @@ final class VoiceConversationControllerTests: XCTestCase {
     func testMicrophonePausePreservesConversationStateAcrossListeningThinkingSpeakingAndMuted() async {
         let capture = MockCapture(permissionGranted: true)
         let gateway = MockGateway(transcript: "Hello", startsPlaybackOnOpen: true)
+        // Full-duplex route: this test pins pause/resume symmetry. The
+        // speaker-safe behavior during playback has dedicated coverage in
+        // VoiceSpeakerSafeBargeInTests.
+        let policy = RoutePolicyBox(.fullDuplex)
         let controller = VoiceConversationController(
             capture: capture,
             playback: MockPlayback(),
             gateway: gateway,
+            routePolicyProvider: { policy.policy },
             submit: { _ in true },
             interrupt: {}
         )
@@ -1191,7 +1196,7 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         XCTAssertEqual(controller.state, .speaking)
         XCTAssertTrue(controller.isPlaybackCaptureSuspended)
         XCTAssertEqual(capture.startCount, 1, "the stale barge-in must not reopen capture")
-        XCTAssertNil(capture.lastStartIncludePreRoll, "no speaker-contaminated pre-roll may be requested")
+        XCTAssertEqual(capture.lastStartIncludePreRoll, false, "no barge-in restart may request speaker-contaminated pre-roll")
         XCTAssertEqual(capture.resumeCount, 0)
     }
 
