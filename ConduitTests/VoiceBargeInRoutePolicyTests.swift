@@ -97,6 +97,30 @@ final class VoiceBargeInRoutePolicyTests: XCTestCase {
         )
     }
 
+    func testHeadphonesPlusAirPlayIsHalfDuplex() {
+        // Every output must be proven safe: an open AirPlay route alongside
+        // wired headphones vetoes full duplex.
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.headphones, "Wired"), port(.airPlay, "Living Room")],
+                inputs: [port(.builtInMic, "Microphone")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+    }
+
+    func testPairedAirPodsPlusUnrelatedA2DPRoomSpeakerIsHalfDuplex() {
+        // AirPods' own HFP pairing is real, but the second (unpaired)
+        // Bluetooth output is a room speaker whose audio feeds the mic.
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothHFP, "AirPods Pro"), port(.bluetoothA2DP, "Room Speaker")],
+                inputs: [port(.bluetoothHFP, "AirPods Pro")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+    }
+
     func testHeadsetProfileOutputWithoutHeadsetInputIsHalfDuplex() {
         // Ambiguous: HFP output routed, but capture still on the built-in
         // mic. Conservative classification wins.

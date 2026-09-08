@@ -1159,6 +1159,48 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         XCTAssertEqual(capture.resumeCount, 0, "capture must never resume live over audible playback")
     }
 
+    func testInterruptAcrossSessionTeardownCannotResurrectCapture() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        let playback = MockPlayback()
+        let gate = InterruptGate()
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: playback,
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { await gate.waitInInterrupt() }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+        XCTAssertEqual(capture.startCount, 1)
+
+        // The user taps Interrupt; the Hermes interruption parks mid-flight.
+        let interruptTask = Task { await controller.interruptAssistantPlayback() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(gate.count, 1, "the interruption is parked in flight")
+
+        // While it is parked, the user closes the Voice sheet: stop() tears
+        // the session down and advances the generation.
+        controller.stop()
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertFalse(controller.hasLiveVoiceSession)
+
+        // The stale continuation must not resurrect the voice session.
+        gate.release()
+        await interruptTask.value
+
+        XCTAssertEqual(controller.state, .idle, "stale Interrupt work must stay idle after teardown")
+        XCTAssertFalse(controller.hasLiveVoiceSession)
+        XCTAssertEqual(capture.startCount, 1, "stale Interrupt must not reopen capture")
+        XCTAssertEqual(capture.lastStartIncludePreRoll, false, "no fresh listening window or pre-roll may be requested")
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertFalse(playback.isPlaying)
+    }
+
     func testBargeInOverlappingPlaybackSuspensionCannotReopenCapture() async {
         let capture = MockCapture(permissionGranted: true)
         let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
