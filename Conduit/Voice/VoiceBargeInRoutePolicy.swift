@@ -44,10 +44,13 @@ enum VoiceBargeInRoutePolicy: Equatable {
         // output is clear evidence of a usable headset microphone/output
         // pairing (AirPods, mono headsets): the voice session's output
         // travels the headset's own speaker. Name equality keeps two
-        // different accessories (headset mic + room speaker) conservative.
+        // different accessories (headset mic + room speaker) conservative,
+        // and empty names never pair (two anonymous ports are not evidence).
         let hasPairedHeadsetOutput = outputs.contains { output in
             guard output.type == .bluetoothHFP || output.type == .bluetoothA2DP else { return false }
-            return inputs.contains { $0.type == .bluetoothHFP && $0.name == output.name }
+            return inputs.contains {
+                $0.type == .bluetoothHFP && !$0.name.isEmpty && $0.name == output.name
+            }
         }
         if hasPairedHeadsetOutput { return .fullDuplex }
         // Built-in speaker/receiver, A2DP-only Bluetooth (speakers), AirPlay,

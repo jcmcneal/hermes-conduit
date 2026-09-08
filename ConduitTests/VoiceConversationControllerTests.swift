@@ -1116,7 +1116,7 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         XCTAssertEqual(controller.state, .listening)
     }
 
-    func testPauseDuringActiveSuspensionClearsInterruptAffordance() async {
+    func testPauseDuringActiveSuspensionKeepsSuspensionSafetyFlag() async {
         let capture = MockCapture(permissionGranted: true)
         let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
         var interrupts = 0
@@ -1133,13 +1133,66 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         await Self.driveToSpeaking(controller, gateway: gateway)
         XCTAssertTrue(controller.isPlaybackCaptureSuspended)
 
-        // Explicit user intent supersedes the automatic suspension: the
-        // sheet falls back to the user-paused presentation.
+        // Explicit user intent takes over the presentation (the sheet shows
+        // the paused state), but it must not discard the speaker-safety
+        // fact: a later listen during audible playback has to stay on the
+        // interrupt path.
         controller.pauseMicrophone()
 
-        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended, "explicit pause must not discard the speaker-safety fact")
         XCTAssertTrue(controller.isMicrophonePaused)
         XCTAssertEqual(interrupts, 0)
+
+        // Listening again while playback is still audible interrupts rather
+        // than resuming a live microphone over Hermes' voice.
+        await controller.resumeMicrophone()
+
+        XCTAssertEqual(interrupts, 1)
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertFalse(controller.isMicrophonePaused)
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.resumeCount, 0, "capture must never resume live over audible playback")
+    }
+
+    func testBargeInOverlappingPlaybackSuspensionCannotReopenCapture() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        let gate = InterruptGate()
+        let policy = RoutePolicyBox(.fullDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { await gate.waitInInterrupt() }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertEqual(controller.state, .speaking)
+
+        // Genuine headset barge-in whose interruption is in flight.
+        let bargeInStart = Date()
+        controller.ingestAudioLevel(0.5, at: bargeInStart)
+        controller.ingestAudioLevel(0.5, at: bargeInStart.addingTimeInterval(0.31))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(gate.count, 1, "the barge-in interruption is parked mid-flight")
+
+        // While it is parked, the route becomes an open speaker: suspension
+        // engages and cancels the parked barge-in task.
+        policy.policy = .speakerSafeHalfDuplex
+        capture.emit(.routeChanged)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+
+        gate.release()
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(controller.state, .speaking)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+        XCTAssertEqual(capture.startCount, 1, "the stale barge-in must not reopen capture")
+        XCTAssertNil(capture.lastStartIncludePreRoll, "no speaker-contaminated pre-roll may be requested")
+        XCTAssertEqual(capture.resumeCount, 0)
     }
 
     /// listening → user utterance → submit → .thinking → assistant .started
@@ -1169,6 +1222,24 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
 private final class RoutePolicyBox {
     var policy: VoiceBargeInRoutePolicy
     init(_ policy: VoiceBargeInRoutePolicy) { self.policy = policy }
+}
+
+/// An interruption closure that parks mid-flight, so tests can interleave
+/// suspension and route changes into the barge-in await window.
+@MainActor
+private final class InterruptGate {
+    private(set) var count = 0
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func waitInInterrupt() async {
+        count += 1
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 @MainActor

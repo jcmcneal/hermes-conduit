@@ -85,6 +85,18 @@ final class VoiceBargeInRoutePolicyTests: XCTestCase {
         )
     }
 
+    func testEmptyBluetoothNamesNeverPair() {
+        // Two anonymous ports reporting empty names are not evidence of a
+        // headset pairing.
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothA2DP, "")],
+                inputs: [port(.bluetoothHFP, "")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+    }
+
     func testHeadsetProfileOutputWithoutHeadsetInputIsHalfDuplex() {
         // Ambiguous: HFP output routed, but capture still on the built-in
         // mic. Conservative classification wins.

@@ -205,10 +205,12 @@ final class VoiceConversationController: ObservableObject {
     }
 
     func pauseMicrophone() {
-        // Explicit user intent supersedes an automatic playback suspension:
-        // the mic is being paused either way, but the sheet must show the
-        // user-paused state, not the Interrupt control.
-        isPlaybackCaptureSuspended = false
+        // Explicit user intent never discards the speaker-safety fact: while
+        // the suspension flag survives, any later listen request during
+        // audible playback still routes through the interrupt path instead
+        // of resuming a live microphone over Hermes' voice. Presentation is
+        // handled by the sheet, which shows the user-paused state whenever
+        // `isMicrophonePaused` is set.
         capture.pause()
         isMicrophonePaused = true
     }
@@ -253,6 +255,7 @@ final class VoiceConversationController: ObservableObject {
     /// may contain the assistant's own TTS.
     func interruptAssistantPlayback() async {
         guard isPlaybackCaptureSuspended else { return }
+        cachedRoutePolicy = nil
         playback.stop()
         cancelSpeechDrainAndStream()
         speechDeltas.removeAll()
@@ -271,6 +274,7 @@ final class VoiceConversationController: ObservableObject {
 
     func stop() {
         operationGeneration &+= 1
+        cachedRoutePolicy = nil
         utteranceTask?.cancel()
         utteranceTask = nil
         bargeInTask?.cancel()
@@ -620,6 +624,10 @@ final class VoiceConversationController: ObservableObject {
     }
 
     private func beginBargeInMonitoring() {
+        // Seam-level invariant: no barge-in monitoring affordance while a
+        // playback suspension is active, so a future capture service cannot
+        // reintroduce the feedback loop one layer down.
+        guard !isPlaybackCaptureSuspended else { return }
         do {
             try capture.beginBargeInMonitoring()
             if isMicrophonePaused { capture.pause() }
@@ -673,6 +681,7 @@ final class VoiceConversationController: ObservableObject {
 
     private func failForAudioInterruption() {
         operationGeneration &+= 1
+        cachedRoutePolicy = nil
         utteranceTask?.cancel()
         utteranceTask = nil
         bargeInTask?.cancel()
@@ -703,7 +712,15 @@ final class VoiceConversationController: ObservableObject {
     }
 
     private func beginBargeIn(generation: UInt64) async {
-        defer { if operationGeneration == generation { bargeInTask = nil } }
+        // A cancelled task must neither act nor stomp a successor's handle.
+        defer {
+            if operationGeneration == generation, !Task.isCancelled { bargeInTask = nil }
+        }
+        // Cancellation is binding before the destructive prefix: a barge-in
+        // that lost the race to a playback suspension must not stop the
+        // playback or retire the turn it is supposed to protect.
+        guard !Task.isCancelled else { return }
+        guard !isPlaybackCaptureSuspended else { return }
         guard state == .thinking || state == .speaking || state == .muted else { return }
         lastBargeInState = state
         playback.stop()
@@ -715,10 +732,11 @@ final class VoiceConversationController: ObservableObject {
         isAwaitingVoiceAssistant = false
         awaitedAssistantResponseStarted = false
         await interrupt()
+        // Cancellation is re-checked after the await: the suspension may have
+        // engaged while the interruption was in flight, and reopening capture
+        // now would hear the assistant's own speaker output.
+        guard !Task.isCancelled else { return }
         guard isCurrent(generation) else { return }
-        // A speaker-safe suspension may have engaged while the interruption
-        // was in flight (assistant playback started mid-await). Reopening
-        // capture now would hear the assistant's own speaker output.
         guard !isPlaybackCaptureSuspended else { return }
         await startListening(includePreRoll: true)
     }
