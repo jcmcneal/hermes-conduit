@@ -2083,12 +2083,15 @@ final class AppState: ObservableObject {
             "Server replacement \(previousIdentity, privacy: .private) -> \(identity, privacy: .private): retiring speech ownership (voiceLive=\(voiceWasLive ? "yes" : "no", privacy: .public), readAloudActive=\(readAloudWasActive ? "yes" : "no", privacy: .public))"
         )
         voiceConversationController.stop()
-        messageReadAloudController.stop()
+        // Read Aloud teardown flows through the controller's own pinned
+        // Option-A semantics: replacing a non-nil gateway performs the single
+        // authoritative stop. A nil gateway means nothing can be live — an
+        // operation cannot start without one.
+        messageReadAloudController.setGateway(nil)
         // A swapped gateway must never hand a later operation to the outgoing
         // server's bridge; the incoming connection rebuilds both references
         // from its own bridge (capability refresh, read-aloud assignment).
         voiceConversationController.setGateway(nil)
-        messageReadAloudController.setGateway(nil)
         readAloudGatewayBridge = nil
         showVoiceSheet = false
     }

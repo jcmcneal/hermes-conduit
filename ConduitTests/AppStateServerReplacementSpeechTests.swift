@@ -68,9 +68,9 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
 
         XCTAssertEqual(harness.readAloudController.state, .idle)
         XCTAssertNil(harness.readAloudController.gateway)
-        // stop() plus the gateway-clear's own stop() both land on the same
-        // single retirement; the engine ends fully stopped either way.
-        XCTAssertGreaterThan(harness.readAloudPlayback.stopCount, stopBaseline)
+        // Exactly one teardown: the boundary's setGateway(nil) triggers the
+        // controller's authoritative Option-A stop.
+        XCTAssertEqual(harness.readAloudPlayback.stopCount, stopBaseline + 1)
         XCTAssertFalse(harness.readAloudPlayback.isPlaying)
         XCTAssertEqual(stream.cancelCount, 1)
     }
@@ -280,11 +280,11 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         let changed = harness.appState.prepareChatResumeForConnection(to: Self.serverB)
         XCTAssertTrue(changed)
 
-        // Each retired owner ends fully stopped — the voice controller stops
-        // exactly once here (its gateway swap does not stop), the read aloud
-        // engine is stopped by the retirement and stays stopped.
+        // Each retired owner ends fully stopped with exactly one teardown —
+        // the voice controller's stop() and the read aloud controller's
+        // gateway-swap stop respectively.
         XCTAssertEqual(harness.voicePlayback.stopCount, voiceStopBaseline + 1)
-        XCTAssertGreaterThan(harness.readAloudPlayback.stopCount, readAloudStopBaseline)
+        XCTAssertEqual(harness.readAloudPlayback.stopCount, readAloudStopBaseline + 1)
         XCTAssertFalse(harness.voicePlayback.isPlaying)
         XCTAssertFalse(harness.readAloudPlayback.isPlaying)
         XCTAssertFalse(harness.voiceController.isGatewayAttached)
@@ -399,6 +399,11 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         await harness.awaitUntil("the retired speech test to settle") {
             !harness.voiceController.hasLiveVoiceSession
         }
+        // Test-only backstop so a broken implementation fails the assertions
+        // instead of hanging the runner: the cancel is idempotent (a no-op
+        // when the retirement already cancelled the stream) and guarantees
+        // the parked task completes.
+        harness.voiceGateway.streams.first?.cancel()
         let result = await speechTest.value
         XCTAssertFalse(result.passed, "a retired speech test must not report success")
         XCTAssertEqual(harness.voiceController.state, .idle)
