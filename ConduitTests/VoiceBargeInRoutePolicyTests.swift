@@ -1,0 +1,118 @@
+import AVFAudio
+import XCTest
+@testable import Conduit
+
+final class VoiceBargeInRoutePolicyTests: XCTestCase {
+    private func port(_ type: AVAudioSession.Port, _ name: String = "") -> VoiceAudioRoutePort {
+        VoiceAudioRoutePort(type: type, name: name)
+    }
+
+    func testBuiltInSpeakerAndReceiverAreHalfDuplex() {
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.builtInSpeaker, "Speaker")],
+                inputs: [port(.builtInMic, "Microphone")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.builtInReceiver, "Receiver")],
+                inputs: [port(.builtInMic, "Microphone")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+    }
+
+    func testWiredHeadphonesAreFullDuplexEvenWithBuiltInMic() {
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.headphones, "Wired Headphones")],
+                inputs: [port(.builtInMic, "Microphone")]
+            ),
+            .fullDuplex
+        )
+    }
+
+    func testBluetoothHeadsetProfilePairingIsFullDuplex() {
+        // AirPods / HFP headsets during a voice session: capture and playback
+        // both travel the headset's own mic and speaker.
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothHFP, "AirPods Pro")],
+                inputs: [port(.bluetoothHFP, "AirPods Pro")]
+            ),
+            .fullDuplex
+        )
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothA2DP, "AirPods Pro")],
+                inputs: [port(.bluetoothHFP, "AirPods Pro")]
+            ),
+            .fullDuplex
+        )
+    }
+
+    func testA2DPOnlyBluetoothOutputIsHalfDuplex() {
+        // A Bluetooth speaker with no headset microphone: its output feeds
+        // the built-in mic.
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothA2DP, "Boombox")],
+                inputs: [port(.builtInMic, "Microphone")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothA2DP, "Boombox")],
+                inputs: []
+            ),
+            .speakerSafeHalfDuplex
+        )
+    }
+
+    func testHeadsetProfileOutputWithoutHeadsetInputIsHalfDuplex() {
+        // Ambiguous: HFP output routed, but capture still on the built-in
+        // mic. Conservative classification wins.
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothHFP, "Headset")],
+                inputs: [port(.builtInMic, "Microphone")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+    }
+
+    func testGenericAndExternalOutputsAreHalfDuplex() {
+        let genericOutputs: [AVAudioSession.Port] = [.airPlay, .usbAudio, .carAudio]
+        for output in genericOutputs {
+            XCTAssertEqual(
+                VoiceBargeInRoutePolicy.resolve(
+                    outputs: [port(output, "External")],
+                    inputs: [port(.builtInMic, "Microphone")]
+                ),
+                .speakerSafeHalfDuplex,
+                "\(output.rawValue) output must be half duplex"
+            )
+        }
+    }
+
+    func testEmptyOrUnknownRoutesAreHalfDuplex() {
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(outputs: [], inputs: []),
+            .speakerSafeHalfDuplex,
+            "an unclassifiable route must never allow acoustic barge-in during playback"
+        )
+    }
+
+    func testAnyIsolatedHeadsetOutputWinsOverMixedRoutes() {
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.builtInSpeaker, "Speaker"), port(.headphones, "Wired")],
+                inputs: [port(.builtInMic, "Microphone")]
+            ),
+            .fullDuplex
+        )
+    }
+}

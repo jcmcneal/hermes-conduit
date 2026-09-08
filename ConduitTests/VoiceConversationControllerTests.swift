@@ -777,6 +777,343 @@ final class VoiceConversationControllerTests: XCTestCase {
     }
 }
 
+/// Speaker feedback-loop regressions: on routes whose output can feed the
+/// device microphone (built-in speaker/receiver), the assistant's own TTS
+/// must never become a new user turn. Capture is suspended during playback
+/// and the mic control becomes Interrupt; isolated headset routes keep the
+/// existing live barge-in.
+@MainActor
+final class VoiceSpeakerSafeBargeInTests: XCTestCase {
+    func testSpeakerRouteAssistantPlaybackCannotBargeInOnItself() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Why is the kanji cursed", startsPlaybackOnOpen: true)
+        var submitted: [String] = []
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { submitted.append($0); return true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+
+        XCTAssertEqual(controller.state, .speaking)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended, "speaker-safe routes suspend capture while Hermes speaks")
+        XCTAssertTrue(capture.didPause)
+
+        // The speaker's own TTS leaks back into the microphone: sustained
+        // level above the voice activity threshold for longer than the
+        // barge-in duration.
+        let leakStart = Date()
+        controller.ingestAudioLevel(0.5, at: leakStart)
+        controller.ingestAudioLevel(0.5, at: leakStart.addingTimeInterval(0.31))
+        controller.ingestAudioLevel(0.5, at: leakStart.addingTimeInterval(0.62))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(interrupts, 0, "assistant TTS must never schedule a barge-in on a speaker route")
+        XCTAssertEqual(controller.state, .speaking)
+        XCTAssertEqual(gateway.transcriptionCount, 0, "assistant output must not be transcribed as user speech")
+        XCTAssertEqual(capture.finishUtteranceCount, 0, "suspended capture must not record assistant output")
+        XCTAssertEqual(submitted.count, 1, "no new user turn may be submitted from speaker leakage")
+    }
+
+    func testSpeakerRouteResumesFreshListeningAfterPlaybackCompletes() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Why is the kanji cursed", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertEqual(capture.startCount, 1)
+        controller.receiveAssistantEvent(.completed(sessionID: "session", content: "Chorus line answer."))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.startCount, 2, "listening resumes with a fresh capture window after playback")
+        XCTAssertEqual(capture.lastStartIncludePreRoll, false, "the post-playback window must not reuse speaker-contaminated pre-roll")
+        XCTAssertEqual(interrupts, 0)
+    }
+
+    func testInterruptOnSpeakerRouteStopsPlaybackAndStartsFreshListening() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Why is the kanji cursed", startsPlaybackOnOpen: true)
+        let playback = MockPlayback()
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: playback,
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+        XCTAssertTrue(playback.isPlaying)
+
+        await controller.interruptAssistantPlayback()
+
+        XCTAssertEqual(interrupts, 1, "Interrupt retires the assistant turn through the authoritative interruption path")
+        XCTAssertFalse(playback.isPlaying)
+        XCTAssertEqual(gateway.streams.first?.cancelCount, 1, "the in-flight speech stream is retired")
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.startCount, 2)
+        XCTAssertEqual(capture.lastStartIncludePreRoll, false, "no speaker-contaminated pre-roll may be requested")
+        XCTAssertEqual(capture.finishUtteranceCount, 0)
+
+        // The retired turn's late completion must stay retired.
+        controller.receiveAssistantEvent(.completed(sessionID: "session", content: "Late tail"))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(gateway.openCount, 1, "a retired turn must not reopen speech")
+        XCTAssertEqual(controller.state, .listening)
+    }
+
+    func testHeadsetRouteKeepsLiveBargeInDuringPlayback() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.fullDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+
+        XCTAssertEqual(controller.state, .speaking)
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended, "isolated headset routes keep live capture")
+        XCTAssertEqual(capture.pauseCount, 0)
+
+        let bargeInStart = Date()
+        controller.ingestAudioLevel(0.5, at: bargeInStart)
+        controller.ingestAudioLevel(0.5, at: bargeInStart.addingTimeInterval(0.31))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(interrupts, 1, "genuine headset barge-in still interrupts playback")
+        XCTAssertEqual(controller.lastBargeInState, .speaking)
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.lastStartIncludePreRoll, true, "genuine headset barge-in keeps pre-roll")
+    }
+
+    func testUserPauseRemainsAuthoritativeAcrossAutomaticSuspension() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+        controller.beginVoiceTurn(sessionID: "session")
+        await controller.startListening()
+        let utteranceStart = Date()
+        controller.ingestAudioLevel(0.1, at: utteranceStart)
+        controller.ingestAudioLevel(0, at: utteranceStart.addingTimeInterval(1.3))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        controller.pauseMicrophone()
+        XCTAssertTrue(controller.isMicrophonePaused)
+
+        controller.receiveAssistantEvent(.started(sessionID: "session"))
+        controller.receiveAssistantEvent(.delta(sessionID: "session", text: "Answer while paused."))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended, "playback on a speaker route still records the automatic suspension")
+        XCTAssertTrue(controller.isMicrophonePaused, "the automatic suspension must not clear the user's pause")
+        XCTAssertEqual(controller.state, .speaking)
+
+        controller.receiveAssistantEvent(.completed(sessionID: "session", content: "Answer."))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertTrue(controller.isMicrophonePaused, "Hermes finishing playback must not auto-resume a user pause")
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.resumeCount, 0, "resume must never be driven by the playback lifecycle")
+        XCTAssertEqual(interrupts, 0)
+    }
+
+    func testMutedOutputNeverSuspendsCaptureAndKeepsBargeIn() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+        controller.beginVoiceTurn(sessionID: "session")
+        await controller.startListening()
+        let utteranceStart = Date()
+        controller.ingestAudioLevel(0.1, at: utteranceStart)
+        controller.ingestAudioLevel(0, at: utteranceStart.addingTimeInterval(1.3))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        controller.setOutputMuted(true)
+        controller.receiveAssistantEvent(.started(sessionID: "session"))
+        controller.receiveAssistantEvent(.delta(sessionID: "session", text: "Silenced answer."))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertEqual(controller.state, .muted)
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended, "no audible playback means no suspension")
+        XCTAssertEqual(capture.pauseCount, 0)
+        XCTAssertEqual(gateway.openCount, 0, "muted output never opens a speech stream")
+
+        // With nothing audible playing, the user can still barge in.
+        let bargeInStart = Date()
+        controller.ingestAudioLevel(0.5, at: bargeInStart)
+        controller.ingestAudioLevel(0.5, at: bargeInStart.addingTimeInterval(0.31))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(interrupts, 1)
+    }
+
+    func testMutingDuringPlaybackEndsSuspensionAndRestoresMonitoring() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+
+        controller.setOutputMuted(true)
+
+        XCTAssertEqual(controller.state, .muted)
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended, "muting stops the audible playback that justified suspension")
+        XCTAssertEqual(capture.resumeCount, 1, "capture becomes live again for monitoring")
+
+        let bargeInStart = Date()
+        controller.ingestAudioLevel(0.5, at: bargeInStart)
+        controller.ingestAudioLevel(0.5, at: bargeInStart.addingTimeInterval(0.31))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(interrupts, 1, "with output muted nothing audible plays, so barge-in stays live")
+    }
+
+    func testRouteChangeOntoSpeakerDuringPlaybackSuspendsCaptureImmediately() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.fullDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertEqual(capture.pauseCount, 0)
+
+        // AirPods disconnect mid-utterance: the route becomes the built-in
+        // speaker.
+        policy.policy = .speakerSafeHalfDuplex
+        capture.emit(.routeChanged)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended, "moving onto an open speaker mid-utterance must suspend capture")
+        XCTAssertEqual(capture.pauseCount, 1)
+
+        let leakStart = Date()
+        controller.ingestAudioLevel(0.5, at: leakStart)
+        controller.ingestAudioLevel(0.5, at: leakStart.addingTimeInterval(0.31))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(interrupts, 0, "no acoustic barge-in may survive a transition onto an open speaker")
+        XCTAssertEqual(controller.state, .speaking)
+    }
+
+    func testRouteChangeOntoHeadsetDuringPlaybackStaysConservativeUntilBoundary() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+
+        policy.policy = .fullDuplex
+        capture.emit(.routeChanged)
+        try? await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended, "mid-utterance upgrade to full duplex stays conservative until the next playback boundary")
+
+        controller.receiveAssistantEvent(.completed(sessionID: "session", content: "Done."))
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+    }
+
+    /// listening → user utterance → submit → .thinking → assistant .started
+    /// + .delta: the gateway opens its speech stream, playback starts, and
+    /// the controller settles in .speaking.
+    private static func driveToSpeaking(
+        _ controller: VoiceConversationController,
+        gateway: MockGateway,
+        sessionID: String = "session"
+    ) async {
+        controller.beginVoiceTurn(sessionID: sessionID)
+        await controller.startListening()
+        let utteranceStart = Date()
+        controller.ingestAudioLevel(0.1, at: utteranceStart)
+        controller.ingestAudioLevel(0, at: utteranceStart.addingTimeInterval(1.3))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(controller.state, .thinking)
+        controller.receiveAssistantEvent(.started(sessionID: sessionID))
+        controller.receiveAssistantEvent(.delta(sessionID: sessionID, text: "From a cursed kanji to a full chibi chorus line."))
+        try? await Task.sleep(nanoseconds: 80_000_000)
+    }
+}
+
+/// Mutable route policy so tests can replay route transitions
+/// deterministically; production reads the live AVAudioSession route.
+@MainActor
+private final class RoutePolicyBox {
+    var policy: VoiceBargeInRoutePolicy
+    init(_ policy: VoiceBargeInRoutePolicy) { self.policy = policy }
+}
+
 @MainActor
 private final class MockCapture: AudioCaptureService {
     let events: AsyncStream<VoiceCaptureEvent>
@@ -787,7 +1124,9 @@ private final class MockCapture: AudioCaptureService {
     var startCount = 0
     var didBeginMonitoring = false
     var didPause = false
+    var pauseCount = 0
     var resumeCount = 0
+    private(set) var lastStartIncludePreRoll: Bool?
     private(set) var finishUtteranceCount = 0
 
     init(permissionGranted: Bool, startError: Error? = nil) {
@@ -801,10 +1140,14 @@ private final class MockCapture: AudioCaptureService {
     func startListening(includePreRoll: Bool) throws {
         didStart = true
         startCount += 1
+        lastStartIncludePreRoll = includePreRoll
         if let startError { throw startError }
     }
     func beginBargeInMonitoring() throws { didBeginMonitoring = true }
-    func pause() { didPause = true }
+    func pause() {
+        didPause = true
+        pauseCount += 1
+    }
     func resume() throws { resumeCount += 1 }
     func finishUtterance() throws -> VoiceCapturedAudio {
         finishUtteranceCount += 1
