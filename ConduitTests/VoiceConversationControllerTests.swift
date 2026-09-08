@@ -1196,9 +1196,46 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         XCTAssertEqual(controller.state, .idle, "stale Interrupt work must stay idle after teardown")
         XCTAssertFalse(controller.hasLiveVoiceSession)
         XCTAssertEqual(capture.startCount, 1, "stale Interrupt must not reopen capture")
-        XCTAssertEqual(capture.lastStartIncludePreRoll, false, "no fresh listening window or pre-roll may be requested")
+        // Belt-and-braces only: the load-bearing guarantee above is
+        // startCount == 1; this reads the original window's recorded value.
+        XCTAssertEqual(capture.lastStartIncludePreRoll, false)
         XCTAssertFalse(controller.isPlaybackCaptureSuspended)
         XCTAssertFalse(playback.isPlaying)
+    }
+
+    func testInterruptParkedAcrossStopAndReopenCannotClobberNewSession() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        let gate = InterruptGate()
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { await gate.waitInInterrupt() }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        let interruptTask = Task { await controller.interruptAssistantPlayback() }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(gate.count, 1)
+
+        // Sheet closed (stop), then reopened: a NEW session goes live before
+        // the stale Interrupt continuation resumes.
+        controller.stop()
+        controller.beginVoiceTurn(sessionID: "session-2")
+        await controller.startListening()
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.startCount, 2)
+
+        gate.release()
+        await interruptTask.value
+
+        XCTAssertEqual(controller.state, .listening, "the new session owns the state machine")
+        XCTAssertEqual(capture.startCount, 2, "stale Interrupt must not stack a second capture start onto the new session")
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
     }
 
     func testBargeInOverlappingPlaybackSuspensionCannotReopenCapture() async {
