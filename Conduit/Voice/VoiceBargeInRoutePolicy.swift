@@ -24,38 +24,42 @@ enum VoiceBargeInRoutePolicy: Equatable {
     /// from user speech (device-reproduced feedback loop).
     case speakerSafeHalfDuplex
 
-    /// Classifies a route from its port descriptions. Deliberately
-    /// conservative: anything that is not provably an isolated headset
-    /// output is half duplex.
+    /// Classifies a route from its port descriptions. Fail-safe: EVERY
+    /// active output must be proven acoustically safe — one unsafe output
+    /// (an AirPlay or room speaker alongside AirPods, say) vetoes the
+    /// entire route into half duplex.
     static func resolve(
         outputs: [VoiceAudioRoutePort],
         inputs: [VoiceAudioRoutePort]
     ) -> VoiceBargeInRoutePolicy {
-        // An open speaker or receiver anywhere in the output list vetoes
-        // full duplex, even alongside a headset: audio may be rendering to
-        // the open speaker, whose sound feeds the microphone.
-        if outputs.contains(where: { $0.type == .builtInSpeaker || $0.type == .builtInReceiver }) {
-            return .speakerSafeHalfDuplex
-        }
-        // Wired headphones/headset: output sits in the user's ears, away
-        // from the device microphone.
-        if outputs.contains(where: { $0.type == .headphones }) { return .fullDuplex }
+        guard !outputs.isEmpty else { return .speakerSafeHalfDuplex }
         // A Bluetooth headset-profile INPUT paired with the same accessory's
         // output is clear evidence of a usable headset microphone/output
         // pairing (AirPods, mono headsets): the voice session's output
         // travels the headset's own speaker. Name equality keeps two
         // different accessories (headset mic + room speaker) conservative,
         // and empty names never pair (two anonymous ports are not evidence).
-        let hasPairedHeadsetOutput = outputs.contains { output in
-            guard output.type == .bluetoothHFP || output.type == .bluetoothA2DP else { return false }
-            return inputs.contains {
-                $0.type == .bluetoothHFP && !$0.name.isEmpty && $0.name == output.name
+        let pairedHeadsetInputNames = Set(
+            inputs
+                .filter { $0.type == .bluetoothHFP && !$0.name.isEmpty }
+                .map(\.name)
+        )
+        let everyOutputIsSafe = outputs.allSatisfy { output in
+            switch output.type {
+            case .headphones:
+                // Wired headset/earphones: output sits in the user's ears,
+                // away from the device microphone.
+                return true
+            case .bluetoothHFP, .bluetoothA2DP:
+                return pairedHeadsetInputNames.contains(output.name)
+            default:
+                // Built-in speaker/receiver, A2DP-only Bluetooth (speakers),
+                // AirPlay, USB, CarPlay, and every other or unknown output
+                // can feed the microphone: unsafe.
+                return false
             }
         }
-        if hasPairedHeadsetOutput { return .fullDuplex }
-        // A2DP-only Bluetooth (speakers), AirPlay, and every other or
-        // unknown output can feed the microphone: half duplex.
-        return .speakerSafeHalfDuplex
+        return everyOutputIsSafe ? .fullDuplex : .speakerSafeHalfDuplex
     }
 
     /// Classifies the session's live route. MainActor-scoped because

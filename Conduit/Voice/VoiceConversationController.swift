@@ -259,6 +259,7 @@ final class VoiceConversationController: ObservableObject {
         // Deliberately leaves lastBargeInState alone: that property records
         // acoustic barge-in provenance, and this path always lands in
         // .listening.
+        let generation = operationGeneration
         playback.stop()
         cancelSpeechDrainAndStream()
         speechDeltas.removeAll()
@@ -272,6 +273,12 @@ final class VoiceConversationController: ObservableObject {
         // user pause ends with it.
         isMicrophonePaused = false
         await interrupt()
+        // The interruption is a real re-entrant async boundary (Hermes
+        // cancellation/recovery), and the sheet can close while it is in
+        // flight — stop() then advances the generation and tears the session
+        // down. The fence stops the stale continuation from resurrecting
+        // capture (isCurrent also covers foreground loss and session teardown).
+        guard isCurrent(generation) else { return }
         await startListening()
     }
 
