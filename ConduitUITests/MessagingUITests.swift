@@ -11,6 +11,7 @@ final class MessagingUITests: XCTestCase {
         enable.tap()
         XCTAssertTrue(app.staticTexts["A shared inbox for your bots"].waitForExistence(timeout: 5))
         let setup = XCTAttachment(screenshot: app.screenshot()); setup.name = "Optional messaging setup"; setup.lifetime = .keepAlways; add(setup)
+        XCTAssertTrue(app.buttons["messaging.setup.agent"].waitForExistence(timeout: 3), "Offer agent-assisted setup")
         XCTAssertFalse(app.buttons["Install on Hermes"].exists, "Do not offer an unsupported installer")
         app.buttons["Close"].tap()
         XCTAssertTrue(enable.waitForExistence(timeout: 5))

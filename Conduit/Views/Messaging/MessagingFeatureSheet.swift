@@ -25,7 +25,12 @@ struct MessagingFeatureCard: View {
 struct MessagingFeatureSheet: View {
     @ObservedObject var store: MessagingStore
     let server: String
+    /// Display name of the workspace profile that will own the setup session.
+    var workspaceProfileName: String = "current profile"
+    var setupWithAgentEnabled: Bool = true
+    var onSetupWithAgent: (() -> Void)? = nil
     @Environment(\.dismiss) private var dismiss
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -43,13 +48,29 @@ struct MessagingFeatureSheet: View {
                         Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
                     } else {
                         Text("Set up on Hermes").font(.headline)
-                        Text("Your server administrator needs to install bot-coms with the messaging extra, enable the bot-coms and bot-coms-messaging plugins, and configure the participating profiles and worker. Existing sessions keep working during setup.")
-                        Text("This server does not provide a reviewed, resumable messaging installer. Conduit cannot install it automatically here.")
+                        Text("Install bot-coms with the messaging extra, enable the plugins, configure profiles and the worker, then check again. Existing sessions keep working during setup.")
+                        Text("Conduit cannot install packages or restart Hermes itself. You can start a setup conversation with \(workspaceProfileName), or share the checklist.")
                             .font(.footnote).foregroundStyle(.secondary)
-                        ShareLink(item: Self.instructions) { Label("Share setup checklist", systemImage: "square.and.arrow.up") }
+                        if let onSetupWithAgent {
+                            Button {
+                                onSetupWithAgent()
+                            } label: {
+                                Label("Set up with an agent", systemImage: "bubble.left.and.bubble.right")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!setupWithAgentEnabled)
+                            .accessibilityIdentifier("messaging.setup.agent")
+                            Text("Uses the current workspace profile (\(workspaceProfileName)). Switch profiles first if you want a different one.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        ShareLink(item: MessagingSetupPrompt.shareChecklist) {
+                            Label("Share setup checklist", systemImage: "square.and.arrow.up")
+                        }
                         Button { Task { await store.refresh() } } label: {
                             if store.isRefreshing { ProgressView() } else { Label("Check again", systemImage: "arrow.clockwise") }
-                        }.buttonStyle(.borderedProminent).disabled(store.isRefreshing)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(store.isRefreshing)
                     }
                 }.padding(24)
             }
@@ -57,31 +78,44 @@ struct MessagingFeatureSheet: View {
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
         }
     }
+
     private func benefit(_ title: String, _ description: String, _ symbol: String) -> some View {
-        Label { VStack(alignment: .leading, spacing: 4) { Text(title).font(.headline); Text(description).foregroundStyle(.secondary) } }
-        icon: { Image(systemName: symbol).frame(width: 24) }
+        Label {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(description).foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: symbol).frame(width: 24)
+        }
     }
-    static let instructions = """
-    Enable Conduit messaging on Hermes:
-    1. In the Hermes Python environment: pip install -e "/path/to/bot-coms[messaging]"
-       (https://github.com/jcmcneal/bot-coms)
-    2. Run: bot-coms-messaging install-dashboard --hermes-root /path/to/shared-hermes-root
-    3. Enable bot-coms and bot-coms-messaging, write plugin-data/bot-coms-messaging/config.json, and supervise bot-coms-messaging-worker (see bot-coms docs/INSTALL.md § Persistent messaging). Board is not required.
-    4. Restart the dashboard when existing work can be safely interrupted, then verify the worker.
-    5. In Conduit, open Messaging and tap Check again.
-    Installation alone does not enable messaging: the adapter must report API v1 readiness. Do not change existing session approval defaults.
-    """
 }
 
-/// Settings creates its own read-only discovery owner; it never runs an installer.
+/// Settings creates its own discovery owner; agent setup asks RootView to open a session.
 struct MessagingSettingsView: View {
     @EnvironmentObject private var appState: AppState
     @StateObject private var store = MessagingStore()
+
+    private var setupEnabled: Bool {
+        appState.isConnected
+            && !appState.isConnecting
+            && !appState.isProfileSwitching
+            && appState.turnState != .synchronizing
+    }
+
     var body: some View {
-        MessagingFeatureSheet(store: store, server: appState.connection?.baseUrl ?? "Hermes")
-            .task(id: appState.dashboardTicketBridge.map(ObjectIdentifier.init)) {
-                store.connect(requester: appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
-                await store.refresh()
+        MessagingFeatureSheet(
+            store: store,
+            server: appState.connection?.baseUrl ?? "Hermes",
+            workspaceProfileName: appState.profileDisplayName(appState.activeProfile),
+            setupWithAgentEnabled: setupEnabled,
+            onSetupWithAgent: {
+                appState.requestMessagingSetupSession()
             }
+        )
+        .task(id: appState.dashboardTicketBridge.map(ObjectIdentifier.init)) {
+            store.connect(requester: appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
+            await store.refresh()
+        }
     }
 }

@@ -121,6 +121,7 @@ struct MainView: View {
                 },
                 disconnect: { appState.disconnect() }
             )
+                .environmentObject(shell)
                 .presentationDetents([.large])
         }
         .background(windowWidthReader)
@@ -158,6 +159,13 @@ struct MainView: View {
         }
         .onChange(of: shell.compactRoute) { _, route in
             syncNavigationPath(with: route)
+        }
+        .onChange(of: appState.messagingSetupSessionRequest) { _, request in
+            guard request != nil else { return }
+            appState.clearMessagingSetupSessionRequest()
+            settingsPresentation = nil
+            appState.isSettingsSheetPresented = false
+            createMessagingSetupConversation()
         }
         .environmentObject(shell)
     }
@@ -219,6 +227,9 @@ struct MainView: View {
             },
             onResumeConversation: {
                 revealConversation(reason: .resume)
+            },
+            onSetupMessagingWithAgent: {
+                createMessagingSetupConversation()
             }
         )
     }
@@ -344,6 +355,31 @@ struct MainView: View {
                 return
             }
             revealConversation(reason: .newConversation)
+        }
+    }
+
+    private func createMessagingSetupConversation() {
+        guard appState.isConnected,
+              !appState.isConnecting,
+              !appState.isProfileSwitching,
+              appState.turnState != .synchronizing,
+              !shell.isCreatingConversation else { return }
+        let generation = shell.beginConversationOpen(sessionID: nil, reason: .newConversation)
+        appState.dismissSidebarDrawer()
+        shell.isCreatingConversation = true
+        Task {
+            defer { shell.isCreatingConversation = false }
+            await appState.createNewSession()
+            guard shell.admitConversationOpen(
+                generation: generation,
+                sessionID: appState.activeSessionId
+            ) else {
+                shell.rejectConversationOpen(generation: generation)
+                return
+            }
+            revealConversation(reason: .newConversation)
+            guard appState.activeSessionId != nil else { return }
+            _ = await appState.sendMessage(MessagingSetupPrompt.text)
         }
     }
 

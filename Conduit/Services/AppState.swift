@@ -784,6 +784,9 @@ final class AppState: ObservableObject {
     /// Mirrors MainView's Settings sheet item so return-surface decisions can
     /// tell whether Settings owns the surface across a background/foreground cycle.
     @Published var isSettingsSheetPresented = false
+    /// One-shot request for RootView to dismiss Settings (if open), create a
+    /// session on the active profile, and send the messaging-setup seed prompt.
+    @Published private(set) var messagingSetupSessionRequest: UUID?
     @Published var errorMessage: String?
     /// A classified sign-in failure awaiting presentation on the login card.
     /// Typed (not a string) so LoginView renders the full presentation —
@@ -7358,6 +7361,15 @@ final class AppState: ObservableObject {
         let token = beginReconciliation()
         turnState = .synchronizing
         await createAndReconcileSession(using: client, profile: profile, token: token, cwd: cwd)
+    }
+
+    /// Ask the shell host to open a messaging-setup session (seed prompt).
+    func requestMessagingSetupSession() {
+        messagingSetupSessionRequest = UUID()
+    }
+
+    func clearMessagingSetupSessionRequest() {
+        messagingSetupSessionRequest = nil
     }
 
     /// Re-resume the currently visible conversation. This uses the same

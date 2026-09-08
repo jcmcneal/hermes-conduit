@@ -11,6 +11,7 @@ struct InboxView: View {
     var onOpenConversation: (String) -> Void
     var onCreateConversation: () -> Void
     var onResumeConversation: () -> Void
+    var onSetupMessagingWithAgent: () -> Void = {}
 
     @AppStorage("conduit.sidebarTab") private var selectedTabRaw = SidebarTab.sessions.rawValue
     @StateObject private var messaging = MessagingStore()
@@ -29,6 +30,14 @@ struct InboxView: View {
     private var selectedTab: SidebarTab {
         get { SidebarTab.migrated(rawValue: selectedTabRaw) }
         nonmutating set { selectedTabRaw = newValue.rawValue }
+    }
+
+    private var messagingSetupAgentEnabled: Bool {
+        appState.isConnected
+            && !appState.isConnecting
+            && !appState.isProfileSwitching
+            && appState.turnState != .synchronizing
+            && !shell.isCreatingConversation
     }
 
     var body: some View {
@@ -98,7 +107,16 @@ struct InboxView: View {
             }
         }
         .sheet(isPresented: $showMessagingSetup) {
-            MessagingFeatureSheet(store: messaging, server: appState.connection?.baseUrl ?? "Hermes")
+            MessagingFeatureSheet(
+                store: messaging,
+                server: appState.connection?.baseUrl ?? "Hermes",
+                workspaceProfileName: appState.profileDisplayName(appState.activeProfile),
+                setupWithAgentEnabled: messagingSetupAgentEnabled,
+                onSetupWithAgent: {
+                    showMessagingSetup = false
+                    onSetupMessagingWithAgent()
+                }
+            )
         }
         .sheet(isPresented: $showProfilePicker) {
             ProfilePickerSheet()
