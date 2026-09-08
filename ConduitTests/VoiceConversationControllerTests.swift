@@ -1180,7 +1180,7 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
 
         // The user taps Interrupt; the Hermes interruption parks mid-flight.
         let interruptTask = Task { await controller.interruptAssistantPlayback() }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        await gate.waitUntilEntered()
         XCTAssertEqual(gate.count, 1, "the interruption is parked in flight")
 
         // While it is parked, the user closes the Voice sheet: stop() tears
@@ -1219,7 +1219,7 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
 
         await Self.driveToSpeaking(controller, gateway: gateway)
         let interruptTask = Task { await controller.interruptAssistantPlayback() }
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        await gate.waitUntilEntered()
         XCTAssertEqual(gate.count, 1)
 
         // Sheet closed (stop), then reopened: a NEW session goes live before
@@ -1259,7 +1259,7 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         let bargeInStart = Date()
         controller.ingestAudioLevel(0.5, at: bargeInStart)
         controller.ingestAudioLevel(0.5, at: bargeInStart.addingTimeInterval(0.31))
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        await gate.waitUntilEntered()
         XCTAssertEqual(gate.count, 1, "the barge-in interruption is parked mid-flight")
 
         // While it is parked, the route becomes an open speaker: suspension
@@ -1309,20 +1309,37 @@ private final class RoutePolicyBox {
 }
 
 /// An interruption closure that parks mid-flight, so tests can interleave
-/// suspension and route changes into the barge-in await window.
+/// suspension and route changes into the barge-in await window. Entry is
+/// signalled explicitly — `waitUntilEntered()` observes the operation
+/// actually being parked instead of relying on fixed sleeps — and every
+/// parked continuation is resumed exactly once by `release()`.
 @MainActor
 private final class InterruptGate {
     private(set) var count = 0
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
 
     func waitInInterrupt() async {
         count += 1
-        await withCheckedContinuation { continuation = $0 }
+        let waiters = entryWaiters
+        entryWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        await withCheckedContinuation { parked.append($0) }
     }
 
+    /// Returns once `waitInInterrupt` has been entered at least once;
+    /// returns immediately if entry already happened, so the signal cannot
+    /// be missed regardless of scheduling order (both sides are MainActor).
+    func waitUntilEntered() async {
+        guard count == 0 else { return }
+        await withCheckedContinuation { entryWaiters.append($0) }
+    }
+
+    /// Resumes every parked interruption exactly once; safe to call twice.
     func release() {
-        continuation?.resume()
-        continuation = nil
+        let parkedContinuations = parked
+        parked.removeAll()
+        parkedContinuations.forEach { $0.resume() }
     }
 }
 
