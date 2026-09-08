@@ -251,6 +251,21 @@ final class VoiceConversationController: ObservableObject {
     /// may contain the assistant's own TTS.
     func interruptAssistantPlayback() async {
         guard isPlaybackCaptureSuspended else { return }
+        lastBargeInState = state
+        playback.stop()
+        cancelSpeechDrainAndStream()
+        speechDeltas.removeAll()
+        assistantFinished = false
+        // The in-flight assistant response is intentionally interrupted; its
+        // terminal event belongs to the retired turn, not the next one.
+        isAwaitingVoiceAssistant = false
+        awaitedAssistantResponseStarted = false
+        isPlaybackCaptureSuspended = false
+        // The tap itself is an explicit request to speak now, so a pending
+        // user pause ends with it.
+        isMicrophonePaused = false
+        await interrupt()
+        await startListening()
     }
 
     func stop() {
@@ -431,6 +446,11 @@ final class VoiceConversationController: ObservableObject {
                 pauseMicrophone()
             }
         case .thinking, .speaking, .muted:
+            // Speaker-safe suspension: while capture is suspended during
+            // assistant playback, no acoustic barge-in may be scheduled —
+            // even from a stale level event that slipped past the paused
+            // tap.
+            guard !isPlaybackCaptureSuspended else { break }
             if level >= configuration.voiceActivityThreshold {
                 if bargeInStartedAt == nil { bargeInStartedAt = date }
                 if let started = bargeInStartedAt,
@@ -522,7 +542,18 @@ final class VoiceConversationController: ObservableObject {
             // AVAudioEngine's tap remains valid across normal Bluetooth/wired
             // route changes. The next capture event re-establishes timing.
             bargeInStartedAt = nil
+            suspendIfRouteBecameOpenSpeaker()
         }
+    }
+
+    /// Safety net for routes that change while Hermes is audibly speaking:
+    /// moving onto an open speaker must never leave live acoustic barge-in
+    /// running. Moving onto a headset mid-utterance stays conservative — the
+    /// suspension holds until the next playback boundary.
+    private func suspendIfRouteBecameOpenSpeaker() {
+        guard routePolicyProvider() == .speakerSafeHalfDuplex else { return }
+        guard state == .speaking || isPlaybackCaptureSuspended else { return }
+        suspendCaptureForPlayback()
     }
 
     private func scheduleFinishUtterance() {
@@ -728,7 +759,7 @@ final class VoiceConversationController: ObservableObject {
                               !self.isOutputMuted else { return }
                         try self.playback.start(sampleRate: rate)
                         self.state = .speaking
-                        self.beginBargeInMonitoring()
+                        self.applyPlaybackCapturePolicy()
                     },
                     onPCM16: { [weak self] data, rate in
                         guard let self,
@@ -742,7 +773,7 @@ final class VoiceConversationController: ObservableObject {
                               !self.isOutputMuted else { return }
                         try self.playback.playEncodedAudioData(data)
                         self.state = .speaking
-                        self.beginBargeInMonitoring()
+                        self.applyPlaybackCapturePolicy()
                     }
                 )
                 guard isSpeechDrainCurrent(operation: operation, revision: revision) else {

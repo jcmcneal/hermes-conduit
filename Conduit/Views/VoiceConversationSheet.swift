@@ -114,18 +114,28 @@ struct VoiceConversationSheet: View {
         profile == "default" ? "Default profile" : profile.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
+    /// Automatic speaker-safe suspension while Hermes audibly speaks on an
+    /// open-speaker route: the mic control becomes Interrupt instead of a
+    /// pause, so this never reads as a user-selected mic pause.
+    private var isInterruptAvailable: Bool {
+        controller.isPlaybackCaptureSuspended
+    }
+
     private var microphoneLabel: String {
         if controller.state == .transcribing { return "Transcribing" }
+        if isInterruptAvailable { return "Interrupt" }
         return microphoneIsActive ? "Pause mic" : "Listen"
     }
 
     private var microphoneSymbol: String {
         if controller.state == .transcribing { return "waveform" }
+        if isInterruptAvailable { return "stop.fill" }
         return microphoneIsActive ? "mic.slash.fill" : "mic.fill"
     }
 
     private var microphoneHint: String {
-        microphoneIsActive ? "Pauses microphone capture while keeping the voice session open" : "Starts or resumes microphone capture"
+        if isInterruptAvailable { return "Stops Hermes' speech and starts listening right away" }
+        return microphoneIsActive ? "Pauses microphone capture while keeping the voice session open" : "Starts or resumes microphone capture"
     }
 
     private var microphoneIsActive: Bool {
@@ -137,6 +147,7 @@ struct VoiceConversationSheet: View {
     }
 
     private var statusTitle: String {
+        if isInterruptAvailable { return "Hermes is speaking" }
         if controller.isMicrophonePaused { return "Microphone paused" }
         switch controller.state {
         case .idle: return "Ready to listen"
@@ -150,6 +161,7 @@ struct VoiceConversationSheet: View {
     }
 
     private var statusDetail: String {
+        if isInterruptAvailable { return "Tap Interrupt to speak." }
         if controller.isMicrophonePaused { return "Tap Listen when you are ready to resume." }
         switch controller.state {
         case .idle: return "Tap Listen when you are ready."
@@ -186,7 +198,9 @@ struct VoiceConversationSheet: View {
     }
 
     private func microphoneTapped() {
-        if microphoneIsActive {
+        if isInterruptAvailable {
+            Task { await controller.interruptAssistantPlayback() }
+        } else if microphoneIsActive {
             controller.pauseMicrophone()
         } else {
             Task { await controller.resumeMicrophone() }
