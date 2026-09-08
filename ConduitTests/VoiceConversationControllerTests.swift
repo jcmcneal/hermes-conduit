@@ -816,8 +816,8 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
 
         XCTAssertEqual(interrupts, 0, "assistant TTS must never schedule a barge-in on a speaker route")
         XCTAssertEqual(controller.state, .speaking)
-        XCTAssertEqual(gateway.transcriptionCount, 0, "assistant output must not be transcribed as user speech")
-        XCTAssertEqual(capture.finishUtteranceCount, 0, "suspended capture must not record assistant output")
+        XCTAssertEqual(gateway.transcriptionCount, 1, "only the user's real utterance may be transcribed")
+        XCTAssertEqual(capture.finishUtteranceCount, 1, "suspended capture must not record a second (assistant) utterance")
         XCTAssertEqual(submitted.count, 1, "no new user turn may be submitted from speaker leakage")
     }
 
@@ -875,7 +875,7 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         XCTAssertEqual(controller.state, .listening)
         XCTAssertEqual(capture.startCount, 2)
         XCTAssertEqual(capture.lastStartIncludePreRoll, false, "no speaker-contaminated pre-roll may be requested")
-        XCTAssertEqual(capture.finishUtteranceCount, 0)
+        XCTAssertEqual(capture.finishUtteranceCount, 1, "no additional (assistant) utterance may be recorded")
 
         // The retired turn's late completion must stay retired.
         controller.receiveAssistantEvent(.completed(sessionID: "session", content: "Late tail"))
@@ -979,7 +979,10 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         controller.receiveAssistantEvent(.delta(sessionID: "session", text: "Silenced answer."))
         try? await Task.sleep(nanoseconds: 80_000_000)
 
-        XCTAssertEqual(controller.state, .muted)
+        // Existing mute semantics: muting during .thinking keeps .thinking;
+        // the muted label only replaces an in-flight .speaking. Either way
+        // nothing audible plays, so capture must never suspend.
+        XCTAssertEqual(controller.state, .thinking)
         XCTAssertFalse(controller.isPlaybackCaptureSuspended, "no audible playback means no suspension")
         XCTAssertEqual(capture.pauseCount, 0)
         XCTAssertEqual(gateway.openCount, 0, "muted output never opens a speech stream")
