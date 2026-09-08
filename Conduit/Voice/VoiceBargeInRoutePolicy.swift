@@ -39,6 +39,9 @@ enum VoiceBargeInRoutePolicy: Equatable {
         // travels the headset's own speaker. Name equality keeps two
         // different accessories (headset mic + room speaker) conservative,
         // and empty names never pair (two anonymous ports are not evidence).
+        // Residual limitation: two distinct accessories reporting identical
+        // names are indistinguishable at this seam and may pair —
+        // AVAudioSession exposes no accessory UID to disambiguate them.
         let pairedHeadsetInputNames = Set(
             inputs
                 .filter { $0.type == .bluetoothHFP && !$0.name.isEmpty }
@@ -53,9 +56,9 @@ enum VoiceBargeInRoutePolicy: Equatable {
             case .bluetoothHFP, .bluetoothA2DP:
                 return pairedHeadsetInputNames.contains(output.name)
             default:
-                // Built-in speaker/receiver, A2DP-only Bluetooth (speakers),
-                // AirPlay, USB, CarPlay, and every other or unknown output
-                // can feed the microphone: unsafe.
+                // Built-in speaker/receiver, AirPlay, USB, CarPlay, and
+                // every other or unknown output can feed the microphone:
+                // unsafe. (Unpaired Bluetooth outputs are rejected above.)
                 return false
             }
         }
