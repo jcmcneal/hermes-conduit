@@ -43,7 +43,7 @@ struct MessagingFeatureSheet: View {
                         Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
                     } else {
                         Text("Set up on Hermes").font(.headline)
-                        Text("Your server administrator needs to install bot-coms and the bot-coms-messaging companion, enable them, and configure the participating profiles and worker. Existing sessions keep working during setup.")
+                        Text("Your server administrator needs to install bot-coms with the messaging extra, enable the bot-coms and bot-coms-messaging plugins, and configure the participating profiles and worker. Existing sessions keep working during setup.")
                         Text("This server does not provide a reviewed, resumable messaging installer. Conduit cannot install it automatically here.")
                             .font(.footnote).foregroundStyle(.secondary)
                         ShareLink(item: Self.instructions) { Label("Share setup checklist", systemImage: "square.and.arrow.up") }
@@ -63,9 +63,10 @@ struct MessagingFeatureSheet: View {
     }
     static let instructions = """
     Enable Conduit messaging on Hermes:
-    1. Install bot-coms in the Hermes Python environment.
-    2. Install the bot-coms-messaging companion from Conduit's server/bot-coms-messaging directory, following its README.
-    3. Enable both plugins and configure stable profile IDs, access, and the messaging worker.
+    1. In the Hermes Python environment: pip install -e "/path/to/bot-coms[messaging]"
+       (https://github.com/jcmcneal/bot-coms)
+    2. Run: bot-coms-messaging install-dashboard --hermes-root /path/to/shared-hermes-root
+    3. Enable bot-coms and bot-coms-messaging, write plugin-data/bot-coms-messaging/config.json, and supervise bot-coms-messaging-worker (see bot-coms docs/INSTALL.md § Persistent messaging). Board is not required.
     4. Restart the dashboard when existing work can be safely interrupted, then verify the worker.
     5. In Conduit, open Messaging and tap Check again.
     Installation alone does not enable messaging: the adapter must report API v1 readiness. Do not change existing session approval defaults.

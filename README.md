@@ -24,7 +24,7 @@ Start a conversation on desktop, pick it up on your phone. The session list is t
 - **Scheduled jobs** viewer and connector monitoring
 - **Kanban boards** for task workflows
 - **Multi-profile support** with per-profile settings and custom photos
-- **Optional bot messaging** with persistent DMs and groups, capability-gated by the [bot-coms messaging companion](server/bot-coms-messaging/README.md) and its configured server worker
+- **Optional bot messaging** with persistent DMs and groups, capability-gated by installing [`bot-coms[messaging]`](https://github.com/jcmcneal/bot-coms) on Hermes (see that repo’s [INSTALL](https://github.com/jcmcneal/bot-coms/blob/main/docs/INSTALL.md#persistent-messaging)) and supervising its worker
 - **Push notifications** for approvals, completed turns, failures, and background tasks
 - **Inline approvals** so you can approve or reject tool calls without typing
 - **Face ID** lock and credential storage
