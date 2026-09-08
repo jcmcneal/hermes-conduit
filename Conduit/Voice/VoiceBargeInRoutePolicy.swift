@@ -53,9 +53,8 @@ enum VoiceBargeInRoutePolicy: Equatable {
             }
         }
         if hasPairedHeadsetOutput { return .fullDuplex }
-        // Built-in speaker/receiver, A2DP-only Bluetooth (speakers), AirPlay,
-        // USB, CarPlay, and every unknown combination can feed the
-        // microphone: half duplex.
+        // A2DP-only Bluetooth (speakers), AirPlay, and every other or
+        // unknown output can feed the microphone: half duplex.
         return .speakerSafeHalfDuplex
     }
 

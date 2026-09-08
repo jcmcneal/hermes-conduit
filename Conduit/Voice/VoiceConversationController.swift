@@ -256,6 +256,9 @@ final class VoiceConversationController: ObservableObject {
     func interruptAssistantPlayback() async {
         guard isPlaybackCaptureSuspended else { return }
         cachedRoutePolicy = nil
+        // Deliberately leaves lastBargeInState alone: that property records
+        // acoustic barge-in provenance, and this path always lands in
+        // .listening.
         playback.stop()
         cancelSpeechDrainAndStream()
         speechDeltas.removeAll()
@@ -866,6 +869,7 @@ final class VoiceConversationController: ObservableObject {
         if assistantFinished && speechDeltas.isEmpty && speechStream == nil {
             assistantFinished = false
             guard isSpeechDrainCurrent(operation: operation, revision: revision) else { return }
+            cachedRoutePolicy = nil
             isPlaybackCaptureSuspended = false
             await startListening()
         }
