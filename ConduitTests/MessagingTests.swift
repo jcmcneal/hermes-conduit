@@ -186,6 +186,32 @@ final class MessagingTests: XCTestCase {
         XCTAssertTrue(other.draft.isEmpty)
         XCTAssertNil(other.pending)
     }
+
+    func testSetupPromptPrincipalFormatting() {
+        XCTAssertEqual(
+            MessagingSetupPrompt.principal(from: ["provider": "nous", "user_id": "abc"]),
+            "nous:abc"
+        )
+        XCTAssertEqual(
+            MessagingSetupPrompt.principal(from: ["provider": "basic", "user_id": "u1", "org_id": "org9"]),
+            "basic:u1:org9"
+        )
+        XCTAssertNil(MessagingSetupPrompt.principal(from: ["provider": "nous"]))
+        XCTAssertNil(MessagingSetupPrompt.principal(from: ["user_id": "abc"]))
+    }
+
+    func testSetupPromptEmbedsPrincipalAndSkipsBrowserScavengerHunt() {
+        let withPrincipal = MessagingSetupPrompt.text(principal: "nous:abc", activeProfile: "hermes")
+        XCTAssertTrue(withPrincipal.contains("Operator principal (authenticated in this client): nous:abc"))
+        XCTAssertTrue(withPrincipal.contains("auto_enroll_profiles"))
+        XCTAssertTrue(withPrincipal.contains("Do NOT ask me to open a browser"))
+        XCTAssertTrue(withPrincipal.contains("Active Hermes profile in this client: hermes"))
+
+        let without = MessagingSetupPrompt.text(principal: nil, activeProfile: "default")
+        XCTAssertTrue(without.contains("could not read your signed-in account id"))
+        XCTAssertTrue(without.contains("Do NOT ask me to open a browser"))
+        XCTAssertFalse(without.contains("Operator principal (authenticated in this client):"))
+    }
 }
 
 @MainActor

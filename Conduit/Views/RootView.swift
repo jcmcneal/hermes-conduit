@@ -379,7 +379,20 @@ struct MainView: View {
             }
             revealConversation(reason: .newConversation)
             guard appState.activeSessionId != nil else { return }
-            _ = await appState.sendMessage(MessagingSetupPrompt.text)
+            var principal: String?
+            if let bridge = appState.dashboardTicketBridge {
+                do {
+                    let identity = try await MessagingService(requester: bridge).identity()
+                    principal = MessagingSetupPrompt.principal(from: identity)
+                } catch {
+                    principal = nil
+                }
+            }
+            let seed = MessagingSetupPrompt.text(
+                principal: principal,
+                activeProfile: appState.activeProfile
+            )
+            _ = await appState.sendMessage(seed)
         }
     }
 

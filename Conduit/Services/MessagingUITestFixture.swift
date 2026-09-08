@@ -16,6 +16,9 @@ final class MessagingUITestFixture: DashboardJSONRequester {
         let path = String(path.split(separator: "?", maxSplits: 1)[0])
         if path.hasSuffix("/hub"), ProcessInfo.processInfo.arguments.contains("-CONDUIT_UI_TEST_MESSAGING_MISSING") { return ["plugins": []] }
         if path.hasSuffix("/hub") { return ["plugins": [["name": "bot-coms", "runtime_status": "enabled"]]] }
+        if path == "/api/auth/me" || path.hasSuffix("/auth/me") {
+            return ["user_id": "fixture-user", "provider": "fixture", "email": "fixture@example.com", "display_name": "Fixture"]
+        }
         if path.hasSuffix("/capabilities") {
             return ["server_id": "fixture-server", "principal_id": "fixture-account", "api_version": 1, "state": "ready", "features": ["dm", "groups"],
                     "profiles": [["id": "designer-id", "name": "default", "displayName": "Designer"], ["id": "swe-id", "name": "research", "displayName": "SWE"]]]
