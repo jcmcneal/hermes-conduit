@@ -72,6 +72,19 @@ final class VoiceBargeInRoutePolicyTests: XCTestCase {
         )
     }
 
+    func testMismatchedBluetoothAccessoryNamesAreHalfDuplex() {
+        // HFP input and A2DP output from DIFFERENT accessories (headset mic
+        // selected while a room speaker renders) is exactly the feedback
+        // geometry this policy exists to prevent: stay conservative.
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.bluetoothA2DP, "Boombox")],
+                inputs: [port(.bluetoothHFP, "Car Kit")]
+            ),
+            .speakerSafeHalfDuplex
+        )
+    }
+
     func testHeadsetProfileOutputWithoutHeadsetInputIsHalfDuplex() {
         // Ambiguous: HFP output routed, but capture still on the built-in
         // mic. Conservative classification wins.
@@ -106,13 +119,21 @@ final class VoiceBargeInRoutePolicyTests: XCTestCase {
         )
     }
 
-    func testAnyIsolatedHeadsetOutputWinsOverMixedRoutes() {
+    func testOpenSpeakerVetoesHeadsetInMixedOutputs() {
         XCTAssertEqual(
             VoiceBargeInRoutePolicy.resolve(
                 outputs: [port(.builtInSpeaker, "Speaker"), port(.headphones, "Wired")],
                 inputs: [port(.builtInMic, "Microphone")]
             ),
-            .fullDuplex
+            .speakerSafeHalfDuplex,
+            "audio may be rendering to the open speaker, so mixed routes stay half duplex"
+        )
+        XCTAssertEqual(
+            VoiceBargeInRoutePolicy.resolve(
+                outputs: [port(.builtInReceiver, "Receiver"), port(.bluetoothHFP, "AirPods Pro")],
+                inputs: [port(.bluetoothHFP, "AirPods Pro")]
+            ),
+            .speakerSafeHalfDuplex
         )
     }
 }

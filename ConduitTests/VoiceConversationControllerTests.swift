@@ -1088,6 +1088,60 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         XCTAssertFalse(controller.isPlaybackCaptureSuspended)
     }
 
+    func testResumeDuringSuspensionActsAsInterrupt() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        let playback = MockPlayback()
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: playback,
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+
+        // On a speaker-safe route there is no listening during playback: a
+        // listen request means interrupt.
+        await controller.resumeMicrophone()
+
+        XCTAssertEqual(interrupts, 1)
+        XCTAssertFalse(playback.isPlaying)
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertEqual(controller.state, .listening)
+    }
+
+    func testPauseDuringActiveSuspensionClearsInterruptAffordance() async {
+        let capture = MockCapture(permissionGranted: true)
+        let gateway = MockGateway(transcript: "Question", startsPlaybackOnOpen: true)
+        var interrupts = 0
+        let policy = RoutePolicyBox(.speakerSafeHalfDuplex)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: gateway,
+            routePolicyProvider: { policy.policy },
+            submit: { _ in true },
+            interrupt: { interrupts += 1 }
+        )
+
+        await Self.driveToSpeaking(controller, gateway: gateway)
+        XCTAssertTrue(controller.isPlaybackCaptureSuspended)
+
+        // Explicit user intent supersedes the automatic suspension: the
+        // sheet falls back to the user-paused presentation.
+        controller.pauseMicrophone()
+
+        XCTAssertFalse(controller.isPlaybackCaptureSuspended)
+        XCTAssertTrue(controller.isMicrophonePaused)
+        XCTAssertEqual(interrupts, 0)
+    }
+
     /// listening → user utterance → submit → .thinking → assistant .started
     /// + .delta: the gateway opens its speech stream, playback starts, and
     /// the controller settles in .speaking.
@@ -1129,6 +1183,7 @@ private final class MockCapture: AudioCaptureService {
     var didPause = false
     var pauseCount = 0
     var resumeCount = 0
+    private var mockPaused = false
     private(set) var lastStartIncludePreRoll: Bool?
     private(set) var finishUtteranceCount = 0
 
@@ -1144,19 +1199,26 @@ private final class MockCapture: AudioCaptureService {
         didStart = true
         startCount += 1
         lastStartIncludePreRoll = includePreRoll
+        mockPaused = false
         if let startError { throw startError }
     }
     func beginBargeInMonitoring() throws { didBeginMonitoring = true }
     func pause() {
         didPause = true
+        // The real service is idempotent (guard !paused); keep counts honest.
+        guard !mockPaused else { return }
+        mockPaused = true
         pauseCount += 1
     }
-    func resume() throws { resumeCount += 1 }
+    func resume() throws {
+        mockPaused = false
+        resumeCount += 1
+    }
     func finishUtterance() throws -> VoiceCapturedAudio {
         finishUtteranceCount += 1
         return VoiceCapturedAudio(wavData: Data([1]), pcm16Data: Data([1, 0]), sampleRate: 16_000, duration: 0.01)
     }
-    func stop() {}
+    func stop() { mockPaused = false }
     func emit(_ event: VoiceCaptureEvent) { continuation?.yield(event) }
 }
 

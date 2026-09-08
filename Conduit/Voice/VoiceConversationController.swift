@@ -192,7 +192,9 @@ final class VoiceConversationController: ObservableObject {
         guard isCurrent(generation) else { return }
         do {
             try capture.startListening(includePreRoll: includePreRoll)
-            if isMicrophonePaused { capture.pause() }
+            // Defense in depth: capture must never end up live over audible
+            // playback, whichever flag paused it.
+            if isMicrophonePaused || isPlaybackCaptureSuspended { capture.pause() }
             utteranceStartedAt = Date()
             lastSpeechAt = nil
             bargeInStartedAt = nil
@@ -251,7 +253,6 @@ final class VoiceConversationController: ObservableObject {
     /// may contain the assistant's own TTS.
     func interruptAssistantPlayback() async {
         guard isPlaybackCaptureSuspended else { return }
-        lastBargeInState = state
         playback.stop()
         cancelSpeechDrainAndStream()
         speechDeltas.removeAll()
@@ -542,6 +543,7 @@ final class VoiceConversationController: ObservableObject {
             // AVAudioEngine's tap remains valid across normal Bluetooth/wired
             // route changes. The next capture event re-establishes timing.
             bargeInStartedAt = nil
+            cachedRoutePolicy = nil
             suspendIfRouteBecameOpenSpeaker()
         }
     }
@@ -551,7 +553,7 @@ final class VoiceConversationController: ObservableObject {
     /// running. Moving onto a headset mid-utterance stays conservative — the
     /// suspension holds until the next playback boundary.
     private func suspendIfRouteBecameOpenSpeaker() {
-        guard routePolicyProvider() == .speakerSafeHalfDuplex else { return }
+        guard currentRoutePolicy() == .speakerSafeHalfDuplex else { return }
         guard state == .speaking || isPlaybackCaptureSuspended else { return }
         suspendCaptureForPlayback()
     }
@@ -630,11 +632,26 @@ final class VoiceConversationController: ObservableObject {
     /// never enter the level detector, pre-roll, or transcription input.
     /// Isolated headset routes keep live barge-in monitoring.
     private func applyPlaybackCapturePolicy() {
-        if routePolicyProvider() == .speakerSafeHalfDuplex {
+        // Fast path for the per-encoded-chunk callback: once suspended, the
+        // policy can only flip back at a playback boundary.
+        guard !isPlaybackCaptureSuspended else { return }
+        if currentRoutePolicy() == .speakerSafeHalfDuplex {
             suspendCaptureForPlayback()
         } else {
             beginBargeInMonitoring()
         }
+    }
+
+    /// Route classification cached between capture `.routeChanged` events:
+    /// `AVAudioSession.currentRoute` materializes port descriptions, which
+    /// is too expensive to repeat on every encoded-audio chunk.
+    private var cachedRoutePolicy: VoiceBargeInRoutePolicy?
+
+    private func currentRoutePolicy() -> VoiceBargeInRoutePolicy {
+        if let cachedRoutePolicy { return cachedRoutePolicy }
+        let policy = routePolicyProvider()
+        cachedRoutePolicy = policy
+        return policy
     }
 
     /// Tears microphone rendering down for the duration of assistant
@@ -643,6 +660,12 @@ final class VoiceConversationController: ObservableObject {
     /// user-pause flag, and freezes barge-in timing so playback audio that
     /// leaked in before the suspension cannot half-schedule a barge-in.
     private func suspendCaptureForPlayback() {
+        // A barge-in scheduled just before audible playback (or before a
+        // route change) must not fire after suspension: it would stop
+        // playback and reopen capture with speaker-contaminated pre-roll.
+        bargeInTask?.cancel()
+        bargeInTask = nil
+        guard !isPlaybackCaptureSuspended else { return }
         isPlaybackCaptureSuspended = true
         bargeInStartedAt = nil
         capture.pause()
@@ -693,6 +716,10 @@ final class VoiceConversationController: ObservableObject {
         awaitedAssistantResponseStarted = false
         await interrupt()
         guard isCurrent(generation) else { return }
+        // A speaker-safe suspension may have engaged while the interruption
+        // was in flight (assistant playback started mid-await). Reopening
+        // capture now would hear the assistant's own speaker output.
+        guard !isPlaybackCaptureSuspended else { return }
         await startListening(includePreRoll: true)
     }
 

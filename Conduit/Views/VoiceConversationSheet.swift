@@ -116,9 +116,12 @@ struct VoiceConversationSheet: View {
 
     /// Automatic speaker-safe suspension while Hermes audibly speaks on an
     /// open-speaker route: the mic control becomes Interrupt instead of a
-    /// pause, so this never reads as a user-selected mic pause.
+    /// pause, so this never reads as a user-selected mic pause. An explicit
+    /// user pause keeps precedence — the sheet stays in the paused state,
+    /// and its Listen tap routes through `resumeMicrophone`, which acts as
+    /// an interrupt while playback is suspended.
     private var isInterruptAvailable: Bool {
-        controller.isPlaybackCaptureSuspended
+        controller.isPlaybackCaptureSuspended && !controller.isMicrophonePaused
     }
 
     private var microphoneLabel: String {

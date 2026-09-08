@@ -31,19 +31,27 @@ enum VoiceBargeInRoutePolicy: Equatable {
         outputs: [VoiceAudioRoutePort],
         inputs: [VoiceAudioRoutePort]
     ) -> VoiceBargeInRoutePolicy {
+        // An open speaker or receiver anywhere in the output list vetoes
+        // full duplex, even alongside a headset: audio may be rendering to
+        // the open speaker, whose sound feeds the microphone.
+        if outputs.contains(where: { $0.type == .builtInSpeaker || $0.type == .builtInReceiver }) {
+            return .speakerSafeHalfDuplex
+        }
         // Wired headphones/headset: output sits in the user's ears, away
         // from the device microphone.
         if outputs.contains(where: { $0.type == .headphones }) { return .fullDuplex }
-        // A Bluetooth headset-profile INPUT is clear evidence of a usable
-        // headset microphone/output pairing (AirPods, mono headsets): the
-        // voice session's output pairs with the headset's own speaker.
-        let hasHeadsetInput = inputs.contains(where: { $0.type == .bluetoothHFP })
-        let hasBluetoothOutput = outputs.contains {
-            $0.type == .bluetoothHFP || $0.type == .bluetoothA2DP
+        // A Bluetooth headset-profile INPUT paired with the same accessory's
+        // output is clear evidence of a usable headset microphone/output
+        // pairing (AirPods, mono headsets): the voice session's output
+        // travels the headset's own speaker. Name equality keeps two
+        // different accessories (headset mic + room speaker) conservative.
+        let hasPairedHeadsetOutput = outputs.contains { output in
+            guard output.type == .bluetoothHFP || output.type == .bluetoothA2DP else { return false }
+            return inputs.contains { $0.type == .bluetoothHFP && $0.name == output.name }
         }
-        if hasHeadsetInput, hasBluetoothOutput { return .fullDuplex }
+        if hasPairedHeadsetOutput { return .fullDuplex }
         // Built-in speaker/receiver, A2DP-only Bluetooth (speakers), AirPlay,
-        // USB, HDMI, CarPlay, and every unknown combination can feed the
+        // USB, CarPlay, and every unknown combination can feed the
         // microphone: half duplex.
         return .speakerSafeHalfDuplex
     }
@@ -62,6 +70,9 @@ enum VoiceBargeInRoutePolicy: Equatable {
 
 /// The port facts the policy classifier needs, decoupled from
 /// AVAudioSessionPortDescription (which cannot be constructed in tests).
+/// `name` participates in Bluetooth pairing: a full-duplex classification
+/// requires the headset-profile input and the output to belong to the same
+/// named accessory.
 struct VoiceAudioRoutePort: Equatable {
     var type: AVAudioSession.Port
     var name: String
