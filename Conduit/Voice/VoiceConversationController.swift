@@ -168,6 +168,12 @@ final class VoiceConversationController: ObservableObject {
         isVoiceSessionActive || isProviderTestRunning
     }
 
+    /// Observability seam: whether a gateway reference is currently installed.
+    /// The server-replacement boundary clears this reference; tests pin the
+    /// clearing through here because a stale gateway's failure mode (reaching
+    /// the outgoing server's bridge) is behavioral and hard to observe.
+    var isGatewayAttached: Bool { gateway != nil }
+
     func setForegroundActive(_ active: Bool) {
         isForegroundActive = active
         guard !active else { return }

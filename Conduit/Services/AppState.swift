@@ -2080,7 +2080,7 @@ final class AppState: ObservableObject {
             readAloudWasActive = true
         }
         speechOwnershipLog.info(
-            "Server replacement \(previousIdentity, privacy: .public) -> \(identity, privacy: .public): retiring speech ownership (voiceLive=\(voiceWasLive ? "yes" : "no", privacy: .public), readAloudActive=\(readAloudWasActive ? "yes" : "no", privacy: .public))"
+            "Server replacement \(previousIdentity, privacy: .private) -> \(identity, privacy: .private): retiring speech ownership (voiceLive=\(voiceWasLive ? "yes" : "no", privacy: .public), readAloudActive=\(readAloudWasActive ? "yes" : "no", privacy: .public))"
         )
         voiceConversationController.stop()
         messageReadAloudController.stop()

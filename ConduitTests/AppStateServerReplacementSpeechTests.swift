@@ -37,8 +37,10 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         XCTAssertEqual(harness.voiceController.state, .idle)
         XCTAssertEqual(harness.voiceCapture.stopCount, 1)
         XCTAssertFalse(harness.appState.showVoiceSheet)
-        // The outgoing gateway reference is gone: a later listen attempt with
-        // no new gateway fails closed instead of reaching server A.
+        // The outgoing gateway reference is gone — asserted directly, and
+        // behaviorally: a later listen attempt with no new gateway fails
+        // closed instead of reaching server A.
+        XCTAssertFalse(harness.voiceController.isGatewayAttached)
         await harness.voiceController.startListening()
         XCTAssertEqual(
             harness.voiceController.state,
@@ -143,7 +145,24 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         let changed = harness.appState.prepareChatResumeForConnection(to: Self.serverB)
         XCTAssertTrue(changed)
 
-        // A fresh operation belonging to server B starts normally.
+        // A fresh operation belonging to server B starts normally. Installing
+        // the incoming connection's bridge first models the capability
+        // refresh that rebuilds gateway currency after a replacement: with a
+        // B bridge the B-built mock counts as current. Deleting the
+        // retirement's `readAloudGatewayBridge = nil` leaves the stale A
+        // bridge here, the mock is replaced by a real A-bound gateway, and
+        // this test fails — the line is pinned.
+        let bridgeB = DashboardTicketBridge(baseURL: Self.serverB)
+        harness.appState.installVoiceCapabilityStateForTesting(
+            bridge: bridgeB,
+            snapshot: VoiceCapabilitySnapshot(
+                isGatewayConnected: true,
+                supportsTranscription: true,
+                supportsSpeech: true,
+                unavailableReason: nil
+            ),
+            isVoiceEnabled: true
+        )
         let gatewayB = GatedVoiceGateway()
         harness.readAloudController.setGateway(gatewayB)
         let messageB = ChatMessage(id: "msg-b", role: .assistant, content: "Response B", timestamp: "2")
@@ -175,11 +194,13 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         let changed = harness.appState.prepareChatResumeForConnection(to: Self.serverB)
         XCTAssertTrue(changed)
 
-        // Server B conversation: fresh gateway, fresh turn.
+        // Server B conversation: fresh gateway, fresh turn owning only B's
+        // session id. The late A deltas are rejected twice over — B's turn
+        // never submitted, so `isAwaitingVoiceAssistant` is false, and the
+        // A session id is not in B's expected set.
         let gatewayB = GatedVoiceGateway()
         harness.voiceController.setGateway(gatewayB)
-        harness.voiceController.beginVoiceTurn(sessionID: "b-session")
-        let listening = await harness.startVoiceListening()
+        let listening = await harness.startVoiceListening(sessionID: "b-session")
         XCTAssertTrue(listening)
         XCTAssertEqual(harness.voiceController.state, .listening)
 
@@ -210,6 +231,20 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         let changed = harness.appState.prepareChatResumeForConnection(to: Self.serverB)
         XCTAssertTrue(changed)
 
+        // Install the incoming connection's bridge so the B-built mock counts
+        // as current (models the post-replacement capability refresh, and
+        // pins the retirement's `readAloudGatewayBridge = nil`).
+        let bridgeB = DashboardTicketBridge(baseURL: Self.serverB)
+        harness.appState.installVoiceCapabilityStateForTesting(
+            bridge: bridgeB,
+            snapshot: VoiceCapabilitySnapshot(
+                isGatewayConnected: true,
+                supportsTranscription: true,
+                supportsSpeech: true,
+                unavailableReason: nil
+            ),
+            isVoiceEnabled: true
+        )
         let gatewayB = GatedVoiceGateway()
         harness.readAloudController.setGateway(gatewayB)
         let messageB = ChatMessage(id: "msg-b", role: .assistant, content: "Response B", timestamp: "2")
@@ -252,8 +287,23 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         XCTAssertGreaterThan(harness.readAloudPlayback.stopCount, readAloudStopBaseline)
         XCTAssertFalse(harness.voicePlayback.isPlaying)
         XCTAssertFalse(harness.readAloudPlayback.isPlaying)
+        XCTAssertFalse(harness.voiceController.isGatewayAttached)
+        XCTAssertNil(harness.readAloudController.gateway)
 
-        // A B-owned operation can claim playback normally afterwards.
+        // A B-owned operation can claim playback normally afterwards: model
+        // the incoming connection's capability refresh with a B bridge, then
+        // start the fresh read aloud.
+        let bridgeB = DashboardTicketBridge(baseURL: Self.serverB)
+        harness.appState.installVoiceCapabilityStateForTesting(
+            bridge: bridgeB,
+            snapshot: VoiceCapabilitySnapshot(
+                isGatewayConnected: true,
+                supportsTranscription: true,
+                supportsSpeech: true,
+                unavailableReason: nil
+            ),
+            isVoiceEnabled: true
+        )
         harness.readAloudController.setGateway(GatedVoiceGateway())
         let messageB = ChatMessage(id: "msg-b", role: .assistant, content: "Response B", timestamp: "2")
         harness.appState.toggleReadAloud(message: messageB)
@@ -280,6 +330,9 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         // call now and must not resurrect anything either.
         let repeated = harness.appState.prepareChatResumeForConnection(to: Self.serverB)
         XCTAssertFalse(repeated)
+        // Literal mirrors AppState's private key; asserted behaviorally
+        // everywhere else, here it pins that the replacement identity
+        // committed even though no transport ever came up.
         XCTAssertEqual(
             harness.defaults.string(forKey: "conduit.chatResumeServerIdentity.v1"),
             Self.serverB
@@ -293,12 +346,20 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
 
     func testSameServerIdentityCallPreservesActiveSpeech() async {
         let harness = makeHarness()
-        _ = await harness.startVoiceListening()
+
+        // Read aloud first through AppState, THEN the voice conversation via
+        // the controller directly: AppState's read-aloud entry enforces
+        // mutual exclusion and would stop a live voice conversation, while
+        // the controller's own listening start does not touch read aloud.
+        // This setup is what makes both owners simultaneously live.
         let message = ChatMessage(id: "msg-a", role: .assistant, content: "Response A", timestamp: "1")
         harness.appState.toggleReadAloud(message: message)
         await harness.awaitUntil("read aloud playing") {
             harness.readAloudController.state == .playing(messageID: "msg-a")
         }
+        let listening = await harness.startVoiceListening()
+        XCTAssertTrue(listening)
+
         let voiceStopBaseline = harness.voicePlayback.stopCount
         let readAloudStopBaseline = harness.readAloudPlayback.stopCount
 
@@ -322,7 +383,7 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
 
     func testServerReplacementCancelsInFlightTTSSpeechTest() async {
         let harness = makeHarness()
-        let speechTest = Task {
+        let speechTest = Task { @MainActor in
             await harness.voiceController.runSpeechTest(text: "Conduit voice is ready for this profile.")
         }
         await harness.awaitUntil("the speech test parked in its stream append") {
@@ -333,10 +394,16 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         let changed = harness.appState.prepareChatResumeForConnection(to: Self.serverB)
         XCTAssertTrue(changed)
 
+        // Bounded settle: if the retirement ever regresses, this fails at the
+        // awaitUntil timeout instead of hanging on the parked task.
+        await harness.awaitUntil("the retired speech test to settle") {
+            !harness.voiceController.hasLiveVoiceSession
+        }
         let result = await speechTest.value
         XCTAssertFalse(result.passed, "a retired speech test must not report success")
         XCTAssertEqual(harness.voiceController.state, .idle)
         XCTAssertFalse(harness.voiceController.hasLiveVoiceSession)
+        XCTAssertFalse(harness.voiceController.isGatewayAttached)
         XCTAssertEqual(harness.voiceGateway.streams[0].cancelCount, 1)
     }
 
@@ -364,6 +431,10 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
             playback: voicePlayback,
             deviceTranscriber: CountingTranscriber(),
             gateway: voiceGateway,
+            // Hermetic route: full duplex keeps capture unsuspended during
+            // assistant playback, so no assertion depends on the simulator's
+            // real AVAudioSession route.
+            routePolicyProvider: { .fullDuplex },
             submit: { _ in true },
             interrupt: { await interruptGate.wait() }
         )
@@ -439,8 +510,8 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
 
         /// Arms a live listening voice turn on the injected gateway.
         @discardableResult
-        func startVoiceListening() async -> Bool {
-            voiceController.beginVoiceTurn(sessionID: "a-session")
+        func startVoiceListening(sessionID: String = "a-session") async -> Bool {
+            voiceController.beginVoiceTurn(sessionID: sessionID)
             await voiceController.startListening()
             return voiceController.state == .listening
         }
