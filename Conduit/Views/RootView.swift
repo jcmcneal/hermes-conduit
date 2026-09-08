@@ -3,6 +3,8 @@
 //  Conduit
 //
 //  Root container — handles auth state and scene phase changes.
+//  Compact layout: Inbox → Conversation NavigationStack.
+//  Wide iPad opt-in: persistent Inbox column beside Conversation.
 //
 
 import SwiftUI
@@ -36,12 +38,17 @@ struct RootView: View {
     }
 }
 
+private enum ConversationDestination: Hashable {
+    case active
+}
+
 struct MainView: View {
     @EnvironmentObject var appState: AppState
+    @StateObject private var shell = AppShellState()
     @AppStorage("conduit.ipadPersistentSidebar") private var prefersPersistentSidebar = false
     @State private var availableWindowWidth: CGFloat = 0
     @State private var settingsPresentation: SettingsSnapshot?
-    @State private var shouldPresentSettingsAfterSidebarDismissal = false
+    @State private var navigationPath = NavigationPath()
 
     private var sidebarPresentation: SidebarPresentation {
         SidebarLayoutPolicy.resolvePresentation(
@@ -54,7 +61,7 @@ struct MainView: View {
     private var isPersistentSidebarActive: Bool { sidebarPresentation == .persistent }
 
     var body: some View {
-        sidebarLayoutContent
+        shellLayoutContent
         .sheet(isPresented: $appState.showModelPicker) {
             ModelPickerView()
                 .presentationDetents([.medium, .large])
@@ -121,164 +128,284 @@ struct MainView: View {
         .onChange(of: isPersistentSidebarActive) { _, persistentActive in
             // Hard invariant: the persistent layout must never coexist with
             // showSidebar == true — that flag suppresses streaming/reasoning
-            // publication. A resize, rotation, or the Appearance toggle can
-            // activate the persistent layout while the drawer is presented.
-            if persistentActive { appState.dismissSidebarDrawer() }
+            // publication.
+            if persistentActive {
+                appState.dismissSidebarDrawer()
+                navigationPath = NavigationPath()
+                shell.showInbox()
+            }
         }
         .task(id: voiceCapabilityRefreshKey) {
             await appState.refreshVoiceCapabilities()
         }
-        // Cold launch: MainView first becoming the authenticated surface is
-        // the qualifying return. The hook fires once per process (re-login
-        // cycles rely on the scene-phase path instead), then any pending
-        // request — including one from scene activation — is consumed.
         .task {
             appState.requestPreferredReturnSurfaceForColdLaunch()
             presentPreferredReturnSurfaceIfNeeded()
+            presentConversationPreferenceIfNeeded()
         }
         .onChange(of: appState.preferredReturnSurfaceRequest) { _, _ in
             presentPreferredReturnSurfaceIfNeeded()
         }
+        .onChange(of: appState.isOpeningNotificationSession) { _, opening in
+            if opening {
+                revealConversation(reason: .notification)
+            }
+        }
+        .onChange(of: appState.showVoiceSheet) { _, showing in
+            if showing {
+                revealConversation(reason: .voice)
+            }
+        }
+        .onChange(of: shell.compactRoute) { _, route in
+            syncNavigationPath(with: route)
+        }
+        .environmentObject(shell)
     }
 
-    /// Routes the sidebar between its two presentations: the existing chat
-    /// shell with the modal drawer, or — on wide iPad windows with the
-    /// Appearance opt-in — the same SidebarView as a persistent leading
-    /// column beside the chat.
     @ViewBuilder
-    private var sidebarLayoutContent: some View {
+    private var shellLayoutContent: some View {
         if isPersistentSidebarActive {
             HStack(spacing: 0) {
-                SidebarView(
-                    onRequestSettings: presentSettingsFromPersistentSidebar,
-                    presentation: .persistent
+                inboxColumn(
+                    presentation: .persistent,
+                    horizontalInset: ConduitInboxMetrics.narrowColumnHorizontalInset,
+                    profileRailSize: ConduitInboxMetrics.profileRailSizeNarrow
                 )
                 .frame(width: SidebarLayoutMetrics.persistentSidebarWidth)
 
                 Divider()
                     .ignoresSafeArea(.container, edges: .vertical)
 
-                chatNavigationContent
+                conversationHost(showsBack: false)
             }
         } else {
-            chatNavigationContent
+            NavigationStack(path: $navigationPath) {
+                inboxColumn(
+                    presentation: .drawer,
+                    horizontalInset: ConduitInboxMetrics.phoneHorizontalInset,
+                    profileRailSize: ConduitInboxMetrics.profileRailSizePhone
+                )
+                .toolbar(.hidden, for: .navigationBar)
+                .navigationDestination(for: ConversationDestination.self) { _ in
+                    conversationHost(showsBack: true)
+                }
+            }
+            .onChange(of: navigationPath.count) { _, count in
+                if count == 0 {
+                    shell.showInbox()
+                } else if shell.compactRoute != .conversation {
+                    shell.showConversationWithoutOpenRequest()
+                }
+            }
         }
     }
 
-    /// The existing chat shell, shared by both sidebar layouts so the drawer
-    /// and the persistent column render the identical conversation surface.
-    /// Only the drawer affordances (hamburger and left-edge swipe) hide while
-    /// the persistent sidebar is visible.
-    private var chatNavigationContent: some View {
-        NavigationStack {
-            ZStack {
-                ConduitBackdrop()
-                ChatView()
+    private func inboxColumn(
+        presentation: SidebarPresentation,
+        horizontalInset: CGFloat,
+        profileRailSize: CGFloat
+    ) -> some View {
+        InboxView(
+            shell: shell,
+            presentation: presentation,
+            horizontalInset: horizontalInset,
+            profileRailSize: profileRailSize,
+            onRequestSettings: presentSettings,
+            onOpenConversation: { sessionID in
+                openConversation(sessionID: sessionID, reason: .rowSelection)
+            },
+            onCreateConversation: {
+                createConversation()
+            },
+            onResumeConversation: {
+                revealConversation(reason: .resume)
             }
-            .overlay(alignment: .leading) {
-                if !isPersistentSidebarActive {
-                    EdgePanGesture { appState.showSidebar = true }
-                        .frame(width: 25)
-                        .ignoresSafeArea()
-                }
-            }
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if !isPersistentSidebarActive {
-                        Button {
-                            appState.showSidebar = true
-                        } label: {
-                            Image(systemName: "line.3.horizontal")
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(width: 40, height: 40)
-                        }
-                        .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
-                        .accessibilityLabel("Open sessions")
-                    }
-                }
-                ToolbarItem(placement: .principal) {
+        )
+    }
+
+    private func conversationHost(showsBack: Bool) -> some View {
+        ZStack {
+            ConduitCanvasBackground()
+            ChatView()
+        }
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                if showsBack {
                     Button {
-                        appState.requestChatScrollToTop()
+                        Haptics.selection()
+                        navigateBackToInbox()
                     } label: {
-                        Text(appState.activeSessionTitle)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .conduitGlassSurface(cornerRadius: 16, tint: .conduitAccent.opacity(0.06))
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("Inbox")
+                                .font(.body.weight(.medium))
+                        }
+                        .foregroundStyle(Color.conduitPrimaryText)
+                        .frame(minWidth: 44, minHeight: 44)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel(appState.activeSessionTitle)
-                    .accessibilityHint("Scroll to top of conversation")
+                    .accessibilityLabel("Back to Inbox")
+                } else {
+                    AgentAvatar(
+                        profileID: appState.activeProfile,
+                        displayName: appState.profileDisplayName(appState.activeProfile),
+                        photoURL: appState.profileAvatarURL(for: appState.activeProfile),
+                        size: 28
+                    )
+                    .accessibilityHidden(true)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+            }
+            ToolbarItem(placement: .principal) {
+                Button {
+                    appState.requestChatScrollToTop()
+                } label: {
+                    Text(appState.activeSessionTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.conduitPrimaryText)
+                        .lineLimit(1)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .conduitRaisedSurface(cornerRadius: 16)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(appState.activeSessionTitle)
+                .accessibilityHint("Scroll to top of conversation")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                if showsBack {
+                    AgentAvatar(
+                        profileID: appState.activeProfile,
+                        displayName: appState.profileDisplayName(appState.activeProfile),
+                        photoURL: appState.profileAvatarURL(for: appState.activeProfile),
+                        size: 28
+                    )
+                    .accessibilityLabel(appState.profileDisplayName(appState.activeProfile))
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
                     Button {
                         Task { await appState.refreshActiveSession() }
                     } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 15, weight: .semibold))
-                            .rotationEffect(.degrees(appState.isChatRefreshing ? 360 : 0))
-                            .animation(
-                                appState.isChatRefreshing
-                                    ? .linear(duration: 0.75).repeatForever(autoreverses: false)
-                                    : .default,
-                                value: appState.isChatRefreshing
-                            )
-                            .frame(width: 40, height: 40)
+                        Label("Refresh", systemImage: "arrow.clockwise")
                     }
-                    .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
                     .disabled(!appState.isConnected || appState.isChatRefreshing)
-                    .accessibilityLabel("Refresh conversation")
+
+                    Button {
+                        appState.showGatewaySheet = true
+                    } label: {
+                        Label("Connection", systemImage: "antenna.radiowaves.left.and.right")
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Color.conduitPrimaryText)
+                        .frame(width: 40, height: 40)
                 }
-                ToolbarItem(placement: .topBarTrailing) {
-                    ConnectionStatusIndicator()
-                }
+                .accessibilityLabel("Conversation menu")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                ConnectionStatusIndicator()
             }
         }
-        .sheet(isPresented: $appState.showSidebar, onDismiss: presentSettingsAfterSidebarDismissal) {
-            SidebarView(onRequestSettings: presentSettingsFromDrawer)
-                .presentationDetents([.large])
-                .transaction { transaction in
-                    transaction.animation = .easeInOut(duration: 0.15)
-                }
+    }
+
+    private func openConversation(sessionID: String, reason: AppShellState.ConversationOpenRequest.Reason) {
+        let generation = shell.beginConversationOpen(sessionID: sessionID, reason: reason)
+        // Already-selected conversation: reveal without unnecessarily resetting.
+        if let active = appState.activeSessionId,
+           appState.activeChatScrollSessionIdentity.areEquivalent(active, sessionID)
+            || active == sessionID {
+            _ = shell.admitConversationOpen(generation: generation, sessionID: sessionID)
+            revealConversation(reason: reason)
+            return
+        }
+        appState.dismissSidebarDrawer()
+        appState.requestOpenSession(sessionID)
+        _ = shell.admitConversationOpen(generation: generation, sessionID: sessionID)
+        revealConversation(reason: reason)
+    }
+
+    private func createConversation() {
+        let generation = shell.beginConversationOpen(sessionID: nil, reason: .newConversation)
+        appState.dismissSidebarDrawer()
+        Task {
+            await appState.createNewSession()
+            guard shell.admitConversationOpen(
+                generation: generation,
+                sessionID: appState.activeSessionId
+            ) else {
+                shell.rejectConversationOpen(generation: generation)
+                return
+            }
+            revealConversation(reason: .newConversation)
         }
     }
 
-    private func presentSettingsFromDrawer() {
-        shouldPresentSettingsAfterSidebarDismissal = true
-        appState.showSidebar = false
+    private func revealConversation(reason: AppShellState.ConversationOpenRequest.Reason) {
+        _ = reason
+        if isPersistentSidebarActive {
+            shell.showConversationWithoutOpenRequest()
+            return
+        }
+        shell.showConversationWithoutOpenRequest()
+        if navigationPath.isEmpty {
+            navigationPath.append(ConversationDestination.active)
+        }
     }
 
-    /// Persistent mode keeps the sidebar visible, so Settings opens directly
-    /// instead of waiting for the drawer sheet to dismiss first.
-    private func presentSettingsFromPersistentSidebar() {
+    private func navigateBackToInbox() {
+        shell.showInbox()
+        navigationPath = NavigationPath()
+        // Legacy flag must stay false so streaming is not suppressed.
+        appState.dismissSidebarDrawer()
+    }
+
+    private func syncNavigationPath(with route: AppShellState.CompactRoute) {
+        guard !isPersistentSidebarActive else { return }
+        switch route {
+        case .inbox:
+            if !navigationPath.isEmpty {
+                navigationPath = NavigationPath()
+            }
+        case .conversation:
+            if navigationPath.isEmpty {
+                navigationPath.append(ConversationDestination.active)
+            }
+        }
+    }
+
+    private func presentSettings() {
         appState.isSettingsSheetPresented = true
         settingsPresentation = appState.makeSettingsSnapshot()
     }
 
-    private func presentSettingsAfterSidebarDismissal() {
-        guard shouldPresentSettingsAfterSidebarDismissal else { return }
-        shouldPresentSettingsAfterSidebarDismissal = false
-        appState.isSettingsSheetPresented = true
-        settingsPresentation = appState.makeSettingsSnapshot()
-    }
-
-    /// Presents the sessions drawer for a preferred-return-surface request.
-    /// Consumption semantics (defer-while-pending, claim-once-per-request,
-    /// drop on precedence losers) live in AppState so they survive MainView
-    /// teardown; this layer only owns the actual sheet presentation. An
-    /// active persistent sidebar already shows Sessions, so the request is
-    /// consumed without opening a redundant drawer.
+    /// Presents Inbox for a preferred-return-surface request. Consumption
+    /// semantics live in AppState; this layer only owns presentation. An
+    /// active persistent sidebar already shows Inbox, so the request is
+    /// consumed without a redundant push.
     private func presentPreferredReturnSurfaceIfNeeded() {
         guard appState.claimPreferredReturnSurfacePresentation() else { return }
-        guard SidebarLayoutPolicy.shouldPresentDrawerForReturnSurface(
+        let alreadyShowingInbox = isPersistentSidebarActive
+            || (shell.compactRoute == .inbox && navigationPath.isEmpty)
+        guard AppShellState.shouldPresentInboxForReturnSurface(
             persistentSidebarActive: isPersistentSidebarActive,
-            drawerPresented: appState.showSidebar
+            alreadyShowingInbox: alreadyShowingInbox
         ) else { return }
-        appState.showSidebar = true
+        navigateBackToInbox()
+    }
+
+    /// Explicit Conversation preference restores the chat surface without
+    /// flashing Inbox first on cold launch / foreground return.
+    private func presentConversationPreferenceIfNeeded() {
+        guard appState.chatReturnSurface == .conversation else { return }
+        guard !isPersistentSidebarActive else { return }
+        revealConversation(reason: .returnSurface)
     }
 
     private var windowWidthReader: some View {
@@ -338,11 +465,10 @@ struct ConnectionStatusIndicator: View {
     }
 }
 
-
 // MARK: - Edge Pan Gesture
 
-/// Detects a left-edge pan gesture to open the sidebar.
-/// Uses UIScreenEdgePanGestureRecognizer (~20pt edge width) via UIViewRepresentable.
+/// Detects a left-edge pan gesture. Retained for compatibility; compact
+/// inbox navigation no longer opens a drawer from this gesture.
 struct EdgePanGesture: UIViewRepresentable {
     var action: () -> Void
 
@@ -351,7 +477,7 @@ struct EdgePanGesture: UIViewRepresentable {
         view.backgroundColor = .clear
         let gesture = UIScreenEdgePanGestureRecognizer(
             target: context.coordinator,
-            action: #selector(context.coordinator.handle(_:))
+            action: #selector(Coordinator.handle(_:))
         )
         gesture.edges = .left
         gesture.cancelsTouchesInView = false
@@ -365,7 +491,7 @@ struct EdgePanGesture: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(action: action) }
 
-    final class Coordinator {
+    final class Coordinator: NSObject {
         var action: () -> Void
         init(action: @escaping () -> Void) { self.action = action }
 

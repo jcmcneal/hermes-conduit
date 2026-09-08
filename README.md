@@ -13,6 +13,7 @@ Start a conversation on desktop, pick it up on your phone. The session list is t
 
 ## Features
 
+- **Inbox home** with profile characters, conversation list, Scheduled jobs, and Boards
 - **Streaming chat** with full Markdown (code blocks, math, Mermaid, task lists)
 - **Tool call inspection** and reasoning traces
 - **Voice mode** with push-to-talk, on-device speech recognition, server-side Whisper
@@ -20,9 +21,10 @@ Start a conversation on desktop, pick it up on your phone. The session list is t
 - **Model switching** and reasoning effort controls
 - **Slash commands** and workspace file browsing
 - **Session branching, pinning, and archiving**
-- **Capabilities tab** to toggle skills, tools, and MCP servers
 - **Scheduled jobs** viewer and connector monitoring
-- **Multi-profile support** with per-profile settings
+- **Kanban boards** for task workflows
+- **Multi-profile support** with per-profile settings and custom photos
+- **Optional bot messaging** with persistent DMs and groups, capability-gated by the [bot-coms messaging companion](server/bot-coms-messaging/README.md) and its configured server worker
 - **Push notifications** for approvals, completed turns, failures, and background tasks
 - **Inline approvals** so you can approve or reject tool calls without typing
 - **Face ID** lock and credential storage

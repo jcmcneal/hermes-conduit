@@ -88,14 +88,24 @@ private struct ProfilePickerRow: View {
         HStack(spacing: 12) {
             Group {
                 if isReordering {
-                    ProfileAvatarView(profile: profile, displayName: appState.profileDisplayName(profile), url: appState.profileAvatarURL(for: profile), size: 48)
+                    AgentAvatar(
+                        profileID: profile,
+                        displayName: appState.profileDisplayName(profile),
+                        photoURL: appState.profileAvatarURL(for: profile),
+                        size: 48
+                    )
                 } else {
                     Button {
                         Haptics.selection()
                         showingImagePicker = true
                     } label: {
                 ZStack(alignment: .bottomTrailing) {
-                    ProfileAvatarView(profile: profile, displayName: appState.profileDisplayName(profile), url: appState.profileAvatarURL(for: profile), size: 48)
+                    AgentAvatar(
+                        profileID: profile,
+                        displayName: appState.profileDisplayName(profile),
+                        photoURL: appState.profileAvatarURL(for: profile),
+                        size: 48
+                    )
                     Image(systemName: "camera.fill").font(.caption2.weight(.bold)).foregroundStyle(Color.conduitBackgroundColor)
                         .frame(width: 20, height: 20).background(Color.conduitAccent, in: Circle())
                         .overlay { Circle().strokeBorder(.background, lineWidth: 1) }

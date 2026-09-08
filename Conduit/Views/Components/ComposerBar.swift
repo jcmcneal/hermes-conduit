@@ -24,7 +24,9 @@ struct ComposerBar: View {
     @State private var isFocused = false
     @State private var isShowingSlashSuggestions = false
     @State private var composerErrorMessage: String?
-    @State private var draftStore = ComposerDraftStore()
+    // Draft store lifetime lives on AppState so Inbox navigation and sign-out
+    // can flush / clear without depending on this view's `@State`.
+    private var draftStore: ComposerDraftStore { appState.composerDraftStore }
     @State private var editorIdentity = UUID()
     /// Generation of intentional composer text replacements. Every program
     /// path that replaces the composer content routes through
@@ -223,21 +225,19 @@ struct ComposerBar: View {
     }
 
     private var composerFoundation: Color {
-        colorScheme == .dark
-            ? Color(red: 0.072, green: 0.080, blue: 0.106).opacity(0.96)
-            : Color.white.opacity(0.94)
+        Color.conduitRaisedSurface
     }
 
     private var composerStroke: Color {
-        colorScheme == .dark ? Color.white.opacity(0.14) : Color.black.opacity(0.09)
+        Color.conduitSeparator
     }
 
     private var fieldFoundation: Color {
-        colorScheme == .dark ? Color.white.opacity(0.065) : Color.black.opacity(0.035)
+        Color.conduitCanvas.opacity(colorScheme == .dark ? 0.55 : 0.85)
     }
 
     private var fieldStroke: Color {
-        colorScheme == .dark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)
+        Color.conduitSeparator
     }
 
     var body: some View {
@@ -280,6 +280,11 @@ struct ComposerBar: View {
         .onAppear {
             guard loadedDraftKey == nil else { return }
             loadDraft(for: activeDraftKey)
+        }
+        .onDisappear {
+            // Explicit flush before ChatView unmount / layout host swap.
+            // Do not wait for a later onDisappear after the session has changed.
+            flushLiveDraft()
         }
         .onChange(of: activeDraftKey) { _, newKey in
             handoffComposer(to: newKey)
@@ -828,6 +833,14 @@ struct ComposerBar: View {
 
     private func saveDraft(for key: ComposerDraftKey) {
         draftStore.save(ComposerDraft(text: text, attachments: attachments), for: key)
+    }
+
+    /// Captures the live composer fields into the shell-owned store so an
+    /// Inbox transition or layout teardown cannot lose mid-edit text.
+    func flushLiveDraft() {
+        let key = loadedDraftKey ?? activeDraftKey
+        saveDraft(for: key)
+        loadedDraftKey = key
     }
 
     private func loadDraft(for key: ComposerDraftKey) {

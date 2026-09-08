@@ -447,6 +447,8 @@ final class AppState: ObservableObject {
     @Published private(set) var projectsLoading = false
     @Published private(set) var archivedSessions: [SessionSummary] = []
     @Published private(set) var pinnedSessionIDs: [String] = []
+    /// Local-only preferred characters on the Chats shelf (ordered).
+    @Published private(set) var pinnedProfileIDs: [String] = []
     @Published private(set) var sessionMutationID: String?
     @Published private(set) var isRefreshingSessionCatalog = false
     @Published var activeSessionId: String? {
@@ -477,13 +479,16 @@ final class AppState: ObservableObject {
     private var durablePersistedRowIDs: Set<String> = []
     @Published private(set) var isChatRefreshing = false
     @Published private(set) var chatResumeBehavior: ChatResumeBehavior = .continueWhereLeftOff
-    @Published private(set) var chatReturnSurface: ChatReturnSurface = .conversation
-    /// One-shot request for MainView to present the sessions drawer as the
-    /// preferred return surface. MainView consumes the latest value once per
+    @Published private(set) var chatReturnSurface: ChatReturnSurface = .sessions
+    /// One-shot request for MainView to present Inbox as the preferred
+    /// return surface. MainView consumes the latest value once per
     /// increment; the request is only issued for qualifying returns (cold
     /// launch or a real background → active transition) when the preference
     /// is `.sessions` and no explicit navigation or modal owns the surface.
     @Published private(set) var preferredReturnSurfaceRequest: UInt64 = 0
+    /// Per-connection composer drafts. Owned here so ChatView unmount and
+    /// sign-out can clear or flush without depending on ComposerBar `@State`.
+    let composerDraftStore = ComposerDraftStore()
     @Published private(set) var chatResumeRestorationRequest: ChatResumeRestorationRequest?
     @Published private(set) var chatViewportTransitionGeneration: UInt64 = 0
     /// Keeps the current transcript visible while a notification destination is
@@ -688,8 +693,27 @@ final class AppState: ObservableObject {
         case .unsupportedGateway:
             return "Update Hermes to use chat controls"
         case .idle:
-            return "Message \(profileDisplayName(activeProfile))…"
+            return "Ask \(profileDisplayName(activeProfile))…"
         }
+    }
+
+    /// Inbox row secondary line: live/cached snippet, else source — never model.
+    func inboxSecondaryLine(for session: SessionSummary) -> String {
+        let live: [ChatMessage]? = {
+            guard let active = activeSessionId else { return nil }
+            let matches = activeChatScrollSessionIdentity.areEquivalent(session.id, active)
+                || session.id == active
+            return matches ? messages : nil
+        }()
+        let cached = sessionPresentationCache.activityPreview(
+            profile: activeProfile,
+            sessionIDs: [session.id]
+        )
+        return ConversationActivityCopy.secondaryLine(
+            session: session,
+            cachedSnippet: cached,
+            liveMessages: live
+        )
     }
 
     // MARK: - Runtime
@@ -1234,6 +1258,7 @@ final class AppState: ObservableObject {
     static let chatReturnSurfaceKey = "conduit.chatReturnSurface.v1"
     private let activeSessionTitlesByProfileKey = "conduit.activeSessionTitlesByProfile.v1"
     private let pinnedSessionIDsByProfileKey = "conduit.pinnedSessionIdsByProfile.v1"
+    private let pinnedProfileIDsKey = "conduit.pinnedProfileIds.v1"
     private let activeProfileKey = "conduit.activeProfile"
     private let themePreferenceKey = "conduit.themePreference"
     private let dashboardURLKey = "conduit.dashboardURL"
@@ -1331,7 +1356,7 @@ final class AppState: ObservableObject {
                 .flatMap(Self.normalizedChatResumeServerIdentity)
         chatResumeBehavior = self.chatResumeCoordinator.behavior
         chatReturnSurface = defaults.string(forKey: Self.chatReturnSurfaceKey)
-            .flatMap(ChatReturnSurface.init(rawValue:)) ?? .conversation
+            .flatMap(ChatReturnSurface.init(rawValue:)) ?? .sessions
         defaultProfileName = ProfileAppearanceStore.loadDefaultName()
         profileAvatarURLs = ProfileAppearanceStore.loadAvatarURLs()
         appIconChoice = UIApplication.shared.alternateIconName == AppIconChoice.light.alternateIconName ? .light : .dark
@@ -1353,6 +1378,7 @@ final class AppState: ObservableObject {
            let stored = try? JSONDecoder().decode([String: [String]].self, from: data) {
             pinnedSessionIDsByProfile = stored
         }
+        pinnedProfileIDs = defaults.stringArray(forKey: pinnedProfileIDsKey) ?? []
         // Hydrate the visible profile list from the persisted known-profile
         // cache before any discovery runs. A cold launch must not present an
         // effectively empty list — starting from `[]` is what let a single
@@ -1363,6 +1389,7 @@ final class AppState: ObservableObject {
         profiles = orderedProfiles(
             (defaults.stringArray(forKey: knownProfilesKey) ?? []) + [activeProfile, "default"]
         )
+        prunePinnedProfiles(known: profiles)
         restoreActiveSessionState(for: activeProfile)
         restorePinnedSessions(for: activeProfile)
         if shouldLoadSavedConnection {
@@ -1416,6 +1443,41 @@ final class AppState: ObservableObject {
         pinnedSessionIDs.removeAll { ids.contains($0) }
         pinnedSessionIDsByProfile[activeProfile] = pinnedSessionIDs
         persistPinnedSessions()
+    }
+
+    func isProfilePinned(_ profile: String) -> Bool {
+        let id = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { return false }
+        return pinnedProfileIDs.contains(id)
+    }
+
+    func toggleProfilePinned(_ profile: String) {
+        let id = profile.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !id.isEmpty else { return }
+        if let index = pinnedProfileIDs.firstIndex(of: id) {
+            pinnedProfileIDs.remove(at: index)
+        } else {
+            pinnedProfileIDs.append(id)
+        }
+        persistPinnedProfiles()
+    }
+
+    /// Drops pins for profiles that are no longer known. Preserves pin order.
+    func prunePinnedProfiles(known: [String]) {
+        let knownSet = Set(known.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        let pruned = pinnedProfileIDs.filter { knownSet.contains($0) }
+        guard pruned != pinnedProfileIDs else { return }
+        pinnedProfileIDs = pruned
+        persistPinnedProfiles()
+    }
+
+    private func persistPinnedProfiles() {
+        defaults.set(pinnedProfileIDs, forKey: pinnedProfileIDsKey)
+    }
+
+    private func clearPinnedProfiles() {
+        pinnedProfileIDs = []
+        defaults.removeObject(forKey: pinnedProfileIDsKey)
     }
 
     private func pendingDecisionRestorationMessages(for sessionID: String) -> [ChatMessage] {
@@ -1508,9 +1570,10 @@ final class AppState: ObservableObject {
     /// surface is presented first on a qualifying return, and deliberately
     /// issues no presentation request — the next qualifying return picks it up.
     func setChatReturnSurface(_ surface: ChatReturnSurface) {
+        // An explicit choice must persist even when it matches the unsaved default.
+        defaults.set(surface.rawValue, forKey: Self.chatReturnSurfaceKey)
         guard surface != chatReturnSurface else { return }
         chatReturnSurface = surface
-        defaults.set(surface.rawValue, forKey: Self.chatReturnSurfaceKey)
     }
 
     /// Issues a one-shot preferred-return-surface request. Suppressed while
@@ -1587,6 +1650,18 @@ final class AppState: ObservableObject {
     func removeChatViewportSnapshotProvider(id: UUID) {
         guard chatViewportSnapshotProvider?.id == id else { return }
         chatViewportSnapshotProvider = nil
+    }
+
+    /// Persists the live conversation viewport before ChatView unmounts
+    /// (Inbox Back / layout host swap). Does not start a session-switch
+    /// transition or leave the viewport frozen for remount.
+    func captureChatViewportForUnmount() {
+        guard let rendered = chatViewportSnapshotProvider?.capture() else { return }
+        chatResumeCoordinator.captureViewportAndFreeze(
+            rendered.snapshot,
+            for: rendered.sessionKey
+        )
+        chatResumeCoordinator.unfreezeViewport()
     }
 
     @discardableResult
@@ -2029,6 +2104,7 @@ final class AppState: ObservableObject {
         activeSessionTitlesByProfile = [:]
         pinnedSessionIDsByProfile = [:]
         pinnedSessionIDs = []
+        clearPinnedProfiles()
         defaults.removeObject(forKey: activeSessionTitlesByProfileKey)
         defaults.removeObject(forKey: pinnedSessionIDsByProfileKey)
         defaults.removeObject(forKey: reviewSummaryCacheKey)
@@ -2303,6 +2379,177 @@ final class AppState: ObservableObject {
               index + 1 < arguments.count else { return .hostNotFound }
         return arguments[index + 1] == "none" ? nil : .hostNotFound
     }
+
+    /// Deterministic inbox/catalog fixtures for DEBUG UI tests. Launch with
+    /// `-CONDUIT_UI_TEST_INBOX_FIXTURE <name>` alongside the connected stub.
+    /// Names: `populated`, `empty`, `multi-profile`, `pinned`, `long-titles`.
+    /// Absent fixture arg leaves the connected stub catalog empty so existing
+    /// Settings UITests keep their original assumptions.
+    private func applyUITestConnectedDashboardFixtureIfNeeded() {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-CONDUIT_UI_TEST_INBOX_FIXTURE"),
+              index + 1 < arguments.count else { return }
+        let name = arguments[index + 1]
+        let fixture = UITestInboxFixture(rawValue: name) ?? .populated
+        applyUITestInboxFixture(fixture)
+    }
+
+    private enum UITestInboxFixture: String {
+        case populated
+        case empty
+        case multiProfile = "multi-profile"
+        case pinned
+        case longTitles = "long-titles"
+    }
+
+    private func applyUITestInboxFixture(_ fixture: UITestInboxFixture) {
+        switch fixture {
+        case .empty:
+            profiles = ["default"]
+            activeProfile = "default"
+            sessions = []
+            setActiveSessionState(id: nil, title: "New conversation")
+        case .multiProfile:
+            profiles = ["default", "research", "ops"]
+            activeProfile = "default"
+            sessions = [
+                Self.uiTestSession(
+                    id: "sess-default-1",
+                    title: "Default workspace chat",
+                    profile: "default",
+                    source: .chat,
+                    model: "gpt-test",
+                    updatedLabel: "2m"
+                ),
+                Self.uiTestSession(
+                    id: "sess-research-1",
+                    title: "Research notes",
+                    profile: "research",
+                    source: .chat,
+                    model: "gpt-test",
+                    updatedLabel: "1h"
+                ),
+                Self.uiTestSession(
+                    id: "sess-ops-1",
+                    title: "Ops alert triage",
+                    profile: "ops",
+                    source: .discord,
+                    model: "gpt-test",
+                    updatedLabel: "Yesterday"
+                ),
+            ]
+            setActiveSessionState(id: "sess-default-1", title: "Default workspace chat")
+            messages = Self.uiTestLongTranscript()
+        case .pinned:
+            profiles = ["default"]
+            activeProfile = "default"
+            sessions = [
+                Self.uiTestSession(
+                    id: "sess-pinned",
+                    title: "Pinned important thread",
+                    profile: "default",
+                    source: .chat,
+                    model: "gpt-test",
+                    updatedLabel: "Just now"
+                ),
+                Self.uiTestSession(
+                    id: "sess-recent",
+                    title: "Recent casual chat",
+                    profile: "default",
+                    source: .telegram,
+                    model: "gpt-test",
+                    updatedLabel: "5m"
+                ),
+            ]
+            pinnedSessionIDs = ["sess-pinned"]
+            pinnedSessionIDsByProfile[activeProfile] = pinnedSessionIDs
+            setActiveSessionState(id: "sess-recent", title: "Recent casual chat")
+        case .longTitles:
+            profiles = ["default"]
+            activeProfile = "default"
+            sessions = [
+                Self.uiTestSession(
+                    id: "sess-long",
+                    title: String(repeating: "Very long conversation title that should truncate gracefully ", count: 3),
+                    profile: "default",
+                    source: .api,
+                    model: "extremely-long-model-name-for-layout-stress",
+                    updatedLabel: "12d"
+                ),
+            ]
+            setActiveSessionState(id: "sess-long", title: sessions[0].title)
+        case .populated:
+            profiles = ["default", "research"]
+            activeProfile = "default"
+            sessions = [
+                Self.uiTestSession(
+                    id: "sess-1",
+                    title: "Morning briefing",
+                    profile: "default",
+                    source: .chat,
+                    model: "gpt-test",
+                    updatedLabel: "Just now"
+                ),
+                Self.uiTestSession(
+                    id: "sess-2",
+                    title: "Discord standup",
+                    profile: "default",
+                    source: .discord,
+                    model: "gpt-test",
+                    updatedLabel: "1h"
+                ),
+                Self.uiTestSession(
+                    id: "sess-3",
+                    title: "Webhook delivery",
+                    profile: "default",
+                    source: .webhook,
+                    model: "gpt-test",
+                    updatedLabel: "Yesterday"
+                ),
+            ]
+            pinnedSessionIDs = ["sess-1"]
+            pinnedSessionIDsByProfile[activeProfile] = pinnedSessionIDs
+            setActiveSessionState(id: "sess-1", title: "Morning briefing")
+            messages = Self.uiTestLongTranscript()
+        }
+    }
+
+    private static func uiTestSession(
+        id: String,
+        title: String,
+        profile: String,
+        source: SessionSource,
+        model: String,
+        updatedLabel: String
+    ) -> SessionSummary {
+        SessionSummary(
+            id: id,
+            storedSessionId: id,
+            alternateIds: [],
+            title: title,
+            model: model,
+            updatedLabel: updatedLabel,
+            profile: profile,
+            source: source,
+            isActive: false,
+            isArchived: false,
+            messageCount: 4,
+            lineageRootId: id
+        )
+    }
+
+    private static func uiTestLongTranscript() -> [ChatMessage] {
+        (0..<24).map { index in
+            ChatMessage(
+                id: "msg-\(index)",
+                role: index.isMultiple(of: 2) ? .user : .assistant,
+                content: index.isMultiple(of: 2)
+                    ? "User turn \(index / 2 + 1)"
+                    : "Assistant reply \(index / 2 + 1) with enough text to exercise scrolling and Markdown chrome during inbox verification.",
+                timestamp: "2024-01-01T10:\(String(format: "%02d", index)):00Z"
+            )
+        }
+    }
 #endif
 
     func loadSavedConnection() {
@@ -2325,6 +2572,9 @@ final class AppState: ObservableObject {
             isConnected = true
             isConnecting = false
             showLogin = false
+            #if DEBUG
+            applyUITestConnectedDashboardFixtureIfNeeded()
+            #endif
             return
         }
         #endif
@@ -2727,6 +2977,7 @@ final class AppState: ObservableObject {
         voiceTranscriptionMode = .hermes
         appleSpeechAvailability = AppleOnDeviceSpeechTranscriber.currentAvailability()
         retireOutstandingPreferredReturnSurfaceRequests()
+        composerDraftStore.removeAll()
         showLogin = true
         sessions = []
         archivedSessions = []
@@ -2737,6 +2988,7 @@ final class AppState: ObservableObject {
         // correct them).
         sessionCatalogCache.removeAll()
         pinnedSessionIDs = []
+        clearPinnedProfiles()
         messages = []
         persistedTranscriptWindow = nil
         setActiveSessionState(id: nil, title: "New conversation")
@@ -2893,6 +3145,7 @@ final class AppState: ObservableObject {
         KeychainHelper.clearConnection()
         turnState = .idle
         retireOutstandingPreferredReturnSurfaceRequests()
+        composerDraftStore.removeAll()
         // The banner content belonged to the session being torn down; with
         // the LoginView onAppear consume gone, this is what keeps a
         // connected-era error from resurfacing stale after re-login.
@@ -10717,6 +10970,7 @@ final class AppState: ObservableObject {
                 : orderedProfiles(names + ["default"])
             profiles = nextProfiles
             defaults.set(nextProfiles, forKey: knownProfilesKey)
+            prunePinnedProfiles(known: nextProfiles)
             // A non-empty response is authoritative: if the server no longer
             // knows the active profile (deleted externally), re-home onto a
             // valid fallback instead of leaving `activeProfile ∉ profiles` —
@@ -10754,6 +11008,7 @@ final class AppState: ObservableObject {
             let merged = orderedProfiles(profiles + [activeProfile, "default"])
             profiles = merged
             defaults.set(merged, forKey: knownProfilesKey)
+            prunePinnedProfiles(known: merged)
         }
     }
 
