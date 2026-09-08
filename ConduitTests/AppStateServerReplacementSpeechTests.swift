@@ -409,6 +409,7 @@ final class AppStateServerReplacementSpeechTests: XCTestCase {
         )
     }
 
+    @MainActor
     private struct Harness {
         let appState: AppState
         let defaults: UserDefaults
