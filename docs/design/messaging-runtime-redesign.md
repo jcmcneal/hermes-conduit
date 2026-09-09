@@ -1,6 +1,6 @@
 # Messaging runtime redesign
 
-Date: 2026-09-09. Status: initial backend/session implementation staged and tested in isolated worktrees; no live runtime migration performed. Predictive turn selection remains a follow-up.
+Date: 2026-09-09. Status: initial backend/session implementation staged and tested in isolated worktrees; no live runtime migration performed. Predictive turn selection is implemented in bot-coms (on-by-default aux selector; shadow remains available); Conduit UI states for speaking/waiting/yielded remain a follow-up.
 
 ## Required deployment: retain bot-coms without sidecars
 
@@ -171,8 +171,11 @@ are in the bot-coms worktree's `docs/BACKEND.md`.
 
 Conduit does not yet present native tool-approval prompts; an authorized Hermes
 client must handle them. Remote terminal context bridging and isolated compute
-execution are outside this initial integration. Predictive turn selection,
-shadow evaluation, and its proposed UI states above remain planned work.
+execution are outside this initial integration. Predictive turn selection is
+implemented in bot-coms as an admit-time Hermes auxiliary structured call
+(`bot_coms_turn_taking`), defaulting to on. Shadow mode remains available for
+evaluation without changing admission. Conduit speaking / waiting / yielded UI
+states remain planned work.
 
 
 ## Verification record — 2026-09-09
