@@ -145,6 +145,38 @@ struct MessagingDestination: Identifiable, Equatable {
     var id: String { conversationID.map { "conversation:\($0)" } ?? "dm:\(profileID ?? "")" }
 }
 
+/// Mixed bot / group row for the Bots pin shelf.
+enum MessagingShelfItem: Identifiable, Equatable {
+    case bot(MessagingProfile)
+    case group(MessagingConversation)
+
+    static let groupPinPrefix = "group:"
+
+    static func groupPinKey(_ conversationID: String) -> String {
+        groupPinPrefix + conversationID
+    }
+
+    static func groupID(fromPinKey key: String) -> String? {
+        guard key.hasPrefix(groupPinPrefix) else { return nil }
+        let id = String(key.dropFirst(groupPinPrefix.count))
+        return id.isEmpty ? nil : id
+    }
+
+    var id: String {
+        switch self {
+        case .bot(let profile): return profile.id
+        case .group(let conversation): return Self.groupPinKey(conversation.id)
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .bot(let profile): return profile.displayName
+        case .group(let conversation): return conversation.title
+        }
+    }
+}
+
 struct PendingMessagingSend: Codable, Equatable {
     let id: String
     let text: String

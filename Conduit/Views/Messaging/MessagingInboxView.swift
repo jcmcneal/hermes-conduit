@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Bots home: pin-able DM shelf plus existing groups.
+/// Bots home: pin-able bot and group shelf.
 struct MessagingInboxView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var store: MessagingStore
@@ -14,15 +14,8 @@ struct MessagingInboxView: View {
     @State private var chooseBot = false
     @State private var pendingDestination: MessagingDestination?
 
-    private var pinnedProfiles: [MessagingProfile] {
-        let known = Dictionary(uniqueKeysWithValues: store.profiles.map { ($0.id, $0) })
-        return store.pinnedBotIDs.compactMap { known[$0] }
-    }
-
-    private var unpinnedProfiles: [MessagingProfile] {
-        let pinned = Set(store.pinnedBotIDs)
-        return store.profiles.filter { !pinned.contains($0.id) }
-    }
+    private var pinnedItems: [MessagingShelfItem] { store.pinnedShelfItems }
+    private var unpinnedItems: [MessagingShelfItem] { store.unpinnedShelfItems }
 
     private var pinnedColumns: [GridItem] {
         [GridItem(.adaptive(minimum: pinnedSize + 12, maximum: pinnedSize + 28), spacing: 16)]
@@ -43,34 +36,32 @@ struct MessagingInboxView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if !pinnedProfiles.isEmpty {
+                    if !pinnedItems.isEmpty {
                         LazyVGrid(columns: pinnedColumns, alignment: .leading, spacing: 16) {
-                            ForEach(pinnedProfiles) { profile in
-                                pinnedCell(profile)
+                            ForEach(pinnedItems) { item in
+                                pinnedCell(item)
                             }
                         }
                     }
 
-                    if !unpinnedProfiles.isEmpty {
+                    if !unpinnedItems.isEmpty {
                         VStack(alignment: .leading, spacing: 4) {
-                            if !pinnedProfiles.isEmpty {
+                            if !pinnedItems.isEmpty {
                                 Text("More")
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(Color.conduitSecondaryText)
                                     .padding(.bottom, 4)
                             }
-                            ForEach(unpinnedProfiles) { profile in
-                                unpinnedRow(profile)
+                            ForEach(unpinnedItems) { item in
+                                unpinnedRow(item)
                             }
                         }
-                    } else if store.isReady && store.profiles.isEmpty {
+                    } else if store.isReady && store.profiles.isEmpty && store.unarchivedGroups.isEmpty {
                         Text("No bots are available for messaging yet.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .padding(.vertical)
                     }
-
-                    groupsSection
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 4)
@@ -111,19 +102,13 @@ struct MessagingInboxView: View {
         }
     }
 
-    private func pinnedCell(_ profile: MessagingProfile) -> some View {
+    private func pinnedCell(_ item: MessagingShelfItem) -> some View {
         Button {
-            openDM(profile)
+            open(item)
         } label: {
             VStack(spacing: 8) {
-                AgentAvatar(
-                    profileID: profile.name,
-                    displayName: profile.displayName,
-                    photoURL: appState.profileAvatarURL(for: profile.name),
-                    size: pinnedSize,
-                    state: appState.avatarState(for: profile.name)
-                )
-                Text(profile.displayName)
+                shelfArtwork(item, size: pinnedSize)
+                Text(item.title)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Color.conduitPrimaryText)
                     .lineLimit(2)
@@ -133,24 +118,18 @@ struct MessagingInboxView: View {
         }
         .buttonStyle(.plain)
         .disabled(!store.isReady)
-        .contextMenu { pinMenu(for: profile) }
-        .accessibilityLabel(profile.displayName)
-        .accessibilityHint("Opens a direct message with this bot")
+        .contextMenu { pinMenu(for: item) }
+        .accessibilityLabel(item.title)
+        .accessibilityHint(accessibilityHint(for: item))
     }
 
-    private func unpinnedRow(_ profile: MessagingProfile) -> some View {
+    private func unpinnedRow(_ item: MessagingShelfItem) -> some View {
         Button {
-            openDM(profile)
+            open(item)
         } label: {
             HStack(spacing: 14) {
-                AgentAvatar(
-                    profileID: profile.name,
-                    displayName: profile.displayName,
-                    photoURL: appState.profileAvatarURL(for: profile.name),
-                    size: unpinnedSize,
-                    state: appState.avatarState(for: profile.name)
-                )
-                Text(profile.displayName)
+                shelfArtwork(item, size: unpinnedSize)
+                Text(item.title)
                     .font(.body.weight(.medium))
                     .foregroundStyle(Color.conduitPrimaryText)
                     .lineLimit(1)
@@ -164,109 +143,69 @@ struct MessagingInboxView: View {
         }
         .buttonStyle(.plain)
         .disabled(!store.isReady)
-        .contextMenu { pinMenu(for: profile) }
-        .accessibilityLabel(profile.displayName)
-        .accessibilityHint("Opens a direct message with this bot")
+        .contextMenu { pinMenu(for: item) }
+        .accessibilityLabel(item.title)
+        .accessibilityHint(accessibilityHint(for: item))
     }
 
     @ViewBuilder
-    private var groupsSection: some View {
-        let groups = store.visibleGroupConversations
-        let canGroup = store.capability?.supportsGroups == true
-        if canGroup || !groups.isEmpty {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Groups")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Color.conduitSecondaryText)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
-                    .accessibilityAddTraits(.isHeader)
-
-                if groups.isEmpty {
-                    Text("Create a group to chat with several bots at once.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 8)
-                } else {
-                    ForEach(groups) { conversation in
-                        groupRow(conversation)
-                    }
-                }
-            }
+    private func shelfArtwork(_ item: MessagingShelfItem, size: CGFloat) -> some View {
+        switch item {
+        case .bot(let profile):
+            AgentAvatar(
+                profileID: profile.name,
+                displayName: profile.displayName,
+                photoURL: appState.profileAvatarURL(for: profile.name),
+                size: size,
+                state: appState.avatarState(for: profile.name)
+            )
+        case .group:
+            Image(systemName: "person.2.circle.fill")
+                .font(.system(size: size - 4))
+                .foregroundStyle(Color.conduitAccent)
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
         }
-    }
-
-    private func groupRow(_ conversation: MessagingConversation) -> some View {
-        Button {
-            openMessaging(MessagingDestination(conversationID: conversation.id, profileID: nil))
-        } label: {
-            HStack(spacing: 14) {
-                Image(systemName: "person.2.circle.fill")
-                    .font(.system(size: unpinnedSize - 4))
-                    .foregroundStyle(Color.conduitAccent)
-                    .frame(width: unpinnedSize, height: unpinnedSize)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 6) {
-                        Text(conversation.title)
-                            .font(.body.weight(.medium))
-                            .foregroundStyle(Color.conduitPrimaryText)
-                            .lineLimit(1)
-                        if conversation.pinned {
-                            Image(systemName: "pin.fill")
-                                .font(.caption2)
-                                .foregroundStyle(Color.conduitSecondaryText)
-                                .accessibilityHidden(true)
-                        }
-                        Spacer(minLength: 0)
-                        Text(
-                            Date(timeIntervalSince1970: conversation.updatedAt),
-                            format: .relative(presentation: .numeric, unitsStyle: .abbreviated)
-                        )
-                        .font(.caption)
-                        .foregroundStyle(Color.conduitSecondaryText)
-                    }
-                    Text(conversation.preview.isEmpty ? "Group conversation" : conversation.preview)
-                        .font(.subheadline)
-                        .foregroundStyle(Color.conduitSecondaryText)
-                        .lineLimit(1)
-                }
-                if conversation.unread > 0 {
-                    Circle()
-                        .fill(Color.conduitAccent)
-                        .frame(width: 8, height: 8)
-                        .accessibilityLabel("Unread")
-                }
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.conduitSecondaryText)
-            }
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .disabled(!store.isReady)
-        .accessibilityLabel(conversation.title)
-        .accessibilityHint("Opens this group conversation")
     }
 
     @ViewBuilder
-    private func pinMenu(for profile: MessagingProfile) -> some View {
+    private func pinMenu(for item: MessagingShelfItem) -> some View {
+        let pinned: Bool = {
+            switch item {
+            case .bot(let profile): return store.isBotPinned(profile.id)
+            case .group(let conversation): return store.isGroupPinned(conversation.id)
+            }
+        }()
         Button {
             Haptics.light()
             withAnimation(ConduitMotion.response) {
-                store.toggleBotPinned(profile.id)
+                switch item {
+                case .bot(let profile): store.toggleBotPinned(profile.id)
+                case .group(let conversation): store.toggleGroupPinned(conversation.id)
+                }
             }
         } label: {
             Label(
-                store.isBotPinned(profile.id) ? "Unpin" : "Pin",
-                systemImage: store.isBotPinned(profile.id) ? "pin.slash" : "pin"
+                pinned ? "Unpin" : "Pin",
+                systemImage: pinned ? "pin.slash" : "pin"
             )
         }
     }
 
-    private func openDM(_ profile: MessagingProfile) {
-        openMessaging(MessagingDestination(conversationID: nil, profileID: profile.id))
+    private func open(_ item: MessagingShelfItem) {
+        switch item {
+        case .bot(let profile):
+            openMessaging(MessagingDestination(conversationID: nil, profileID: profile.id))
+        case .group(let conversation):
+            openMessaging(MessagingDestination(conversationID: conversation.id, profileID: nil))
+        }
+    }
+
+    private func accessibilityHint(for item: MessagingShelfItem) -> String {
+        switch item {
+        case .bot: return "Opens a direct message with this bot"
+        case .group: return "Opens this group conversation"
+        }
     }
 }
 

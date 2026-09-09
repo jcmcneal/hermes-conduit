@@ -17,19 +17,47 @@ final class MessagingStore: ObservableObject {
     private var presentationScope = ""
     private var dismissalScope = ""
     private var verifiedIdentityScope: String?
+    /// True after a successful conversations fetch in this connection generation.
+    private var hasLoadedConversations = false
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
     var isReady: Bool { availability == .ready && capability?.isReady == true }
     var profiles: [MessagingProfile] { capability?.profiles ?? [] }
-    /// Active groups for the Bots list. DMs stay on the profile shelf.
-    var visibleGroupConversations: [MessagingConversation] {
+
+    var unarchivedGroups: [MessagingConversation] {
         conversations.filter { $0.kind == "group" && !$0.archived }
+    }
+
+    /// Pinned shelf items in stored pin order (bots and groups interleaved).
+    var pinnedShelfItems: [MessagingShelfItem] {
+        let bots = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+        let groups = Dictionary(uniqueKeysWithValues: unarchivedGroups.map { ($0.id, $0) })
+        return pinnedBotIDs.compactMap { key in
+            if let groupID = MessagingShelfItem.groupID(fromPinKey: key), let group = groups[groupID] {
+                return .group(group)
+            }
+            if let bot = bots[key] {
+                return .bot(bot)
+            }
+            return nil
+        }
+    }
+
+    /// Unpinned bots (capability order) then unpinned groups (newest first).
+    var unpinnedShelfItems: [MessagingShelfItem] {
+        let pinned = Set(pinnedBotIDs)
+        var items: [MessagingShelfItem] = profiles
+            .filter { !pinned.contains($0.id) }
+            .map { .bot($0) }
+        let unpinnedGroups = unarchivedGroups
+            .filter { !pinned.contains(MessagingShelfItem.groupPinKey($0.id)) }
             .sorted { lhs, rhs in
-                if lhs.pinned != rhs.pinned { return lhs.pinned }
                 if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
                 return lhs.id < rhs.id
             }
+        items.append(contentsOf: unpinnedGroups.map { .group($0) })
+        return items
     }
 
     func connect(requester: (any DashboardJSONRequester)?, scope: String) {
@@ -43,6 +71,7 @@ final class MessagingStore: ObservableObject {
         service = requester.map(MessagingService.init)
         capability = nil
         conversations = []
+        hasLoadedConversations = false
         error = nil
         isRefreshing = false
         availability = requester == nil ? .unavailable : .checking
@@ -61,10 +90,24 @@ final class MessagingStore: ObservableObject {
 
     func toggleBotPinned(_ profileID: String) {
         guard !profileID.isEmpty else { return }
-        if let index = pinnedBotIDs.firstIndex(of: profileID) {
+        togglePinKey(profileID)
+    }
+
+    func isGroupPinned(_ conversationID: String) -> Bool {
+        guard !conversationID.isEmpty else { return false }
+        return pinnedBotIDs.contains(MessagingShelfItem.groupPinKey(conversationID))
+    }
+
+    func toggleGroupPinned(_ conversationID: String) {
+        guard !conversationID.isEmpty else { return }
+        togglePinKey(MessagingShelfItem.groupPinKey(conversationID))
+    }
+
+    private func togglePinKey(_ key: String) {
+        if let index = pinnedBotIDs.firstIndex(of: key) {
             pinnedBotIDs.remove(at: index)
         } else {
-            pinnedBotIDs.append(profileID)
+            pinnedBotIDs.append(key)
         }
         defaults.set(pinnedBotIDs, forKey: pinnedBotsKey)
     }
@@ -75,9 +118,20 @@ final class MessagingStore: ObservableObject {
     }
 
     private func prunePinnedBots() {
-        let known = Set(profiles.map(\.id))
-        guard !known.isEmpty else { return }
-        let pruned = pinnedBotIDs.filter { known.contains($0) }
+        let knownProfiles = Set(profiles.map(\.id))
+        // Keep group pins until conversations have loaded; otherwise a mid-refresh
+        // capability prune would wipe every group favourite.
+        let knownGroups: Set<String>? = hasLoadedConversations
+            ? Set(unarchivedGroups.map(\.id))
+            : nil
+        let pruned = pinnedBotIDs.filter { key in
+            if let groupID = MessagingShelfItem.groupID(fromPinKey: key) {
+                guard let knownGroups else { return true }
+                return knownGroups.contains(groupID)
+            }
+            guard !knownProfiles.isEmpty else { return true }
+            return knownProfiles.contains(key)
+        }
         guard pruned != pinnedBotIDs else { return }
         pinnedBotIDs = pruned
         defaults.set(pinnedBotIDs, forKey: pinnedBotsKey)
@@ -100,6 +154,7 @@ final class MessagingStore: ObservableObject {
                     if let previous = verifiedIdentityScope, previous != dismissalScope {
                         generation = UUID(); epoch = generation
                         capability = nil; service.capability = nil; conversations = []
+                        hasLoadedConversations = false
                     }
                     verifiedIdentityScope = dismissalScope
                     cardDismissed = defaults.bool(forKey: dismissalKey)
@@ -127,6 +182,7 @@ final class MessagingStore: ObservableObject {
                 }
                 if let old = capability, old.scope != result.scope {
                     conversations = []
+                    hasLoadedConversations = false
                     generation = UUID()
                     isRefreshing = false
                 }
@@ -152,9 +208,9 @@ final class MessagingStore: ObservableObject {
     func handle(_ failure: Error) {
         isRefreshing = false
         if case DashboardTicketBridgeError.signInRequired = failure {
-            availability = .forbidden; capability = nil; conversations = []; generation = UUID()
+            availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID()
         } else if case DashboardTicketBridgeError.http(let status, _) = failure, status == 401 || status == 403 {
-            availability = .forbidden; capability = nil; conversations = []; generation = UUID()
+            availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID()
         } else { availability = .unavailable }
         error = failure.localizedDescription
     }
@@ -176,6 +232,8 @@ final class MessagingStore: ObservableObject {
                 if let cursor, !seen.insert(cursor).inserted { throw MessagingError.invalidResponse }
             } while cursor != nil
             conversations = collected
+            hasLoadedConversations = true
+            prunePinnedBots()
             error = nil
         } catch { if epoch == generation { handle(error) } }
     }

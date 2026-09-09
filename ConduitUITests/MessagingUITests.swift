@@ -52,7 +52,7 @@ final class MessagingUITests: XCTestCase {
         let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Designer")).firstMatch
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertFalse(app.staticTexts["Messages"].exists, "Bots home is a profile shelf, not a Messages list")
-        XCTAssertTrue(app.staticTexts["Groups"].waitForExistence(timeout: 5), "Groups belong on the Bots shelf")
+        XCTAssertFalse(app.staticTexts["Groups"].exists, "Groups sit inline with bots, not a separate section")
         let group = app.buttons.matching(NSPredicate(format: "label == %@", "Design crew")).firstMatch
         XCTAssertTrue(group.waitForExistence(timeout: 5), app.debugDescription)
         let inbox = XCTAttachment(screenshot: app.screenshot()); inbox.name = "Bots shelf"; inbox.lifetime = .keepAlways; add(inbox)

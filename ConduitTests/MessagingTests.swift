@@ -254,7 +254,62 @@ final class MessagingTests: XCTestCase {
         XCTAssertTrue(reloaded.pinnedBotIDs.isEmpty)
     }
 
-    func testVisibleGroupsSkipDMsAndArchivedAndSortPinnedFirst() async {
+    func testGroupPinsPersistSurviveRefreshAndPruneAfterConversationsLoad() async throws {
+        let suite = "messaging-group-pins-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        var includeHot = true
+        let requester = MessagingRequester { path, _, _ in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") {
+                return [
+                    "server_id": "server", "principal_id": "alice", "api_version": 1, "state": "ready",
+                    "features": ["dm", "groups"],
+                    "profiles": [
+                        ["id": "swe-id", "name": "swe", "displayName": "SWE"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                    ],
+                ]
+            }
+            var rows: [[String: Any]] = [
+                ["id": "g-hot", "kind": "group", "title": "Hot crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "now", "updated_at": 80, "unread": 1, "archived": false, "pinned": false, "muted": false],
+                ["id": "g-arch", "kind": "group", "title": "Archived crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "gone", "updated_at": 100, "unread": 0, "archived": true, "pinned": false, "muted": false],
+            ]
+            if !includeHot {
+                rows.removeAll { ($0["id"] as? String) == "g-hot" }
+            }
+            return ["conversations": rows]
+        }
+        let store = MessagingStore(defaults: defaults)
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+
+        store.toggleGroupPinned("g-hot")
+        store.toggleGroupPinned("g-gone")
+        store.toggleBotPinned("swe-id")
+        XCTAssertTrue(store.isGroupPinned("g-hot"))
+        XCTAssertEqual(
+            store.pinnedBotIDs,
+            ["group:g-hot", "group:g-gone", "swe-id"],
+            "Group pins use a group: prefix alongside bot ids"
+        )
+
+        await store.refresh()
+        XCTAssertEqual(
+            store.pinnedBotIDs,
+            ["group:g-hot", "swe-id"],
+            "Unknown/archived group pins prune only after conversations load; bot pins stay"
+        )
+        XCTAssertEqual(store.pinnedShelfItems.map(\.id), ["group:g-hot", "swe-id"])
+
+        includeHot = false
+        await store.refresh()
+        XCTAssertEqual(store.pinnedBotIDs, ["swe-id"], "Missing groups prune after the next conversations fetch")
+        XCTAssertFalse(store.isGroupPinned("g-hot"))
+    }
+
+    func testUnpinnedShelfSkipsDMsAndArchivedAndInterleavesPinOrder() async {
         let requester = MessagingRequester { path, _, _ in
             if path.hasSuffix("/hub") { return self.hub() }
             if path.hasSuffix("/capabilities") {
@@ -272,7 +327,6 @@ final class MessagingTests: XCTestCase {
                     ["id": "dm-1", "kind": "dm", "title": "SWE", "profiles": ["swe-id"], "default_responder": "swe-id", "revision": 1, "preview": "hi", "updated_at": 90, "unread": 0, "archived": false, "pinned": false, "muted": false],
                     ["id": "g-old", "kind": "group", "title": "Old crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "later", "updated_at": 40, "unread": 0, "archived": false, "pinned": false, "muted": false],
                     ["id": "g-hot", "kind": "group", "title": "Hot crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "now", "updated_at": 80, "unread": 1, "archived": false, "pinned": false, "muted": false],
-                    ["id": "g-pin", "kind": "group", "title": "Pinned crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "pin", "updated_at": 10, "unread": 0, "archived": false, "pinned": true, "muted": false],
                     ["id": "g-arch", "kind": "group", "title": "Archived crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "gone", "updated_at": 100, "unread": 0, "archived": true, "pinned": true, "muted": false],
                 ]
             ]
@@ -280,7 +334,15 @@ final class MessagingTests: XCTestCase {
         let store = MessagingStore()
         store.connect(requester: requester, scope: "server")
         await store.refresh()
-        XCTAssertEqual(store.visibleGroupConversations.map(\.id), ["g-pin", "g-hot", "g-old"])
+
+        store.toggleGroupPinned("g-old")
+        store.toggleBotPinned("designer-id")
+        XCTAssertEqual(store.pinnedShelfItems.map(\.id), ["group:g-old", "designer-id"])
+        XCTAssertEqual(
+            store.unpinnedShelfItems.map(\.id),
+            ["swe-id", "group:g-hot"],
+            "Unpinned: remaining bots in capability order, then active groups by recency; DMs and archived stay out"
+        )
     }
 
     func testDeleteGroupIssuesDeleteAndClearsHistory() async {
@@ -300,7 +362,8 @@ final class MessagingTests: XCTestCase {
                 ]
             }
             if path.hasSuffix("/conversations") { return ["conversations": []] }
-            if path.contains("/conversations/g-1") && method == "GET" {
+            // MessagingService.component percent-encodes non-alphanumerics (hyphen → %2D).
+            if path.contains("/conversations/g%2D1") && method == "GET" {
                 return [
                     "conversation": [
                         "id": "g-1", "kind": "group", "title": "Room",
@@ -312,7 +375,7 @@ final class MessagingTests: XCTestCase {
                     "runs": [],
                 ]
             }
-            if path.contains("/conversations/g-1") && method == "DELETE" {
+            if path.contains("/conversations/g%2D1") && method == "DELETE" {
                 deletedPath = path
                 return ["ok": true]
             }
