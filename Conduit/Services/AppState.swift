@@ -9506,6 +9506,13 @@ final class AppState: ObservableObject {
             return
         }
         let question = activity.questions[questionIndex]
+        // Ownership snapshot for the gateway-owned respond below — same fence
+        // as `respondToApproval`: a completion (success or failure) from a
+        // replaced client must not touch whatever decision state is current,
+        // even under colliding ids. The relay branch above is deliberately
+        // NOT fenced: it is owned by the relay registration, not by this
+        // HermesClient (push server identity is a separate prerequisite).
+        let profile = activeProfile
         // The wire answer for a multi-select question must be the array form
         // Hermes' batch parser accepts; typed custom text arrives as a bare
         // string and is wrapped here so every multi-select path is uniform.
@@ -9525,6 +9532,7 @@ final class AppState: ObservableObject {
                 // respond shape every gateway generation accepts.
                 questionId: question.isSyntheticID ? nil : question.id
             )
+            guard profile == activeProfile, self.client === client else { return }
             applyClarifyResponseOutcome(
                 outcome,
                 requestId: requestId,
@@ -9532,6 +9540,7 @@ final class AppState: ObservableObject {
                 answer: wireAnswer
             )
         } catch {
+            guard profile == activeProfile, self.client === client else { return }
             if Self.isExpiredPromptError(error) {
                 // Older gateways report expiry as RPC 4009 instead of the
                 // typed `expired` status — same teardown either way.
@@ -10899,12 +10908,23 @@ final class AppState: ObservableObject {
             cacheMessagePresentation()
             return
         }
+        // Ownership snapshot: the completion below may only land while this
+        // exact client (and profile) still owns AppState. A client/server
+        // replacement while the RPC is suspended must turn the stale
+        // continuation inert — success and failure alike — even when profile,
+        // session, and message ids collide across the two connections. This
+        // is the same fence `loadProjects`/`synchronizeTransportContinuation`
+        // use; only client ownership changed here, so no epoch beyond the
+        // pointer identity is needed.
+        let profile = activeProfile
         do {
             try await client.respondToApproval(sessionId: current.sessionId, choice: choice)
+            guard profile == activeProfile, self.client === client else { return }
             guard let updatedIndex = messages.firstIndex(where: { $0.id == messageId }) else { return }
             messages[updatedIndex].approval?.status = choice == "deny" ? .rejected : .approved
             cacheMessagePresentation()
         } catch {
+            guard profile == activeProfile, self.client === client else { return }
             guard let updatedIndex = messages.firstIndex(where: { $0.id == messageId }) else { return }
             messages[updatedIndex].approval?.status = .error
             messages[updatedIndex].approval?.choice = nil
