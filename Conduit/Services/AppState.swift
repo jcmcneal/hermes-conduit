@@ -20,6 +20,10 @@ private let sessionYoloLog = Logger(subsystem: "com.milim.conduit", category: "S
 /// resume, and how prompt submissions were classified. Ids only — never
 /// prompt text, credentials, or message content.
 private let lifecycleLog = Logger(subsystem: "com.milim.conduit", category: "TurnLifecycle")
+/// Server-replacement speech retirement: which speech operations were live
+/// when the outgoing server's ownership was revoked. Ids and booleans only —
+/// never prompt text, credentials, or speech content.
+private let speechOwnershipLog = Logger(subsystem: "com.milim.conduit", category: "SpeechOwnership")
 
 typealias ChatResumeReconnectCancellation = @MainActor () -> Void
 typealias ChatResumeReconnectExecutor = @MainActor (ChatResumeSyncPurpose) async -> Void
@@ -2081,6 +2085,7 @@ final class AppState: ObservableObject {
         defaults.set(identity, forKey: chatResumeServerIdentityKey)
         guard let previousIdentity, previousIdentity != identity else { return false }
 
+        retireSpeechOperationsForServerReplacement(previousIdentity: previousIdentity, identity: identity)
         chatResumeCoordinator.clearResumeState()
         cancelOwnedAutomaticOperations()
         activeAutomaticChatResumeWork = nil
@@ -2120,6 +2125,54 @@ final class AppState: ObservableObject {
         conversationIdentityIndex.removeAll()
         sessionYoloStore.clearAllOverrides()
         return true
+    }
+
+    /// Runtime-only speech retirement at the server-replacement boundary.
+    ///
+    /// Voice Conversation and Read Aloud own speech transports that are
+    /// independent of `HermesClient`: a gateway binds one dashboard bridge and
+    /// base URL, and each spoken response opens its own ticket-minted speech
+    /// websocket. Those transports would otherwise keep streaming against —
+    /// and playing audio from — the outgoing server after a new connection
+    /// becomes authoritative, because replacing the client or the gateway
+    /// reference does not terminate an operation that already holds the old
+    /// gateway. This mirrors the voice teardown `disconnect()` performs, with
+    /// the operation generations doing the rest: every parked continuation
+    /// (capture resume, speech drain, playback completion) re-checks its
+    /// generation and turns inert, so nothing the outgoing server owned can
+    /// resurrect capture or playback.
+    ///
+    /// Deliberately NOT logout: no credential, cookie, ticket, or preference
+    /// state is touched here — only the outgoing connection's runtime speech
+    /// ownership. If the incoming connection fails to activate, the retired
+    /// operations stay retired; the outgoing server's speech is not valid
+    /// merely because the replacement failed. Same-server reconnects never
+    /// reach this path: `prepareDashboardBridge(for:)` keeps the bridge (and
+    /// therefore the gateways) when the normalized URL is unchanged, and the
+    /// capability refresh intentionally keeps equivalent gateways alive.
+    private func retireSpeechOperationsForServerReplacement(previousIdentity: String, identity: String) {
+        let voiceWasLive = voiceConversationController.hasLiveVoiceSession
+        let readAloudWasActive: Bool
+        if case .idle = messageReadAloudController.state {
+            readAloudWasActive = false
+        } else {
+            readAloudWasActive = true
+        }
+        speechOwnershipLog.info(
+            "Server replacement \(previousIdentity, privacy: .private) -> \(identity, privacy: .private): retiring speech ownership (voiceLive=\(voiceWasLive ? "yes" : "no", privacy: .public), readAloudActive=\(readAloudWasActive ? "yes" : "no", privacy: .public))"
+        )
+        voiceConversationController.stop()
+        // Read Aloud teardown flows through the controller's own pinned
+        // Option-A semantics: replacing a non-nil gateway performs the single
+        // authoritative stop. A nil gateway means nothing can be live — an
+        // operation cannot start without one.
+        messageReadAloudController.setGateway(nil)
+        // A swapped gateway must never hand a later operation to the outgoing
+        // server's bridge; the incoming connection rebuilds both references
+        // from its own bridge (capability refresh, read-aloud assignment).
+        voiceConversationController.setGateway(nil)
+        readAloudGatewayBridge = nil
+        showVoiceSheet = false
     }
 
     private static func normalizedChatResumeServerIdentity(_ baseURL: String) -> String? {
@@ -9718,6 +9771,13 @@ final class AppState: ObservableObject {
             return
         }
         let question = activity.questions[questionIndex]
+        // Ownership snapshot for the gateway-owned respond below — same fence
+        // as `respondToApproval`: a completion (success or failure) from a
+        // replaced client must not touch whatever decision state is current,
+        // even under colliding ids. The relay branch above is deliberately
+        // NOT fenced: it is owned by the relay registration, not by this
+        // HermesClient (push server identity is a separate prerequisite).
+        let profile = activeProfile
         // The wire answer for a multi-select question must be the array form
         // Hermes' batch parser accepts; typed custom text arrives as a bare
         // string and is wrapped here so every multi-select path is uniform.
@@ -9737,6 +9797,7 @@ final class AppState: ObservableObject {
                 // respond shape every gateway generation accepts.
                 questionId: question.isSyntheticID ? nil : question.id
             )
+            guard profile == activeProfile, self.client === client else { return }
             applyClarifyResponseOutcome(
                 outcome,
                 requestId: requestId,
@@ -9744,6 +9805,7 @@ final class AppState: ObservableObject {
                 answer: wireAnswer
             )
         } catch {
+            guard profile == activeProfile, self.client === client else { return }
             if Self.isExpiredPromptError(error) {
                 // Older gateways report expiry as RPC 4009 instead of the
                 // typed `expired` status — same teardown either way.
@@ -11113,12 +11175,23 @@ final class AppState: ObservableObject {
             cacheMessagePresentation()
             return
         }
+        // Ownership snapshot: the completion below may only land while this
+        // exact client (and profile) still owns AppState. A client/server
+        // replacement while the RPC is suspended must turn the stale
+        // continuation inert — success and failure alike — even when profile,
+        // session, and message ids collide across the two connections. This
+        // is the same fence `loadProjects`/`synchronizeTransportContinuation`
+        // use; only client ownership changed here, so no epoch beyond the
+        // pointer identity is needed.
+        let profile = activeProfile
         do {
             try await client.respondToApproval(sessionId: current.sessionId, choice: choice)
+            guard profile == activeProfile, self.client === client else { return }
             guard let updatedIndex = messages.firstIndex(where: { $0.id == messageId }) else { return }
             messages[updatedIndex].approval?.status = choice == "deny" ? .rejected : .approved
             cacheMessagePresentation()
         } catch {
+            guard profile == activeProfile, self.client === client else { return }
             guard let updatedIndex = messages.firstIndex(where: { $0.id == messageId }) else { return }
             messages[updatedIndex].approval?.status = .error
             messages[updatedIndex].approval?.choice = nil
