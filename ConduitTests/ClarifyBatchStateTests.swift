@@ -1145,7 +1145,7 @@ final class ClarifyBatchStateTests: XCTestCase {
 
 // MARK: - Test doubles (mirrors the HermesClientTests fakes; private to this file)
 
-private final class ClarifyGate: @unchecked Sendable {
+final class ClarifyGate: @unchecked Sendable {
     private let lock = NSLock()
     private var signalled = false
     private var continuation: CheckedContinuation<Bool, Never>?
@@ -1201,7 +1201,7 @@ private struct ClarifyTestTimedOut: Error {
     let phase: String
 }
 
-private final class ClarifyFakeSocket: HermesWebSocket {
+final class ClarifyFakeSocket: HermesWebSocket {
     var closeCode: URLSessionWebSocketTask.CloseCode = .invalid
     private(set) var sentTexts: [String] = []
     var onSend: (() -> Void)?
@@ -1235,7 +1235,7 @@ private final class ClarifyFakeSocket: HermesWebSocket {
     }
 }
 
-private final class ClarifyFakeTransport: HermesWebSocketTransport {
+final class ClarifyFakeTransport: HermesWebSocketTransport {
     var nextSocket: (() -> ClarifyFakeSocket)?
     private var openCallbacks: [ObjectIdentifier: () -> Void] = [:]
     private var earlyOpenRequests = Set<ObjectIdentifier>()
