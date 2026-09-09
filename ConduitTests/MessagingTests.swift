@@ -335,6 +335,23 @@ final class MessagingTests: XCTestCase {
         XCTAssertTrue(deletedPath?.contains("/conversations/") == true)
         XCTAssertTrue(methods.contains("DELETE"))
     }
+
+    func testMentionDisplayRewritesProfileIdsOnly() {
+        let profiles = [
+            MessagingProfile(id: "designer-id", name: "designer", displayName: "Designer"),
+            MessagingProfile(id: "swe-id", name: "swe", displayName: "SWE"),
+        ]
+        let body = "Ask @designer-id and @Designer; also `@swe-id` stays code-like but still rewrites outside fences."
+        let rewritten = MessagingMentionDisplay.rewriteBody(body, profiles: profiles)
+        XCTAssertEqual(
+            rewritten,
+            "Ask @Designer and @Designer; also `@SWE` stays code-like but still rewrites outside fences."
+        )
+        XCTAssertEqual(
+            MessagingMentionDisplay.rewriteBody("Ping @unknown-bot please", profiles: profiles),
+            "Ping @unknown-bot please"
+        )
+    }
 }
 
 @MainActor

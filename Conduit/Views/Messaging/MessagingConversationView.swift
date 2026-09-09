@@ -213,7 +213,7 @@ struct MessagingConversationView: View {
         ChatMessage(
             id: message.id,
             role: message.author == "user" ? .user : .assistant,
-            content: message.body,
+            content: MessagingMentionDisplay.rewriteBody(message.body, profiles: owner.profiles),
             timestamp: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: message.createdAt)),
             author: message.author == "user" ? nil : message.author
         )

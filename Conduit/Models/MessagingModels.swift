@@ -73,6 +73,44 @@ struct MessagingMessage: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey { case id, sequence, author, body; case createdAt = "created_at" }
 }
 
+/// Display-only rewrite of `@<profile-id>` tokens. Stored/API bodies keep raw ids for routing.
+enum MessagingMentionDisplay {
+    private static let mentionPattern = try! NSRegularExpression(
+        pattern: #"@([A-Za-z0-9_.-]+)"#
+    )
+
+    static func rewriteBody(_ body: String, profiles: [MessagingProfile]) -> String {
+        guard !body.isEmpty, !profiles.isEmpty else { return body }
+        var byID: [String: String] = [:]
+        for profile in profiles {
+            byID[profile.id.lowercased()] = profile.displayName
+        }
+        let nsBody = body as NSString
+        let matches = mentionPattern.matches(in: body, range: NSRange(location: 0, length: nsBody.length))
+        guard !matches.isEmpty else { return body }
+        var result = ""
+        var cursor = 0
+        for match in matches {
+            let full = match.range
+            let tokenRange = match.range(at: 1)
+            if full.location > cursor {
+                result += nsBody.substring(with: NSRange(location: cursor, length: full.location - cursor))
+            }
+            let token = nsBody.substring(with: tokenRange)
+            if let display = byID[token.lowercased()] {
+                result += "@\(display)"
+            } else {
+                result += nsBody.substring(with: full)
+            }
+            cursor = full.location + full.length
+        }
+        if cursor < nsBody.length {
+            result += nsBody.substring(with: NSRange(location: cursor, length: nsBody.length - cursor))
+        }
+        return result
+    }
+}
+
 struct MessagingRun: Codable, Identifiable, Equatable {
     let id: String
     let profile: String
