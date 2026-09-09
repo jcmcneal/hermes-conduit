@@ -1,5 +1,6 @@
 import SwiftUI
 
+/// Bots home: pin-able messaging profile shelf. Tap opens that bot's DM.
 struct MessagingInboxView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var store: MessagingStore
@@ -7,63 +8,74 @@ struct MessagingInboxView: View {
     let openMessaging: (MessagingDestination) -> Void
     var showFeatureCard: Bool = false
     var onOpenFeatureCard: () -> Void = {}
-    @State private var search = ""
+    var pinnedSize: CGFloat = ConduitInboxMetrics.profileRailSizePhone
+    var unpinnedSize: CGFloat = ConduitInboxMetrics.profileShelfUnpinnedSize
     @State private var newGroup = false
-    @State private var showArchived = false
     @State private var chooseBot = false
     @State private var pendingDestination: MessagingDestination?
 
+    private var pinnedProfiles: [MessagingProfile] {
+        let known = Dictionary(uniqueKeysWithValues: store.profiles.map { ($0.id, $0) })
+        return store.pinnedBotIDs.compactMap { known[$0] }
+    }
+
+    private var unpinnedProfiles: [MessagingProfile] {
+        let pinned = Set(store.pinnedBotIDs)
+        return store.profiles.filter { !pinned.contains($0.id) }
+    }
+
+    private var pinnedColumns: [GridItem] {
+        [GridItem(.adaptive(minimum: pinnedSize + 12, maximum: pinnedSize + 28), spacing: 16)]
+    }
+
     var body: some View {
         VStack(spacing: 12) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 20) {
-                    ForEach(store.profiles) { profile in
-                        Button {
-                            openMessaging(MessagingDestination(conversationID: nil, profileID: profile.id))
-                        } label: {
-                            VStack(spacing: 6) {
-                                AgentAvatar(profileID: profile.name, displayName: profile.displayName, photoURL: appState.profileAvatarURL(for: profile.name), size: 58, state: appState.avatarState(for: profile.name))
-                                Text(profile.displayName).font(.caption).lineLimit(1)
-                            }.frame(width: 78)
-                        }.buttonStyle(.plain).disabled(!store.isReady).accessibilityLabel(profile.displayName)
-                    }
-                }.padding(.horizontal, 16)
-            }
             if showFeatureCard {
                 MessagingFeatureCard(open: onOpenFeatureCard, dismiss: store.dismissCard)
                     .padding(.horizontal, 16)
             }
-            HStack {
-                TextField("Search names and previews", text: $search).textFieldStyle(.roundedBorder)
-                Menu {
-                    Toggle("Show archived messages", isOn: $showArchived)
-                    Button("Refresh") { Task { await store.refresh() } }
-                } label: { Image(systemName: "line.3.horizontal.decrease").frame(width: 44, height: 44) }
-            }.padding(.horizontal, 16)
-            if !store.isReady { Text(store.availability.explanation).font(.footnote).padding(.horizontal) }
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 6) {
-                    Text("Messages").font(.headline).padding(.vertical, 6)
-                    ForEach(visibleMessages) { conversation in
-                        Button {
-                            openMessaging(
-                                conversation.kind == "dm"
-                                    ? MessagingDestination(conversationID: nil, profileID: conversation.profiles.first)
-                                    : MessagingDestination(conversationID: conversation.id, profileID: nil)
-                            )
-                        } label: { messageRow(conversation) }.buttonStyle(.plain)
-                    }
-                    if visibleMessages.isEmpty {
-                        Text("Tap a bot to start a DM, or create a group.").font(.subheadline).foregroundStyle(.secondary).padding(.vertical)
-                    }
-                }.padding(.horizontal, 20)
-            }.refreshable { await store.refresh() }
-        }
-        .onAppear {
-            // Legacy All/Messages/Sessions filter is retired — Hermes sessions live on the Sessions pane.
-            if let scope = store.capability?.scope {
-                UserDefaults.standard.removeObject(forKey: "conduit.messaging.filter." + scope)
+            if !store.isReady {
+                Text(store.availability.explanation)
+                    .font(.footnote)
+                    .foregroundStyle(Color.conduitSecondaryText)
+                    .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    if !pinnedProfiles.isEmpty {
+                        LazyVGrid(columns: pinnedColumns, alignment: .leading, spacing: 16) {
+                            ForEach(pinnedProfiles) { profile in
+                                pinnedCell(profile)
+                            }
+                        }
+                    }
+
+                    if !unpinnedProfiles.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            if !pinnedProfiles.isEmpty {
+                                Text("More")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(Color.conduitSecondaryText)
+                                    .padding(.bottom, 4)
+                            }
+                            ForEach(unpinnedProfiles) { profile in
+                                unpinnedRow(profile)
+                            }
+                        }
+                    } else if store.isReady && store.profiles.isEmpty {
+                        Text("No bots are available for messaging yet.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .refreshable { await store.refresh() }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onChange(of: requestedAction) { _, action in
             if action == "message" { chooseBot = true }
@@ -96,30 +108,82 @@ struct MessagingInboxView: View {
             }
         }
     }
-    private func matches(_ text: String) -> Bool { search.isEmpty || text.localizedCaseInsensitiveContains(search) }
-    private var visibleMessages: [MessagingConversation] {
-        store.conversations.filter { ($0.archived == showArchived) && (matches($0.title) || matches($0.preview)) }
-            .sorted { a, b in a.pinned != b.pinned ? a.pinned : (a.updatedAt == b.updatedAt ? a.id < b.id : a.updatedAt > b.updatedAt) }
+
+    private func pinnedCell(_ profile: MessagingProfile) -> some View {
+        Button {
+            openDM(profile)
+        } label: {
+            VStack(spacing: 8) {
+                AgentAvatar(
+                    profileID: profile.name,
+                    displayName: profile.displayName,
+                    photoURL: appState.profileAvatarURL(for: profile.name),
+                    size: pinnedSize,
+                    state: appState.avatarState(for: profile.name)
+                )
+                Text(profile.displayName)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Color.conduitPrimaryText)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .frame(width: pinnedSize + 8)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!store.isReady)
+        .contextMenu { pinMenu(for: profile) }
+        .accessibilityLabel(profile.displayName)
+        .accessibilityHint("Opens a direct message with this bot")
     }
-    private func messageRow(_ conversation: MessagingConversation) -> some View {
-        HStack(spacing: 12) {
-            if conversation.kind == "dm", let profile = store.profiles.first(where: { $0.id == conversation.profiles.first }) {
-                AgentAvatar(profileID: profile.name, displayName: profile.displayName, photoURL: appState.profileAvatarURL(for: profile.name), size: 40, state: appState.avatarState(for: profile.name))
-                    .accessibilityHidden(true)
-            } else {
-                Image(systemName: "person.2.circle.fill").font(.system(size: 36)).foregroundStyle(Color.conduitAccent).accessibilityHidden(true)
+
+    private func unpinnedRow(_ profile: MessagingProfile) -> some View {
+        Button {
+            openDM(profile)
+        } label: {
+            HStack(spacing: 14) {
+                AgentAvatar(
+                    profileID: profile.name,
+                    displayName: profile.displayName,
+                    photoURL: appState.profileAvatarURL(for: profile.name),
+                    size: unpinnedSize,
+                    state: appState.avatarState(for: profile.name)
+                )
+                Text(profile.displayName)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Color.conduitPrimaryText)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.conduitSecondaryText)
             }
-            VStack(alignment: .leading, spacing: 5) {
-                HStack {
-                    Text(conversation.title).font(.body.weight(.semibold)).lineLimit(1)
-                    Spacer()
-                    Text(Date(timeIntervalSince1970: conversation.updatedAt), format: .relative(presentation: .numeric, unitsStyle: .abbreviated)).font(.caption).foregroundStyle(.secondary)
-                }
-                Text(conversation.preview.isEmpty ? (conversation.kind == "group" ? "Group conversation" : "Direct message") : conversation.preview)
-                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!store.isReady)
+        .contextMenu { pinMenu(for: profile) }
+        .accessibilityLabel(profile.displayName)
+        .accessibilityHint("Opens a direct message with this bot")
+    }
+
+    @ViewBuilder
+    private func pinMenu(for profile: MessagingProfile) -> some View {
+        Button {
+            Haptics.light()
+            withAnimation(ConduitMotion.response) {
+                store.toggleBotPinned(profile.id)
             }
-            if conversation.unread > 0 { Circle().fill(Color.conduitAccent).frame(width: 8, height: 8).accessibilityLabel("Unread") }
-        }.padding(.vertical, 10).contentShape(Rectangle()).accessibilityElement(children: .combine)
+        } label: {
+            Label(
+                store.isBotPinned(profile.id) ? "Unpin" : "Pin",
+                systemImage: store.isBotPinned(profile.id) ? "pin.slash" : "pin"
+            )
+        }
+    }
+
+    private func openDM(_ profile: MessagingProfile) {
+        openMessaging(MessagingDestination(conversationID: nil, profileID: profile.id))
     }
 }
 

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Primary bots view: messaging home by default; Sessions shelf via toggle.
+/// Primary home: Bots messaging shelf by default; Sessions is upstream SessionList.
 struct InboxView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var shell: AppShellState
@@ -25,9 +25,6 @@ struct InboxView: View {
     @State private var showArchivedSessions = false
     @State private var showProjectCreator = false
     @State private var showProjects = false
-    @State private var showSessionsSheet = false
-    @State private var sessionsSheetSearching = false
-    @State private var pendingAfterSessionsSheet: SessionsSheetFollowUp?
 
     private var selectedTab: SidebarTab {
         get { SidebarTab.migrated(rawValue: selectedTabRaw) }
@@ -74,13 +71,18 @@ struct InboxView: View {
                             requestedAction: $messagingAction,
                             openMessaging: onOpenMessaging,
                             showFeatureCard: showMessagingFeatureCard,
-                            onOpenFeatureCard: { showMessagingSetup = true }
+                            onOpenFeatureCard: { showMessagingSetup = true },
+                            pinnedSize: profileRailSize
                         )
                     } else {
-                        ProfileShelf(pinnedSize: profileRailSize) { profile in
-                            handleProfileSelection(profile)
-                        }
-                        .padding(.horizontal, horizontalInset - 4)
+                        SessionList(
+                            onOpenSession: onOpenConversation,
+                            onCreateSession: {
+                                guard !shell.isCreatingConversation else { return }
+                                shell.isCreatingConversation = true
+                                onCreateConversation()
+                            }
+                        )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                     }
                 } else {
@@ -179,39 +181,6 @@ struct InboxView: View {
                 UserDefaults.standard.set("sessions", forKey: "conduit.sessionPresentation")
             }
         }
-        .sheet(isPresented: $showSessionsSheet, onDismiss: {
-            sessionsSheetSearching = false
-            shell.isConversationSearchActive = false
-            shell.conversationSearchText = ""
-            // Navigate only after the sheet has fully dismissed. Doing
-            // NavigationStack pushes while a sheet is mid-dismiss crashes.
-            let followUp = pendingAfterSessionsSheet
-            pendingAfterSessionsSheet = nil
-            guard let followUp else { return }
-            Task { @MainActor in
-                switch followUp {
-                case .open(let sessionID):
-                    onOpenConversation(sessionID)
-                case .create:
-                    onCreateConversation()
-                }
-            }
-        }) {
-            ProfileSessionsSheet(
-                shell: shell,
-                initiallySearching: sessionsSheetSearching,
-                onOpenConversation: { sessionID in
-                    pendingAfterSessionsSheet = .open(sessionID)
-                    showSessionsSheet = false
-                },
-                onCreateConversation: {
-                    pendingAfterSessionsSheet = .create
-                    showSessionsSheet = false
-                }
-            )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
-        }
         .onAppear {
             selectedTabRaw = SidebarTab.migrated(rawValue: selectedTabRaw).rawValue
             chatsHomePaneRaw = ChatsHomePane.migrated(rawValue: chatsHomePaneRaw).rawValue
@@ -259,52 +228,21 @@ struct InboxView: View {
 
             Spacer(minLength: 0)
 
-            if selectedTab == .sessions {
-                if chatsHomePane == .bots {
-                    Menu {
-                        Button("Message a bot") { messagingAction = "message" }
-                            .disabled(!messaging.isReady)
-                        Button("New group") { messagingAction = "group" }
-                            .disabled(messaging.capability?.supportsGroups != true)
-                        Button("New session · " + appState.profileDisplayName(appState.activeProfile)) {
-                            guard !shell.isCreatingConversation else { return }
-                            shell.isCreatingConversation = true
-                            onCreateConversation()
-                        }
-                    } label: {
-                        Image(systemName: "plus").font(.system(size: 18, weight: .bold))
-                            .frame(width: 44, height: 44).conduitPrimaryActionControl(cornerRadius: 22)
-                    }.accessibilityLabel("New conversation")
-                } else {
-                    Button {
-                        Haptics.selection()
-                        presentSessionsSheet(searching: true)
-                    } label: {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(Color.conduitPrimaryText)
-                            .frame(width: 44, height: 44)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Search conversations")
-
-                    Button {
+            if selectedTab == .sessions, chatsHomePane == .bots {
+                Menu {
+                    Button("Message a bot") { messagingAction = "message" }
+                        .disabled(!messaging.isReady)
+                    Button("New group") { messagingAction = "group" }
+                        .disabled(messaging.capability?.supportsGroups != true)
+                    Button("New session · " + appState.profileDisplayName(appState.activeProfile)) {
                         guard !shell.isCreatingConversation else { return }
-                        Haptics.medium()
                         shell.isCreatingConversation = true
                         onCreateConversation()
-                    } label: {
-                        Image(systemName: "plus")
-                            .font(.system(size: 18, weight: .bold))
-                            .frame(width: 44, height: 44)
-                            .conduitPrimaryActionControl(cornerRadius: 22)
                     }
-                    .buttonStyle(.plain)
-                    .disabled(appState.turnState == .synchronizing || shell.isCreatingConversation)
-                    .accessibilityLabel("New conversation")
-                }
-            } else if selectedTab == .kanban {
-                EmptyView()
+                } label: {
+                    Image(systemName: "plus").font(.system(size: 18, weight: .bold))
+                        .frame(width: 44, height: 44).conduitPrimaryActionControl(cornerRadius: 22)
+                }.accessibilityLabel("New conversation")
             }
 
             Menu {
@@ -412,29 +350,15 @@ struct InboxView: View {
         }
     }
 
-    private func presentSessionsSheet(searching: Bool) {
-        sessionsSheetSearching = searching
-        showSessionsSheet = true
-    }
-
+    /// Messaging handoff: land on Sessions with the requested workspace profile active.
     private func handleProfileSelection(_ profile: String) {
-        // Opening Sessions from messaging Browse / profile handoff should land on the shelf pane.
         chatsHomePane = .sessions
-        if profile == appState.activeProfile {
-            presentSessionsSheet(searching: false)
-            return
-        }
+        selectedTab = .sessions
+        guard profile != appState.activeProfile else { return }
         shell.resetListTransientState()
         UserDefaults.standard.set("all", forKey: "conduit.sessionSourceFilter")
         Task {
             await appState.switchProfile(to: profile)
-            guard appState.activeProfile == profile else { return }
-            presentSessionsSheet(searching: false)
         }
     }
-}
-
-private enum SessionsSheetFollowUp {
-    case open(String)
-    case create
 }

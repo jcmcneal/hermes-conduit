@@ -1,7 +1,7 @@
 import XCTest
 
 final class MessagingUITests: XCTestCase {
-    func testMissingPluginOffersSetupOnBotsAndPreservesSessionsShelf() {
+    func testMissingPluginOffersSetupOnBotsAndPreservesSessionsList() {
         let app = XCUIApplication()
         app.launchArguments += [
             "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example",
@@ -28,11 +28,11 @@ final class MessagingUITests: XCTestCase {
         XCTAssertTrue(enable.waitForExistence(timeout: 5))
 
         homePane.buttons["Sessions"].tap()
-        XCTAssertFalse(app.buttons["messaging.enable"].exists, "Sessions shelf has no messaging promo card")
+        XCTAssertFalse(app.buttons["messaging.enable"].exists, "Sessions list has no messaging promo card")
         XCTAssertTrue(
-            app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search conversations")).firstMatch.waitForExistence(timeout: 3)
-                || app.buttons["Search conversations"].waitForExistence(timeout: 1),
-            "Sessions pane restores search + shelf chrome"
+            app.buttons["New Chat"].waitForExistence(timeout: 5)
+                || app.staticTexts["New Chat"].waitForExistence(timeout: 2),
+            "Sessions pane shows upstream SessionList with New Chat"
         )
     }
 
@@ -51,7 +51,8 @@ final class MessagingUITests: XCTestCase {
 
         let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Designer")).firstMatch
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
-        let inbox = XCTAttachment(screenshot: app.screenshot()); inbox.name = "Messaging inbox"; inbox.lifetime = .keepAlways; add(inbox)
+        XCTAssertFalse(app.staticTexts["Messages"].exists, "Bots home is a profile shelf, not a Messages list")
+        let inbox = XCTAttachment(screenshot: app.screenshot()); inbox.name = "Bots shelf"; inbox.lifetime = .keepAlways; add(inbox)
         designer.tap()
         // DM opens in the conversation host (Back to Bots), not a fullScreenCover.
         let back = app.buttons["Back to Bots"]

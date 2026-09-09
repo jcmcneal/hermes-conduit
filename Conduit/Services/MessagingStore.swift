@@ -10,6 +10,7 @@ final class MessagingStore: ObservableObject {
     @Published private(set) var error: String?
     @Published private(set) var isRefreshing = false
     @Published private(set) var cardDismissed = false
+    @Published private(set) var pinnedBotIDs: [String] = []
     private(set) var service: MessagingService?
     private(set) var generation = UUID()
     private var bridgeID: ObjectIdentifier?
@@ -37,9 +38,41 @@ final class MessagingStore: ObservableObject {
         isRefreshing = false
         availability = requester == nil ? .unavailable : .checking
         cardDismissed = defaults.bool(forKey: dismissalKey)
+        loadPinnedBots()
     }
     private var dismissalKey: String { "conduit.messaging.discovery.v1." + dismissalScope }
+    private var pinnedBotsKey: String {
+        "conduit.messaging.pinnedBots.v1." + (capability?.scope ?? presentationScope)
+    }
     func dismissCard() { cardDismissed = true; defaults.set(true, forKey: dismissalKey) }
+
+    func isBotPinned(_ profileID: String) -> Bool {
+        pinnedBotIDs.contains(profileID)
+    }
+
+    func toggleBotPinned(_ profileID: String) {
+        guard !profileID.isEmpty else { return }
+        if let index = pinnedBotIDs.firstIndex(of: profileID) {
+            pinnedBotIDs.remove(at: index)
+        } else {
+            pinnedBotIDs.append(profileID)
+        }
+        defaults.set(pinnedBotIDs, forKey: pinnedBotsKey)
+    }
+
+    private func loadPinnedBots() {
+        pinnedBotIDs = defaults.stringArray(forKey: pinnedBotsKey) ?? []
+        prunePinnedBots()
+    }
+
+    private func prunePinnedBots() {
+        let known = Set(profiles.map(\.id))
+        guard !known.isEmpty else { return }
+        let pruned = pinnedBotIDs.filter { known.contains($0) }
+        guard pruned != pinnedBotIDs else { return }
+        pinnedBotIDs = pruned
+        defaults.set(pinnedBotIDs, forKey: pinnedBotsKey)
+    }
 
     func refresh() async {
         guard let service, !isRefreshing else { return }
@@ -92,6 +125,7 @@ final class MessagingStore: ObservableObject {
                 service.capability = result
                 availability = result.apiVersion != 1 ? .needsUpdate : (result.isReady ? .ready : .needsConfiguration)
                 error = nil
+                loadPinnedBots()
                 if isReady { await refreshConversations() }
             } catch DashboardTicketBridgeError.http(let status, _) where status == 404 {
                 if epoch == generation { availability = .needsConfiguration }

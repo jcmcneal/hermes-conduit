@@ -212,6 +212,47 @@ final class MessagingTests: XCTestCase {
         XCTAssertTrue(without.contains("Do NOT ask me to open a browser"))
         XCTAssertFalse(without.contains("Operator principal (authenticated in this client):"))
     }
+
+    func testBotPinsTogglePersistAndPruneUnknownIds() async throws {
+        let suite = "messaging-bot-pins-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let requester = MessagingRequester { path, _, _ in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") {
+                return [
+                    "server_id": "server", "principal_id": "alice", "api_version": 1, "state": "ready",
+                    "features": ["dm", "groups"],
+                    "profiles": [
+                        ["id": "swe-id", "name": "swe", "displayName": "SWE"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                    ],
+                ]
+            }
+            return ["conversations": []]
+        }
+        let store = MessagingStore(defaults: defaults)
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+        XCTAssertTrue(store.isReady)
+
+        store.toggleBotPinned("swe-id")
+        store.toggleBotPinned("ghost-id")
+        XCTAssertEqual(store.pinnedBotIDs, ["swe-id", "ghost-id"])
+        XCTAssertTrue(store.isBotPinned("swe-id"))
+
+        await store.refresh()
+        XCTAssertEqual(store.pinnedBotIDs, ["swe-id"], "Unknown bot ids are pruned after capability refresh")
+
+        let reloaded = MessagingStore(defaults: defaults)
+        reloaded.connect(requester: requester, scope: "server")
+        await reloaded.refresh()
+        XCTAssertEqual(reloaded.pinnedBotIDs, ["swe-id"])
+        reloaded.toggleBotPinned("swe-id")
+        XCTAssertFalse(reloaded.isBotPinned("swe-id"))
+        XCTAssertTrue(reloaded.pinnedBotIDs.isEmpty)
+    }
 }
 
 @MainActor

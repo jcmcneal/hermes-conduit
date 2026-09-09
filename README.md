@@ -13,7 +13,7 @@ Start a conversation on desktop, pick it up on your phone. The session list is t
 
 ## Features
 
-- **Bots view** home by default (persistent DMs and groups when messaging is available); toggle to **Sessions** for the profile character shelf, plus Scheduled jobs and Boards
+- **Bots view** home by default (persistent DMs and groups when messaging is available); toggle to **Sessions** for the classic session list (New Chat, source filters, search), plus Scheduled jobs and Boards
 - **Streaming chat** with full Markdown (code blocks, math, Mermaid, task lists)
 - **Tool call inspection** and reasoning traces
 - **Voice mode** with push-to-talk, on-device speech recognition, server-side Whisper
