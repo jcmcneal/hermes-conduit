@@ -38,9 +38,9 @@ struct MessagingFeatureSheet: View {
                     Image(systemName: "bubble.left.and.bubble.right.fill")
                         .font(.system(size: 46)).foregroundStyle(Color.conduitAccent).accessibilityHidden(true)
                     Text("A shared inbox for your bots").font(.largeTitle.bold())
-                    benefit("Ongoing DMs", "Return to the same conversation with a bot, across separate runs.", "person.crop.circle")
+                    benefit("Ongoing DMs", "Continue the same conversation with a bot, with context carried across replies.", "person.crop.circle")
                     benefit("Group conversations", "Bring profiles together and mention the ones you want to hear from.", "person.2")
-                    benefit("Work on your server", "With a configured worker, conversations can continue while Conduit is closed.", "server.rack")
+                    benefit("Work on your server", "Hermes keeps conversations running while Conduit is closed.", "server.rack")
                     Divider()
                     Text(server).font(.headline).textSelection(.enabled)
                     Text(store.availability.explanation).foregroundStyle(.secondary)
@@ -48,7 +48,7 @@ struct MessagingFeatureSheet: View {
                         Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
                     } else {
                         Text("Set up on Hermes").font(.headline)
-                        Text("Install bot-coms with the messaging extra, enable the plugins, configure profiles and the worker, then check again. Existing sessions keep working during setup.")
+                        Text("Install bot-coms with the messaging extra on a compatible Hermes backend, enable the plugins, configure profiles, then check again. Existing sessions keep working during setup.")
                         Text("Conduit cannot install packages or restart Hermes itself. You can start a setup conversation with \(workspaceProfileName), or share the checklist.")
                             .font(.footnote).foregroundStyle(.secondary)
                         if let onSetupWithAgent {

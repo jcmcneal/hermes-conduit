@@ -47,10 +47,10 @@ enum MessagingSetupPrompt {
        or: pip install "bot-coms[messaging] @ git+https://github.com/jcmcneal/bot-coms.git"
     2. bot-coms-messaging install-dashboard --hermes-root /absolute/shared-hermes-root
     3. Add bot-coms and bot-coms-messaging to the shared instance plugins.enabled without removing other entries.
-    4. Write plugin-data/bot-coms-messaging/config.json with owner-only permissions, hermes_executable, `default_principals`, and `auto_enroll_profiles: true` (stable server_id; do not use peer name `inbox` for a bot profile).
-    5. Supervise: python -m bot_coms_messaging.worker --root /absolute/shared-hermes-root/plugin-data/bot-coms-messaging
-    6. Restart the dashboard/gateway only after I confirm active work can be interrupted.
-    7. Tell me to open Messaging in my client and tap Check again. Installation alone is not readiness — need API v1, eligible profiles, and a recent worker heartbeat.
+    4. Write plugin-data/bot-coms-messaging/config.json with owner-only permissions, `default_principals`, and `auto_enroll_profiles: true` (stable server_id; do not use peer name `inbox` for a bot profile).
+    5. Verify this Hermes build provides the backend plugin session service. Messaging runs inside the existing Hermes backend and reuses exact conversation sessions; do not install a separate worker or launchd/systemd sidecar. Follow the bot-coms migration instructions to drain legacy runs and preserve SQLite before cutover.
+    6. Restart the dashboard/gateway only after I confirm active work can be interrupted. Remove the legacy messaging service registration as part of a verified cutover.
+    7. Tell me to open Messaging in my client and tap Check again. Installation alone is not readiness — need API v1, eligible profiles, and a healthy backend messaging service.
 
     Prefer proposing exact commands and seeking approval. Do not invent principals, wipe plugins.enabled, or change approval defaults.
     """
@@ -61,9 +61,9 @@ enum MessagingSetupPrompt {
        or: pip install "bot-coms[messaging] @ git+https://github.com/jcmcneal/bot-coms.git"
        (https://github.com/jcmcneal/bot-coms)
     2. bot-coms-messaging install-dashboard --hermes-root /path/to/shared-hermes-root
-    3. Enable bot-coms and bot-coms-messaging on the shared instance; write plugin-data/bot-coms-messaging/config.json with default_principals + auto_enroll_profiles; supervise bot-coms-messaging-worker (see bot-coms docs/INSTALL.md § Persistent messaging). Board is not required.
+    3. Enable bot-coms and bot-coms-messaging on the shared instance; write plugin-data/bot-coms-messaging/config.json with default_principals + auto_enroll_profiles (see bot-coms docs/INSTALL.md § Persistent messaging). Board is not required.
     4. Optional: point skills.external_dirs at bot-coms/skills so the messaging-setup skill is available.
-    5. Restart the dashboard when existing work can be safely interrupted, then verify the worker.
+    5. Verify Hermes supports the backend plugin session service. Follow the migration instructions for legacy runs, then restart the dashboard when existing work can be safely interrupted. Execution belongs to the Hermes backend; no separate worker or launchd/systemd sidecar is needed.
     6. In your client, open Messaging and tap Check again.
     Installation alone does not enable messaging: the adapter must report API v1 readiness. Do not change existing session approval defaults.
     """
