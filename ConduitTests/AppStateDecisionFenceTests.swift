@@ -269,13 +269,29 @@ final class AppStateDecisionFenceTests: XCTestCase {
         let socket = ClarifyFakeSocket()
         _ = try await installConnectedClient(appState, socket: socket, transport: transport)
 
-        let parked = try await parkApprovalRespond(appState: appState, socket: socket)
+        let parked = try await parkApprovalRespond(appState: appState, socket: socket, choice: "approve")
         deliverResult(socket, rpcID: parked.rpcID, result: [:])
         await parked.task.value
 
         let card = try XCTUnwrap(appState.messages.first?.approval)
         XCTAssertEqual(card.status, .approved)
         XCTAssertEqual(card.choice, "approve")
+    }
+
+    func testSameClientApprovalDenyStillRejects() async throws {
+        let appState = makeAppState()
+        appState.messages = [approvalFixture()]
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        let parked = try await parkApprovalRespond(appState: appState, socket: socket, choice: "deny")
+        deliverResult(socket, rpcID: parked.rpcID, result: [:])
+        await parked.task.value
+
+        let card = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(card.status, .rejected)
+        XCTAssertEqual(card.choice, "deny")
     }
 
     func testSameClientApprovalFailureStillReportsOnError() async throws {
@@ -348,7 +364,15 @@ final class AppStateDecisionFenceTests: XCTestCase {
         // the HermesClient: with NO client at all it must still take the
         // relay branch (and fail with the relay's own error, never the
         // gateway-unavailable error the client-owned branch would produce).
+        // The registration clear is global state — save/restore around it so
+        // the test stays hermetic for other suites.
+        let priorRegistration = KeychainHelper.loadPushRegistration()
         KeychainHelper.clearPushRegistration()
+        addTeardownBlock {
+            if let priorRegistration {
+                KeychainHelper.savePushRegistration(priorRegistration)
+            }
+        }
         let appState = makeAppState()
         let requestId = PendingDecisionPayload.relayRequestPrefix + "abc"
         appState.messages = [clarifyFixture(requestId: requestId)]

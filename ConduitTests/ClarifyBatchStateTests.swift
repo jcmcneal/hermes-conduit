@@ -1143,7 +1143,8 @@ final class ClarifyBatchStateTests: XCTestCase {
     }
 }
 
-// MARK: - Test doubles (mirrors the HermesClientTests fakes; private to this file)
+// MARK: - Test doubles (mirrors the HermesClientTests fakes; internal to the
+// ConduitTests target so AppStateDecisionFenceTests can reuse them)
 
 final class ClarifyGate: @unchecked Sendable {
     private let lock = NSLock()
