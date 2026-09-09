@@ -348,15 +348,7 @@ struct ChatView: View {
                 }
             }
         }
-        .scrollDismissesKeyboard(.interactively)
-        .onTapGesture {
-            UIApplication.shared.sendAction(
-                #selector(UIResponder.resignFirstResponder),
-                to: nil,
-                from: nil,
-                for: nil
-            )
-        }
+        .conversationKeyboardDismissal()
         .background {
             GeometryReader { geometry in
                 Color.clear.preference(
@@ -368,21 +360,13 @@ struct ChatView: View {
         .simultaneousGesture(chatDragGesture(proxy: proxy))
         .overlay(alignment: .bottomTrailing) {
             if !followsLatest && !isNearBottom {
-                Button {
+                ScrollToLatestButton {
                     ChatViewportTrace.shared.log("event explicitLatest (button)")
                     performViewportEffects(
                         viewport.explicitLatestRequested(),
                         using: proxy
                     )
-                } label: {
-                    Image(systemName: "arrow.down")
-                        .font(.system(size: 15, weight: .bold))
-                        .frame(width: 44, height: 44)
                 }
-                .conduitGlassControl(cornerRadius: 22, tint: .conduitAccent.opacity(0.14))
-                .accessibilityLabel("Scroll to latest message")
-                .padding(.trailing, 18)
-                .padding(.bottom, 14)
             }
         }
     }
@@ -853,23 +837,7 @@ struct ChatView: View {
         _ command: ChatViewportCommand,
         using proxy: ScrollViewProxy
     ) {
-        ChatViewportTrace.shared.log(
-            "scroll \(command.destination) gen=\(command.generation) animated=\(command.animated)"
-        )
-        var transaction = Transaction()
-        transaction.animation = command.animated ? ConduitMotion.response : nil
-        withTransaction(transaction) {
-            switch command.destination {
-            case .bottom(let anchorID):
-                proxy.scrollTo(anchorID, anchor: .bottom)
-            case .top(let anchorID, _):
-                proxy.scrollTo(anchorID, anchor: .top)
-            case .message(let id):
-                proxy.scrollTo(id, anchor: .top)
-            case .prependAnchor(let id):
-                proxy.scrollTo(id, anchor: .top)
-            }
-        }
+        ConversationViewportScrolling.run(command, using: proxy)
     }
 }
 
@@ -919,40 +887,6 @@ enum ChatTitleScrollViewportSnapshot {
     }
 }
 
-private struct ChatBottomMarkerPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat? = nil
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        value = nextValue() ?? value
-    }
-}
-
-private struct ChatViewportFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect? = nil
-    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
-        value = nextValue() ?? value
-    }
-}
-
-private struct ChatRenderedScrollContentPreferenceKey: PreferenceKey {
-    static var defaultValue: ChatRenderedScrollContent? = nil
-    static func reduce(
-        value: inout ChatRenderedScrollContent?,
-        nextValue: () -> ChatRenderedScrollContent?
-    ) {
-        value = nextValue() ?? value
-    }
-}
-
-private struct ChatRenderedScrollTargetsPreferenceKey: PreferenceKey {
-    static var defaultValue = ChatRenderedScrollTargets()
-
-    static func reduce(
-        value: inout ChatRenderedScrollTargets,
-        nextValue: () -> ChatRenderedScrollTargets
-    ) {
-        ChatRenderedScrollTargets.reduce(value: &value, nextValue: nextValue())
-    }
-}
 // MARK: - Message Bubble
 
 /// Routes a transcript row to its presentation. The expensive settled

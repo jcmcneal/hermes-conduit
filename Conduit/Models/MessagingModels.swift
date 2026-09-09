@@ -127,6 +127,60 @@ struct MessagingRun: Codable, Identifiable, Equatable {
     let detail: String
 }
 
+/// Collapses messaging runs into one live avatar presence per profile.
+enum MessagingRunPresence {
+    struct Item: Identifiable, Equatable {
+        let profile: String
+        let status: String
+        let detail: String
+        let avatarState: AgentAvatarState
+
+        var id: String { profile }
+
+        var accessibilityPhrase: String {
+            status.replacingOccurrences(of: "_", with: " ")
+        }
+
+        var showsDetail: Bool {
+            avatarState == .blocked && !detail.isEmpty
+        }
+    }
+
+    /// Maps a run status to an avatar pose, or `nil` when the run should not appear.
+    static func avatarState(for status: String) -> AgentAvatarState? {
+        switch status.lowercased() {
+        case "completed": return nil
+        case "queued": return .waiting
+        case "running": return .working
+        case "failed", "interrupted", "cancelled", "canceled", "error": return .blocked
+        default: return .thinking
+        }
+    }
+
+    /// One item per profile. Prefer running over queued over failure.
+    static func collapsed(_ runs: [MessagingRun]) -> [Item] {
+        var best: [String: (run: MessagingRun, state: AgentAvatarState, rank: Int)] = [:]
+        for run in runs {
+            guard let state = avatarState(for: run.status) else { continue }
+            let rank = priority(run.status)
+            if let existing = best[run.profile], existing.rank >= rank { continue }
+            best[run.profile] = (run, state, rank)
+        }
+        return best.values
+            .map { Item(profile: $0.run.profile, status: $0.run.status, detail: $0.run.detail, avatarState: $0.state) }
+            .sorted { $0.profile.localizedCaseInsensitiveCompare($1.profile) == .orderedAscending }
+    }
+
+    private static func priority(_ status: String) -> Int {
+        switch status.lowercased() {
+        case "running": return 3
+        case "queued": return 2
+        case "failed", "interrupted", "cancelled", "canceled", "error": return 1
+        default: return 1
+        }
+    }
+}
+
 struct MessagingHistory: Codable {
     let conversation: MessagingConversation
     let messages: [MessagingMessage]

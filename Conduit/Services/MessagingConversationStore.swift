@@ -3,10 +3,19 @@ import SwiftUI
 
 @MainActor
 final class MessagingConversationStore: ObservableObject {
+    /// How long the optimistic “awaiting reply” dots stay up with no active runs.
+    static var awaitingReplyTimeout: Duration = .seconds(20)
+    /// After send, poll this often until runs appear or the urgent window ends.
+    static var urgentPollInterval: Duration = .seconds(1)
+    static var urgentPollWindow: Duration = .seconds(8)
+
     @Published private(set) var history: MessagingHistory?
     @Published private(set) var error: String?
     @Published private(set) var sending = false
     @Published private(set) var pending: PendingMessagingSend?
+    @Published private(set) var awaitingReply = false
+    /// Conversation view shortens its history poll while this is true.
+    @Published private(set) var prefersUrgentPolling = false
     @Published var draft = ""
     private(set) var destination: MessagingDestination
     private let owner: MessagingStore
@@ -15,16 +24,32 @@ final class MessagingConversationStore: ObservableObject {
     private let draftKey: String
     private var loading = false
     private var lastRead = 0
+    private var awaitingReplyTimeoutTask: Task<Void, Never>?
+    private var urgentPollingTask: Task<Void, Never>?
 
     init(destination: MessagingDestination, owner: MessagingStore, defaults: UserDefaults = .standard) {
         self.destination = destination; self.owner = owner; self.epoch = owner.generation; self.defaults = defaults
         // DM keys remain profile-based so first-send identity resolution never strands a draft.
         draftKey = "conduit.messaging.draft." + ((try? JSONEncoder().encode([owner.capability?.scope ?? "", destination.id]).base64EncodedString()) ?? UUID().uuidString)
         draft = defaults.string(forKey: draftKey) ?? ""
-        if let data = defaults.data(forKey: draftKey + ".pending") { pending = try? JSONDecoder().decode(PendingMessagingSend.self, from: data) }
+        if let data = defaults.data(forKey: draftKey + ".pending") {
+            pending = try? JSONDecoder().decode(PendingMessagingSend.self, from: data)
+            if pending != nil { beginAwaitingReply() }
+        }
     }
+
+    deinit {
+        awaitingReplyTimeoutTask?.cancel()
+        urgentPollingTask?.cancel()
+    }
+
     var canWrite: Bool { epoch == owner.generation && owner.isReady }
     func saveDraft() { defaults.set(draft, forKey: draftKey) }
+
+    var historyPollInterval: Duration {
+        prefersUrgentPolling ? Self.urgentPollInterval : .seconds(4)
+    }
+
     func load(older: Bool = false) async {
         guard canWrite, let service = owner.service, !loading else { return }
         loading = true
@@ -54,16 +79,21 @@ final class MessagingConversationStore: ObservableObject {
                                            before: retainsEarlierPage ? current.before : before)
             } else { history = result }
             error = nil
+            refreshAwaitingReplyFromRuns()
         } catch DashboardTicketBridgeError.http(let status, _) where status == 404 && destination.conversationID == nil {
             // An unsaved DM has no history and opening it must remain read-only.
         } catch { record(error) }
     }
-    func send(recipients: [String]) async {
-        guard canWrite, !sending, pending == nil, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let value = PendingMessagingSend(id: UUID().uuidString, text: draft, recipients: recipients)
+    func send(recipients: [String], text: String? = nil) async -> Bool {
+        let payload = (text ?? draft)
+        guard canWrite, !sending, pending == nil, !payload.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        if let text { draft = text; saveDraft() }
+        let value = PendingMessagingSend(id: UUID().uuidString, text: payload, recipients: recipients)
         pending = value
         defaults.set(try? JSONEncoder().encode(value), forKey: draftKey + ".pending")
+        beginAwaitingReply()
         await submit(value)
+        return pending != nil || error == nil
     }
     private func submit(_ value: PendingMessagingSend) async {
         guard canWrite, let service = owner.service else { return }
@@ -76,6 +106,7 @@ final class MessagingConversationStore: ObservableObject {
         } catch DashboardTicketBridgeError.http(let status, let detail) where [400, 403, 409, 422].contains(status) {
             guard epoch == owner.generation else { return }
             pending = nil; defaults.removeObject(forKey: draftKey + ".pending")
+            clearAwaitingReply()
             record(DashboardTicketBridgeError.http(status: status, detail: detail))
         } catch { if epoch == owner.generation { self.error = MessagingError.unknownOutcome.localizedDescription } }
     }
@@ -150,6 +181,41 @@ final class MessagingConversationStore: ObservableObject {
         } catch {
             record(error)
             return false
+        }
+    }
+
+    private func beginAwaitingReply() {
+        awaitingReply = true
+        prefersUrgentPolling = true
+        awaitingReplyTimeoutTask?.cancel()
+        urgentPollingTask?.cancel()
+        awaitingReplyTimeoutTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: Self.awaitingReplyTimeout) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            if MessagingRunPresence.collapsed(self.history?.runs ?? []).isEmpty {
+                self.clearAwaitingReply()
+            }
+        }
+        urgentPollingTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: Self.urgentPollWindow) } catch { return }
+            guard let self, !Task.isCancelled else { return }
+            self.prefersUrgentPolling = false
+        }
+    }
+
+    private func clearAwaitingReply() {
+        awaitingReply = false
+        prefersUrgentPolling = false
+        awaitingReplyTimeoutTask?.cancel()
+        awaitingReplyTimeoutTask = nil
+        urgentPollingTask?.cancel()
+        urgentPollingTask = nil
+    }
+
+    private func refreshAwaitingReplyFromRuns() {
+        guard awaitingReply else { return }
+        if !MessagingRunPresence.collapsed(history?.runs ?? []).isEmpty {
+            clearAwaitingReply()
         }
     }
 

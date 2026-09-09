@@ -419,6 +419,264 @@ final class MessagingTests: XCTestCase {
             "Hand to @SWE please"
         )
     }
+
+    func testMessagingComposerActionIsSendOnly() {
+        XCTAssertEqual(
+            MessagingComposerAction.resolve(hasText: true, canWrite: true, isSending: false, hasPending: false),
+            .send
+        )
+        XCTAssertEqual(
+            MessagingComposerAction.resolve(hasText: false, canWrite: true, isSending: false, hasPending: false),
+            .unavailable
+        )
+        XCTAssertEqual(
+            MessagingComposerAction.resolve(hasText: true, canWrite: false, isSending: false, hasPending: false),
+            .unavailable
+        )
+        XCTAssertEqual(
+            MessagingComposerAction.resolve(hasText: true, canWrite: true, isSending: true, hasPending: false),
+            .unavailable
+        )
+        XCTAssertEqual(
+            MessagingComposerAction.resolve(hasText: true, canWrite: true, isSending: false, hasPending: true),
+            .unavailable
+        )
+    }
+
+    func testMessagingViewportKeysStayOutsideHermesProfiles() {
+        let dm = MessagingDestination(conversationID: nil, profileID: "swe-id")
+        let key = MessagingConversationChrome.sessionKey(for: dm)
+        XCTAssertEqual(key.profile, MessagingConversationChrome.reservedProfile)
+        XCTAssertEqual(key.sessionID, dm.id)
+        XCTAssertNotEqual(key.profile, "swe")
+        XCTAssertEqual(
+            MessagingConversationChrome.draftKey(for: dm).profile,
+            MessagingConversationChrome.reservedProfile
+        )
+        XCTAssertTrue(AppState.isSlashCommand("/model"))
+        XCTAssertFalse(AppState.isSlashCommand("hello"))
+    }
+
+    func testSendAcceptsExplicitComposerText() async {
+        var bodies: [String] = []
+        let requester = MessagingRequester { path, method, body in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") { return self.capability() }
+            if path.hasSuffix("/conversations") { return ["conversations": []] }
+            if method == "POST" {
+                bodies.append(body?["body"] as? String ?? "")
+                return [
+                    "conversation": ["id": "dm", "kind": "dm", "title": "SWE", "profiles": ["swe-id"],
+                        "default_responder": "swe-id", "revision": 1, "preview": "", "updated_at": 1, "unread": 0, "archived": false, "pinned": false, "muted": false],
+                    "message": ["id": "m1", "sequence": 1, "author": "user", "body": body?["body"] as? String ?? "", "created_at": 1],
+                ]
+            }
+            throw DashboardTicketBridgeError.http(status: 404, detail: "absent")
+        }
+        let store = MessagingStore()
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+        let model = MessagingConversationStore(
+            destination: .init(conversationID: nil, profileID: "swe-id"),
+            owner: store,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        model.draft = "stale"
+        let ok = await model.send(recipients: [], text: "from composer")
+        XCTAssertTrue(ok)
+        XCTAssertEqual(bodies, ["from composer"])
+    }
+}
+
+final class MessagingRunPresenceTests: XCTestCase {
+    func testMapsStatusesOntoAvatarStates() {
+        XCTAssertNil(MessagingRunPresence.avatarState(for: "completed"))
+        XCTAssertEqual(MessagingRunPresence.avatarState(for: "queued"), .waiting)
+        XCTAssertEqual(MessagingRunPresence.avatarState(for: "running"), .working)
+        XCTAssertEqual(MessagingRunPresence.avatarState(for: "failed"), .blocked)
+        XCTAssertEqual(MessagingRunPresence.avatarState(for: "interrupted"), .blocked)
+        XCTAssertEqual(MessagingRunPresence.avatarState(for: "cancelled"), .blocked)
+        XCTAssertEqual(MessagingRunPresence.avatarState(for: "error"), .blocked)
+        XCTAssertEqual(MessagingRunPresence.avatarState(for: "starting"), .thinking)
+    }
+
+    func testCollapseKeepsOneAvatarPerProfilePreferringRunning() {
+        let runs = [
+            MessagingRun(id: "a", profile: "pm", status: "queued", detail: ""),
+            MessagingRun(id: "b", profile: "pm", status: "running", detail: "tools"),
+            MessagingRun(id: "c", profile: "swe", status: "queued", detail: ""),
+            MessagingRun(id: "d", profile: "swe", status: "completed", detail: ""),
+            MessagingRun(id: "e", profile: "ops", status: "failed", detail: "timeout"),
+            MessagingRun(id: "f", profile: "ops", status: "queued", detail: ""),
+        ]
+        let items = MessagingRunPresence.collapsed(runs)
+        XCTAssertEqual(items.map(\.profile), ["ops", "pm", "swe"])
+        XCTAssertEqual(items.first { $0.profile == "pm" }?.avatarState, .working)
+        XCTAssertEqual(items.first { $0.profile == "swe" }?.avatarState, .waiting)
+        XCTAssertEqual(items.first { $0.profile == "ops" }?.avatarState, .waiting)
+        XCTAssertTrue(items.first { $0.profile == "ops" }?.showsDetail == false)
+        XCTAssertEqual(
+            MessagingRunPresence.collapsed([
+                MessagingRun(id: "fail", profile: "ops", status: "failed", detail: "timeout")
+            ]).first?.showsDetail,
+            true
+        )
+    }
+}
+
+@MainActor
+final class MessagingAwaitingReplyTests: XCTestCase {
+    override func tearDown() async throws {
+        MessagingConversationStore.awaitingReplyTimeout = .seconds(20)
+        MessagingConversationStore.urgentPollWindow = .seconds(8)
+        try await super.tearDown()
+    }
+
+    private func conversationJSON(runs: [[String: Any]] = []) -> [String: Any] {
+        [
+            "conversation": [
+                "id": "dm", "kind": "dm", "title": "SWE", "profiles": ["swe-id"],
+                "default_responder": "swe-id", "revision": 1, "preview": "", "updated_at": 1,
+                "unread": 0, "archived": false, "pinned": false, "muted": false,
+            ],
+            "messages": [
+                ["id": "m1", "sequence": 1, "author": "user", "body": "hi", "created_at": 1],
+            ],
+            "runs": runs,
+        ]
+    }
+
+    func testSendLatchesAwaitingReplyUntilRunsAppear() async {
+        var includeRun = false
+        let requester = MessagingRequester { path, method, body in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") { return self.capability() }
+            if path.hasSuffix("/conversations") { return ["conversations": []] }
+            if method == "POST" {
+                return [
+                    "conversation": [
+                        "id": "dm", "kind": "dm", "title": "SWE", "profiles": ["swe-id"],
+                        "default_responder": "swe-id", "revision": 1, "preview": "", "updated_at": 1,
+                        "unread": 0, "archived": false, "pinned": false, "muted": false,
+                    ],
+                    "message": [
+                        "id": body?["client_message_id"] ?? "m", "sequence": 2, "author": "user",
+                        "body": body?["body"] ?? "", "created_at": 2,
+                    ],
+                ]
+            }
+            return self.conversationJSON(runs: includeRun
+                ? [["id": "r1", "profile": "swe-id", "status": "running", "detail": ""]]
+                : [])
+        }
+        let store = MessagingStore()
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+        let model = MessagingConversationStore(
+            destination: .init(conversationID: nil, profileID: "swe-id"),
+            owner: store,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        await model.load()
+        XCTAssertFalse(model.awaitingReply)
+        let ok = await model.send(recipients: [], text: "ping")
+        XCTAssertTrue(ok)
+        XCTAssertTrue(model.awaitingReply)
+        XCTAssertTrue(model.prefersUrgentPolling)
+        includeRun = true
+        await model.load()
+        XCTAssertFalse(model.awaitingReply)
+        XCTAssertFalse(model.prefersUrgentPolling)
+    }
+
+    func testHardRejectionClearsAwaitingReply() async {
+        let requester = MessagingRequester { path, method, _ in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") { return self.capability() }
+            if path.hasSuffix("/conversations") { return ["conversations": []] }
+            if method == "POST" {
+                throw DashboardTicketBridgeError.http(status: 422, detail: "rejected")
+            }
+            return self.conversationJSON()
+        }
+        let store = MessagingStore()
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+        let model = MessagingConversationStore(
+            destination: .init(conversationID: nil, profileID: "swe-id"),
+            owner: store,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        await model.load()
+        _ = await model.send(recipients: [], text: "nope")
+        XCTAssertNil(model.pending)
+        XCTAssertFalse(model.awaitingReply)
+        XCTAssertNotNil(model.error)
+    }
+
+    func testAwaitingReplyTimesOutWithoutRuns() async {
+        MessagingConversationStore.awaitingReplyTimeout = .milliseconds(80)
+        let requester = MessagingRequester { path, method, body in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") { return self.capability() }
+            if path.hasSuffix("/conversations") { return ["conversations": []] }
+            if method == "POST" {
+                return [
+                    "conversation": [
+                        "id": "dm", "kind": "dm", "title": "SWE", "profiles": ["swe-id"],
+                        "default_responder": "swe-id", "revision": 1, "preview": "", "updated_at": 1,
+                        "unread": 0, "archived": false, "pinned": false, "muted": false,
+                    ],
+                    "message": [
+                        "id": body?["client_message_id"] ?? "m", "sequence": 2, "author": "user",
+                        "body": body?["body"] ?? "", "created_at": 2,
+                    ],
+                ]
+            }
+            return self.conversationJSON()
+        }
+        let store = MessagingStore()
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+        let model = MessagingConversationStore(
+            destination: .init(conversationID: nil, profileID: "swe-id"),
+            owner: store,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        _ = await model.send(recipients: [], text: "hang")
+        XCTAssertTrue(model.awaitingReply)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertFalse(model.awaitingReply)
+    }
+
+    func testRestoredPendingStartsAwaitingReply() async {
+        let requester = MessagingRequester { path, _, _ in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") { return self.capability() }
+            if path.hasSuffix("/conversations") { return ["conversations": []] }
+            throw URLError(.timedOut)
+        }
+        let store = MessagingStore()
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let dm = MessagingDestination(conversationID: nil, profileID: "swe-id")
+        let first = MessagingConversationStore(destination: dm, owner: store, defaults: defaults)
+        _ = await first.send(recipients: [], text: "keep")
+        XCTAssertTrue(first.awaitingReply)
+        let restored = MessagingConversationStore(destination: dm, owner: store, defaults: defaults)
+        XCTAssertNotNil(restored.pending)
+        XCTAssertTrue(restored.awaitingReply)
+    }
+
+    private func capability(server: String = "server", principal: String = "alice", version: Int = 1) -> [String: Any] {
+        ["server_id": server, "principal_id": principal, "api_version": version, "state": "ready",
+         "features": ["dm", "groups"], "profiles": [["id": "swe-id", "name": "swe", "displayName": "SWE"]]]
+    }
+
+    private func hub(_ status: String = "enabled") -> [String: Any] {
+        ["plugins": [["name": "bot-coms", "runtime_status": status]]]
+    }
 }
 
 @MainActor

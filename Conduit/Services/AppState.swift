@@ -9188,6 +9188,10 @@ final class AppState: ObservableObject {
             .lowercased()
     }
 
+    static func isSlashCommand(_ text: String) -> Bool {
+        parseSlashCommand(text) != nil
+    }
+
     private static func parseSlashCommand(_ text: String) -> (name: String, argument: String, cleaned: String)? {
         let trimmed = text.replacingOccurrences(of: "^\\s+", with: "", options: .regularExpression)
         guard trimmed.hasPrefix("/") else { return nil }

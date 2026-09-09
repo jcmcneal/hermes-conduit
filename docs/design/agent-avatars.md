@@ -13,7 +13,7 @@ Each profile has a stable silhouette, accessory, and independent color selection
 | Blocked | Concerned brows and mouth, restrained movement, exclamation badge | Disconnection, unsupported gateway, or failed approval/clarification |
 | Done | Smiling eyes, brief celebratory bounce, check badge | Idle after an assistant reply |
 
-The live state belongs to the active profile's current session. Other profiles remain idle because their live runtime state is not known. The state resolver ignores attention cards from earlier turns. Settled transcript avatars are static.
+The live state belongs to the active profile's current session. Other profiles remain idle because their live runtime state is not known. Messaging threads are a second live-state source: incomplete `MessagingRun` rows drive a pinned avatar presence row above the composer (queued → waiting, running → working), independent of the active Hermes session. The state resolver ignores attention cards from earlier turns. Settled transcript avatars are static.
 
 ## Motion and accessibility
 

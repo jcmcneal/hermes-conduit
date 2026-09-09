@@ -12,6 +12,9 @@ import PhotosUI
 import UniformTypeIdentifiers
 
 struct ComposerBar: View {
+    /// Messaging reuses this bar but must not retarget the parked Hermes session.
+    var showsModelPicker: Bool = true
+    var messaging: MessagingComposerAdapter? = nil
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -184,12 +187,33 @@ struct ComposerBar: View {
         }
     }
 
+    private var isMessaging: Bool { messaging != nil }
+
+    private var composerEnabled: Bool {
+        if let messaging {
+            return messaging.canWrite && !messaging.isSending && !messaging.hasPending
+        }
+        return appState.composerIsEnabled
+    }
+
     private var action: ComposerAction {
-        appState.composerAction(hasText: hasText, hasAttachments: !attachments.isEmpty)
+        if let messaging {
+            return MessagingComposerAction.resolve(
+                hasText: hasText,
+                canWrite: messaging.canWrite,
+                isSending: messaging.isSending,
+                hasPending: messaging.hasPending
+            )
+        }
+        return appState.composerAction(hasText: hasText, hasAttachments: !attachments.isEmpty)
     }
 
     private var activeDraftKey: ComposerDraftKey {
-        composerDraftKey(for: appState.activeSessionId)
+        messaging?.draftKey ?? composerDraftKey(for: appState.activeSessionId)
+    }
+
+    private var placeholderText: String {
+        messaging?.placeholder ?? appState.composerPlaceholder
     }
 
     private var stopOnly: Bool {
@@ -261,6 +285,7 @@ struct ComposerBar: View {
             if newValue.isEmpty {
                 composerTextHeight = ComposerPasteTextView.minimumHeight
             }
+            messaging?.onDraftChange(newValue)
             // Show suggestions when actively typing a slash command prefix
             withAnimation(ConduitMotion.response) {
                 isShowingSlashSuggestions = Self.shouldShowSlashSuggestions(
@@ -270,6 +295,7 @@ struct ComposerBar: View {
             }
         }
         .onChange(of: appState.composerPrefillToken) { _, _ in
+            guard !isMessaging else { return }
             replaceComposerText(appState.composerPrefillText)
             isFocused = !text.isEmpty
             isShowingSlashSuggestions = slashPrefix != nil
@@ -280,6 +306,9 @@ struct ComposerBar: View {
         .onAppear {
             guard loadedDraftKey == nil else { return }
             loadDraft(for: activeDraftKey)
+            if let messaging, text.isEmpty, !messaging.seedDraft.isEmpty {
+                replaceComposerText(messaging.seedDraft)
+            }
         }
         .onDisappear {
             // Explicit flush before ChatView unmount / layout host swap.
@@ -313,7 +342,7 @@ struct ComposerBar: View {
 
     private var composerContent: some View {
         VStack(spacing: 0) {
-            if !appState.composerIsEnabled {
+            if !isMessaging && !appState.composerIsEnabled {
                 stateNotice
             }
 
@@ -347,7 +376,7 @@ struct ComposerBar: View {
                 ZStack(alignment: .topLeading) {
                     let currentEditorIdentity = editorIdentity
                     if text.isEmpty {
-                        Text(appState.composerPlaceholder)
+                        Text(placeholderText)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 14)
                             .padding(.vertical, 12)
@@ -356,7 +385,8 @@ struct ComposerBar: View {
                         text: $text,
                         isFocused: $isFocused,
                         measuredHeight: $composerTextHeight,
-                        enabled: appState.composerIsEnabled,
+                        enabled: composerEnabled,
+                        accessibilityIdentifier: messaging?.editorAccessibilityIdentifier,
                         onPastedImage: { pastedImage in
                             handlePastedImage(pastedImage, editorIdentity: currentEditorIdentity)
                         },
@@ -371,7 +401,11 @@ struct ComposerBar: View {
                         // submitFromReturnKey() re-checks the live gate.
                         canSubmitFromReturn: ComposerReturnKey.canSubmit(action: action),
                         onSubmitFromReturn: { submitFromReturnKey() },
-                        onUserEdit: { appState.noteComposerUserEdit() }
+                        onUserEdit: {
+                            if !isMessaging {
+                                appState.noteComposerUserEdit()
+                            }
+                        }
                     )
                     .id(editorIdentity)
                     .padding(.horizontal, 5)
@@ -394,7 +428,7 @@ struct ComposerBar: View {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .strokeBorder(composerStroke, lineWidth: 1)
         }
-        .opacity(appState.turnState == .unsupportedGateway ? 0.7 : 1)
+        .opacity(!isMessaging && appState.turnState == .unsupportedGateway ? 0.7 : 1)
         .animation(ConduitMotion.transition, value: action)
         .preferredColorScheme(appState.themePreference.colorScheme)
         .sheet(item: $repairContext) { context in
@@ -493,7 +527,7 @@ struct ComposerBar: View {
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
-                        .disabled(!appState.composerIsEnabled)
+                        .disabled(!composerEnabled)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
@@ -529,7 +563,7 @@ struct ComposerBar: View {
                 .font(.system(size: 20, weight: .medium))
                 .frame(width: 44, height: 44)
         }
-        .disabled(!appState.composerIsEnabled || appState.isBusy)
+        .disabled(!composerEnabled || (!isMessaging && appState.isBusy))
         .conduitGlassControl(cornerRadius: 22, tint: .conduitAccent.opacity(0.08))
         .photosPicker(isPresented: $showAttachmentMenu, selection: $photoItem)
     }
@@ -581,42 +615,45 @@ struct ComposerBar: View {
 
     private var sessionControls: some View {
         HStack(spacing: 10) {
-            Button {
-                Haptics.selection()
-                appState.showModelPicker = true
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "cpu")
-                        .foregroundStyle(Color.conduitAccent)
-                        .symbolEffect(
-                            .variableColor.iterative,
-                            options: .repeating,
-                            isActive: appState.turnState == .running && !reduceMotion
-                        )
-                    Text(appState.runtime.model.isEmpty ? "Model" : appState.runtime.model)
-                        .lineLimit(1)
-                    if !appState.runtime.reasoningEffort.isEmpty {
-                        Text("/")
-                            .foregroundStyle(.secondary)
-                        Text(formatEffort(appState.runtime.reasoningEffort))
+            if showsModelPicker {
+                Button {
+                    Haptics.selection()
+                    appState.showModelPicker = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cpu")
                             .foregroundStyle(Color.conduitAccent)
+                            .symbolEffect(
+                                .variableColor.iterative,
+                                options: .repeating,
+                                isActive: appState.turnState == .running && !reduceMotion
+                            )
+                        Text(appState.runtime.model.isEmpty ? "Model" : appState.runtime.model)
                             .lineLimit(1)
-                    }
-                    if appState.runtime.yolo {
-                        Image(systemName: "shield.slash.fill")
+                        if !appState.runtime.reasoningEffort.isEmpty {
+                            Text("/")
+                                .foregroundStyle(.secondary)
+                            Text(formatEffort(appState.runtime.reasoningEffort))
+                                .foregroundStyle(Color.conduitAccent)
+                                .lineLimit(1)
+                        }
+                        if appState.runtime.yolo {
+                            Image(systemName: "shield.slash.fill")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(Color.orange)
+                        }
+                        Image(systemName: "chevron.down")
                             .font(.caption2.weight(.bold))
-                            .foregroundStyle(Color.orange)
+                            .foregroundStyle(.secondary)
                     }
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
+                    .font(.footnote.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                .font(.footnote.weight(.semibold))
-                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                .accessibilityLabel(modelAccessibilityLabel)
+                .accessibilityIdentifier("composer.model-picker")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel(modelAccessibilityLabel)
 
             Button {
                 Haptics.selection()
@@ -686,11 +723,24 @@ struct ComposerBar: View {
         }
 
         Task {
-            let didSubmit = await appState.submitComposer(
-                text: trimmed,
-                attachments: submittedAttachments,
-                context: submissionContext
-            )
+            let didSubmit: Bool
+            if let messaging {
+                if AppState.isSlashCommand(trimmed), submittedAttachments.isEmpty {
+                    didSubmit = await appState.submitComposer(
+                        text: trimmed,
+                        attachments: submittedAttachments,
+                        context: submissionContext
+                    )
+                } else {
+                    didSubmit = await messaging.onSend(trimmed)
+                }
+            } else {
+                didSubmit = await appState.submitComposer(
+                    text: trimmed,
+                    attachments: submittedAttachments,
+                    context: submissionContext
+                )
+            }
             guard didSubmit else {
                 restoreSubmittedDraftIfNeeded(
                     text: submittedText,
@@ -702,7 +752,7 @@ struct ComposerBar: View {
             }
             draftStore.removeDraft(for: submittedDraftBucket)
             guard loadedDraftKey == submittedDraftKey else { return }
-            if appState.composerPrefillToken != prefillToken {
+            if !isMessaging, appState.composerPrefillToken != prefillToken {
                 replaceComposerText(appState.composerPrefillText)
                 isFocused = !text.isEmpty
             }
@@ -728,7 +778,7 @@ struct ComposerBar: View {
                 .font(.system(size: 18, weight: .semibold))
                 .frame(width: 44, height: 44)
         }
-        .disabled(!appState.canStartVoiceConversation || appState.isBusy || !appState.composerIsEnabled)
+        .disabled(!appState.canStartVoiceConversation || (!isMessaging && appState.isBusy) || !composerEnabled)
         .conduitGlassControl(
             cornerRadius: 22,
             tint: appState.canStartVoiceConversation ? .conduitAura.opacity(0.14) : .secondary.opacity(0.06),

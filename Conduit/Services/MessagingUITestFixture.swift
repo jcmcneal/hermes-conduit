@@ -36,10 +36,16 @@ final class MessagingUITestFixture: DashboardJSONRequester {
             sent.append(message)
             return ["conversation": conversation, "message": message]
         }
-        return ["conversation": conversation, "messages": [
+        let isGroup = path.contains("/conversations/") && path.contains("group")
+        let convo = isGroup ? group : conversation
+        let runs: [[String: Any]] = isGroup ? [
+            ["id": "run-queued", "profile": "designer-id", "status": "queued", "detail": ""],
+            ["id": "run-running", "profile": "swe-id", "status": "running", "detail": ""],
+        ] : []
+        return ["conversation": convo, "messages": [
             ["id": "m1", "author": "user", "body": "Can we simplify the session picker?", "sequence": 1, "created_at": 1_788_900_000],
             ["id": "m2", "author": "designer-id", "body": "Yes. Keep an ongoing DM one tap away, with **Sessions** available separately. Groups can bring multiple profiles together.", "sequence": 2, "created_at": 1_788_900_001]
-        ] + sent, "runs": []]
+        ] + sent, "runs": runs]
     }
 }
 #endif
