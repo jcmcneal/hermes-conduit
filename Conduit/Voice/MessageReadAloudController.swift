@@ -100,6 +100,14 @@ final class MessageReadAloudController: ObservableObject {
     /// The active stream belongs to the gateway that opened it. A replaced or
     /// cleared gateway (disconnect, profile change) invalidates the in-flight
     /// operation, so any replacement stops it.
+    ///
+    /// Pinned Option A semantics, deliberately different from
+    /// `VoiceConversationController.setGateway`: a read aloud operation is one
+    /// short single-message stream fully bound to its gateway, so a swap
+    /// mid-operation is always an ownership change and stops playback here.
+    /// The voice conversation instead survives same-server capability
+    /// refreshes that install fresh equivalent instances, so its swap is
+    /// future-operations-only and connection replacement stops it explicitly.
     func setGateway(_ gateway: VoiceGatewayService?) {
         guard activeGateway !== gateway else { return }
         activeGateway = gateway

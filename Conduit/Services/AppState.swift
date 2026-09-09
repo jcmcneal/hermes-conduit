@@ -20,6 +20,10 @@ private let sessionYoloLog = Logger(subsystem: "com.milim.conduit", category: "S
 /// resume, and how prompt submissions were classified. Ids only — never
 /// prompt text, credentials, or message content.
 private let lifecycleLog = Logger(subsystem: "com.milim.conduit", category: "TurnLifecycle")
+/// Server-replacement speech retirement: which speech operations were live
+/// when the outgoing server's ownership was revoked. Ids and booleans only —
+/// never prompt text, credentials, or speech content.
+private let speechOwnershipLog = Logger(subsystem: "com.milim.conduit", category: "SpeechOwnership")
 
 typealias ChatResumeReconnectCancellation = @MainActor () -> Void
 typealias ChatResumeReconnectExecutor = @MainActor (ChatResumeSyncPurpose) async -> Void
@@ -2003,6 +2007,7 @@ final class AppState: ObservableObject {
         defaults.set(identity, forKey: chatResumeServerIdentityKey)
         guard let previousIdentity, previousIdentity != identity else { return false }
 
+        retireSpeechOperationsForServerReplacement(previousIdentity: previousIdentity, identity: identity)
         chatResumeCoordinator.clearResumeState()
         cancelOwnedAutomaticOperations()
         activeAutomaticChatResumeWork = nil
@@ -2041,6 +2046,54 @@ final class AppState: ObservableObject {
         conversationIdentityIndex.removeAll()
         sessionYoloStore.clearAllOverrides()
         return true
+    }
+
+    /// Runtime-only speech retirement at the server-replacement boundary.
+    ///
+    /// Voice Conversation and Read Aloud own speech transports that are
+    /// independent of `HermesClient`: a gateway binds one dashboard bridge and
+    /// base URL, and each spoken response opens its own ticket-minted speech
+    /// websocket. Those transports would otherwise keep streaming against —
+    /// and playing audio from — the outgoing server after a new connection
+    /// becomes authoritative, because replacing the client or the gateway
+    /// reference does not terminate an operation that already holds the old
+    /// gateway. This mirrors the voice teardown `disconnect()` performs, with
+    /// the operation generations doing the rest: every parked continuation
+    /// (capture resume, speech drain, playback completion) re-checks its
+    /// generation and turns inert, so nothing the outgoing server owned can
+    /// resurrect capture or playback.
+    ///
+    /// Deliberately NOT logout: no credential, cookie, ticket, or preference
+    /// state is touched here — only the outgoing connection's runtime speech
+    /// ownership. If the incoming connection fails to activate, the retired
+    /// operations stay retired; the outgoing server's speech is not valid
+    /// merely because the replacement failed. Same-server reconnects never
+    /// reach this path: `prepareDashboardBridge(for:)` keeps the bridge (and
+    /// therefore the gateways) when the normalized URL is unchanged, and the
+    /// capability refresh intentionally keeps equivalent gateways alive.
+    private func retireSpeechOperationsForServerReplacement(previousIdentity: String, identity: String) {
+        let voiceWasLive = voiceConversationController.hasLiveVoiceSession
+        let readAloudWasActive: Bool
+        if case .idle = messageReadAloudController.state {
+            readAloudWasActive = false
+        } else {
+            readAloudWasActive = true
+        }
+        speechOwnershipLog.info(
+            "Server replacement \(previousIdentity, privacy: .private) -> \(identity, privacy: .private): retiring speech ownership (voiceLive=\(voiceWasLive ? "yes" : "no", privacy: .public), readAloudActive=\(readAloudWasActive ? "yes" : "no", privacy: .public))"
+        )
+        voiceConversationController.stop()
+        // Read Aloud teardown flows through the controller's own pinned
+        // Option-A semantics: replacing a non-nil gateway performs the single
+        // authoritative stop. A nil gateway means nothing can be live — an
+        // operation cannot start without one.
+        messageReadAloudController.setGateway(nil)
+        // A swapped gateway must never hand a later operation to the outgoing
+        // server's bridge; the incoming connection rebuilds both references
+        // from its own bridge (capability refresh, read-aloud assignment).
+        voiceConversationController.setGateway(nil)
+        readAloudGatewayBridge = nil
+        showVoiceSheet = false
     }
 
     private static func normalizedChatResumeServerIdentity(_ baseURL: String) -> String? {

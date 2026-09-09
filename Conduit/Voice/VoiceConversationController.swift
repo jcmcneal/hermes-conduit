@@ -103,6 +103,15 @@ final class VoiceConversationController: ObservableObject {
 
     deinit { captureEventsTask?.cancel() }
 
+    /// Swaps the gateway for FUTURE operations only (pinned Option B
+    /// semantics): an in-flight conversation keeps the gateway it captured at
+    /// its operation boundaries, and the caller that replaces connection
+    /// ownership must stop this controller first — the server-replacement
+    /// boundary in `AppState.retireSpeechOperationsForServerReplacement`
+    /// does. A plain swap is deliberately not an ownership change: capability
+    /// refreshes install fresh-but-equivalent instances (same bridge, server,
+    /// and profile) mid-conversation by design, so pointer inequality is not
+    /// a signal that the old operation's server authority ended.
     func setGateway(_ gateway: VoiceGatewayService?) { self.gateway = gateway }
 
     /// Establishes explicit ownership of assistant events for one voice turn.
@@ -158,6 +167,12 @@ final class VoiceConversationController: ObservableObject {
     var hasLiveVoiceSession: Bool {
         isVoiceSessionActive || isProviderTestRunning
     }
+
+    /// Observability seam: whether a gateway reference is currently installed.
+    /// The server-replacement boundary clears this reference; tests pin the
+    /// clearing through here because a stale gateway's failure mode (reaching
+    /// the outgoing server's bridge) is behavioral and hard to observe.
+    var isGatewayAttached: Bool { gateway != nil }
 
     func setForegroundActive(_ active: Bool) {
         isForegroundActive = active
