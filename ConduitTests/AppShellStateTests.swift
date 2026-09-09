@@ -55,4 +55,48 @@ final class AppShellStateTests: XCTestCase {
             )
         )
     }
+
+    func testShowMessagingSetsDestinationWithoutSessionOpen() {
+        let shell = AppShellState()
+        let destination = MessagingDestination(conversationID: nil, profileID: "swe-id")
+        shell.showMessaging(destination)
+        XCTAssertEqual(shell.compactRoute, .conversation)
+        XCTAssertEqual(shell.messagingDestination, destination)
+        XCTAssertNil(shell.pendingOpen)
+    }
+
+    func testAdmitConversationOpenClearsMessagingDestination() {
+        let shell = AppShellState()
+        shell.showMessaging(MessagingDestination(conversationID: "g1", profileID: nil))
+        let generation = shell.beginConversationOpen(sessionID: "session-1", reason: .rowSelection)
+        XCTAssertTrue(shell.admitConversationOpen(generation: generation, sessionID: "session-1"))
+        XCTAssertNil(shell.messagingDestination)
+        XCTAssertEqual(shell.compactRoute, .conversation)
+    }
+
+    func testShowConversationWithoutOpenRequestClearsMessaging() {
+        let shell = AppShellState()
+        shell.showMessaging(MessagingDestination(conversationID: nil, profileID: "designer-id"))
+        shell.showConversationWithoutOpenRequest()
+        XCTAssertNil(shell.messagingDestination)
+        XCTAssertEqual(shell.compactRoute, .conversation)
+    }
+
+    func testShowInboxClearsMessagingDestination() {
+        let shell = AppShellState()
+        shell.showMessaging(MessagingDestination(conversationID: nil, profileID: "swe-id"))
+        shell.showInbox()
+        XCTAssertNil(shell.messagingDestination)
+        XCTAssertEqual(shell.compactRoute, .inbox)
+    }
+
+    func testRequestProfileSessionsAfterMessagingHandsOffToInbox() {
+        let shell = AppShellState()
+        shell.showMessaging(MessagingDestination(conversationID: nil, profileID: "swe-id"))
+        shell.requestProfileSessionsAfterMessaging("swe")
+        XCTAssertNil(shell.messagingDestination)
+        XCTAssertEqual(shell.compactRoute, .inbox)
+        XCTAssertEqual(shell.consumePendingSessionsProfile(), "swe")
+        XCTAssertNil(shell.pendingSessionsProfile)
+    }
 }

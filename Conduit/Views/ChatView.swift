@@ -2533,7 +2533,8 @@ struct StreamingBubble: View {
                     isActive: true,
                     avatarURL: appState.profileAvatarURL(for: appState.activeProfile),
                     displayName: appState.profileDisplayName(appState.activeProfile),
-                    profileID: appState.activeProfile
+                    profileID: appState.activeProfile,
+                    state: appState.avatarState(for: appState.activeProfile)
                 )
 
                 Text(appState.profileDisplayName(appState.activeProfile))
@@ -2575,7 +2576,8 @@ struct TypingIndicator: View {
                 isActive: true,
                 avatarURL: appState.profileAvatarURL(for: appState.activeProfile),
                 displayName: appState.profileDisplayName(appState.activeProfile),
-                profileID: appState.activeProfile
+                profileID: appState.activeProfile,
+                state: appState.avatarState(for: appState.activeProfile)
             )
 
             WorkingStatusLabel()
@@ -2669,30 +2671,17 @@ struct ConduitAgentMark: View {
     var avatarURL: URL?
     var displayName = "Hermes"
     var profileID: String = "default"
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var isBreathing = false
+    var state: AgentAvatarState = .working
 
     var body: some View {
         AgentAvatar(
             profileID: profileID,
             displayName: displayName,
             photoURL: avatarURL,
-            size: 30
+            size: 30,
+            state: isActive ? state : .idle,
+            animates: isActive
         )
-            .overlay {
-                Circle()
-                    .strokeBorder(Color.conduitAccent.opacity(isActive ? 0.52 : 0.22), lineWidth: 1)
-            }
-            .shadow(color: Color.conduitAccent.opacity(isActive ? 0.42 : 0), radius: isBreathing ? 9 : 3)
-            .scaleEffect(isBreathing ? 1.06 : 1)
-            .task(id: isActive) {
-                guard isActive, !reduceMotion else {
-                    isBreathing = false
-                    return
-                }
-                withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: true)) {
-                    isBreathing = true
-                }
-            }
+        .accessibilityHidden(true)
     }
 }

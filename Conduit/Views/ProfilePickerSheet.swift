@@ -92,7 +92,8 @@ private struct ProfilePickerRow: View {
                         profileID: profile,
                         displayName: appState.profileDisplayName(profile),
                         photoURL: appState.profileAvatarURL(for: profile),
-                        size: 48
+                        size: 48,
+                        state: appState.avatarState(for: profile)
                     )
                 } else {
                     Button {
@@ -104,7 +105,8 @@ private struct ProfilePickerRow: View {
                         profileID: profile,
                         displayName: appState.profileDisplayName(profile),
                         photoURL: appState.profileAvatarURL(for: profile),
-                        size: 48
+                        size: 48,
+                        state: appState.avatarState(for: profile)
                     )
                     Image(systemName: "camera.fill").font(.caption2.weight(.bold)).foregroundStyle(Color.conduitBackgroundColor)
                         .frame(width: 20, height: 20).background(Color.conduitAccent, in: Circle())

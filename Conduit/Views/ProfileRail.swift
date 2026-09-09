@@ -70,7 +70,8 @@ struct ProfileShelf: View {
                     displayName: appState.profileDisplayName(profile),
                     photoURL: appState.profileAvatarURL(for: profile),
                     size: pinnedSize,
-                    showsSelectionRing: selected
+                    showsSelectionRing: selected,
+                    state: appState.avatarState(for: profile)
                 )
                 .opacity(switching && !selected ? 0.55 : 1)
 
@@ -86,6 +87,7 @@ struct ProfileShelf: View {
         .disabled(switching && !selected)
         .contextMenu { pinMenu(for: profile) }
         .accessibilityLabel(appState.profileDisplayName(profile))
+        .accessibilityValue(appState.avatarState(for: profile).label)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityHint("Opens conversations for this profile")
     }
@@ -103,7 +105,8 @@ struct ProfileShelf: View {
                     displayName: appState.profileDisplayName(profile),
                     photoURL: appState.profileAvatarURL(for: profile),
                     size: unpinnedSize,
-                    showsSelectionRing: selected
+                    showsSelectionRing: selected,
+                    state: appState.avatarState(for: profile)
                 )
                 .opacity(switching && !selected ? 0.55 : 1)
 
@@ -125,6 +128,7 @@ struct ProfileShelf: View {
         .disabled(switching && !selected)
         .contextMenu { pinMenu(for: profile) }
         .accessibilityLabel(appState.profileDisplayName(profile))
+        .accessibilityValue(appState.avatarState(for: profile).label)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityHint("Opens conversations for this profile")
     }
@@ -290,7 +294,8 @@ struct ProfileSessionsSheet: View {
                 displayName: appState.profileDisplayName(appState.activeProfile),
                 photoURL: appState.profileAvatarURL(for: appState.activeProfile),
                 size: 52,
-                showsSelectionRing: true
+                showsSelectionRing: true,
+                state: appState.avatarState(for: appState.activeProfile)
             )
 
             VStack(alignment: .leading, spacing: 2) {

@@ -45,6 +45,7 @@ private enum ConversationDestination: Hashable {
 struct MainView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var shell = AppShellState()
+    @StateObject private var messaging = MessagingStore()
     @AppStorage("conduit.ipadPersistentSidebar") private var prefersPersistentSidebar = false
     @State private var availableWindowWidth: CGFloat = 0
     @State private var settingsPresentation: SettingsSnapshot?
@@ -215,6 +216,7 @@ struct MainView: View {
     ) -> some View {
         InboxView(
             shell: shell,
+            messaging: messaging,
             presentation: presentation,
             horizontalInset: horizontalInset,
             profileRailSize: profileRailSize,
@@ -230,14 +232,34 @@ struct MainView: View {
             },
             onSetupMessagingWithAgent: {
                 createMessagingSetupConversation()
+            },
+            onOpenMessaging: { destination in
+                openMessaging(destination)
             }
         )
     }
 
+    private var isShowingMessaging: Bool { shell.messagingDestination != nil }
+
     private func conversationHost(showsBack: Bool) -> some View {
         ZStack {
             ConduitCanvasBackground()
-            ChatView()
+            if let destination = shell.messagingDestination {
+                MessagingConversationView(
+                    destination: destination,
+                    owner: messaging,
+                    embedsInHost: true,
+                    onClose: { navigateBackToInbox() },
+                    openSessions: { profileName in
+                        shell.requestProfileSessionsAfterMessaging(profileName)
+                        navigationPath = NavigationPath()
+                        Task { await messaging.refreshConversations() }
+                    }
+                )
+                .id(destination.id)
+            } else {
+                ChatView()
+            }
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -261,69 +283,103 @@ struct MainView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Back to Inbox")
-                } else {
+                } else if !isShowingMessaging {
                     AgentAvatar(
                         profileID: appState.activeProfile,
                         displayName: appState.profileDisplayName(appState.activeProfile),
                         photoURL: appState.profileAvatarURL(for: appState.activeProfile),
-                        size: 28
+                        size: 28,
+                        state: appState.avatarState(for: appState.activeProfile)
                     )
                     .accessibilityHidden(true)
                 }
             }
             ToolbarItem(placement: .principal) {
-                Button {
-                    appState.requestChatScrollToTop()
-                } label: {
-                    Text(appState.activeSessionTitle)
+                if isShowingMessaging {
+                    Text(messagingHostTitle)
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(Color.conduitPrimaryText)
                         .lineLimit(1)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 7)
                         .conduitRaisedSurface(cornerRadius: 16)
+                        .accessibilityLabel(messagingHostTitle)
+                } else {
+                    Button {
+                        appState.requestChatScrollToTop()
+                    } label: {
+                        Text(appState.activeSessionTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(Color.conduitPrimaryText)
+                            .lineLimit(1)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .conduitRaisedSurface(cornerRadius: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(appState.activeSessionTitle)
+                    .accessibilityHint("Scroll to top of conversation")
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(appState.activeSessionTitle)
-                .accessibilityHint("Scroll to top of conversation")
             }
             ToolbarItem(placement: .topBarTrailing) {
-                if showsBack {
+                if showsBack && !isShowingMessaging {
                     AgentAvatar(
                         profileID: appState.activeProfile,
                         displayName: appState.profileDisplayName(appState.activeProfile),
                         photoURL: appState.profileAvatarURL(for: appState.activeProfile),
-                        size: 28
+                        size: 28,
+                        state: appState.avatarState(for: appState.activeProfile)
                     )
                     .accessibilityLabel(appState.profileDisplayName(appState.activeProfile))
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button {
-                        Task { await appState.refreshActiveSession() }
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                    .disabled(!appState.isConnected || appState.isChatRefreshing)
+            if !isShowingMessaging {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            Task { await appState.refreshActiveSession() }
+                        } label: {
+                            Label("Refresh", systemImage: "arrow.clockwise")
+                        }
+                        .disabled(!appState.isConnected || appState.isChatRefreshing)
 
-                    Button {
-                        appState.showGatewaySheet = true
+                        Button {
+                            appState.showGatewaySheet = true
+                        } label: {
+                            Label("Connection", systemImage: "antenna.radiowaves.left.and.right")
+                        }
                     } label: {
-                        Label("Connection", systemImage: "antenna.radiowaves.left.and.right")
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Color.conduitPrimaryText)
+                            .frame(width: 40, height: 40)
                     }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color.conduitPrimaryText)
-                        .frame(width: 40, height: 40)
+                    .accessibilityLabel("Conversation menu")
                 }
-                .accessibilityLabel("Conversation menu")
             }
             ToolbarItem(placement: .topBarTrailing) {
                 ConnectionStatusIndicator()
             }
         }
+    }
+
+    private var messagingHostTitle: String {
+        guard let destination = shell.messagingDestination else { return "Messages" }
+        if let profileID = destination.profileID,
+           let profile = messaging.profiles.first(where: { $0.id == profileID }) {
+            return profile.displayName
+        }
+        if let conversationID = destination.conversationID,
+           let conversation = messaging.conversations.first(where: { $0.id == conversationID }) {
+            return conversation.title
+        }
+        return "Messages"
+    }
+
+    private func openMessaging(_ destination: MessagingDestination) {
+        appState.dismissSidebarDrawer()
+        shell.showMessaging(destination)
+        // compactRoute onChange → syncNavigationPath pushes ConversationDestination.active.
     }
 
     private func openConversation(sessionID: String, reason: AppShellState.ConversationOpenRequest.Reason) {
@@ -409,10 +465,14 @@ struct MainView: View {
     }
 
     private func navigateBackToInbox() {
+        let wasMessaging = shell.messagingDestination != nil
         shell.showInbox()
         navigationPath = NavigationPath()
         // Legacy flag must stay false so streaming is not suppressed.
         appState.dismissSidebarDrawer()
+        if wasMessaging {
+            Task { await messaging.refreshConversations() }
+        }
     }
 
     private func syncNavigationPath(with route: AppShellState.CompactRoute) {

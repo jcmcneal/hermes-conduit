@@ -4,6 +4,7 @@ import SwiftUI
 struct InboxView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var shell: AppShellState
+    @ObservedObject var messaging: MessagingStore
     var presentation: SidebarPresentation = .drawer
     var horizontalInset: CGFloat = ConduitInboxMetrics.phoneHorizontalInset
     var profileRailSize: CGFloat = ConduitInboxMetrics.profileRailSizePhone
@@ -12,9 +13,9 @@ struct InboxView: View {
     var onCreateConversation: () -> Void
     var onResumeConversation: () -> Void
     var onSetupMessagingWithAgent: () -> Void = {}
+    var onOpenMessaging: (MessagingDestination) -> Void = { _ in }
 
     @AppStorage("conduit.sidebarTab") private var selectedTabRaw = SidebarTab.sessions.rawValue
-    @StateObject private var messaging = MessagingStore()
     @Environment(\.scenePhase) private var messagingScenePhase
     @State private var showMessagingSetup = false
     @State private var messagingAction: String?
@@ -52,7 +53,13 @@ struct InboxView: View {
 
                 if selectedTab == .sessions {
                     if messaging.showInbox {
-                        MessagingInboxView(store: messaging, requestedAction: $messagingAction, openSession: onOpenConversation, openProfileSessions: handleProfileSelection)
+                        MessagingInboxView(
+                            store: messaging,
+                            requestedAction: $messagingAction,
+                            openSession: onOpenConversation,
+                            openProfileSessions: handleProfileSelection,
+                            openMessaging: onOpenMessaging
+                        )
                     } else {
                         VStack(spacing: 16) {
                             ProfileShelf(pinnedSize: profileRailSize) { profile in
@@ -197,6 +204,13 @@ struct InboxView: View {
         }
         .onAppear {
             selectedTabRaw = SidebarTab.migrated(rawValue: selectedTabRaw).rawValue
+            if let profile = shell.consumePendingSessionsProfile() {
+                handleProfileSelection(profile)
+            }
+        }
+        .onChange(of: shell.pendingSessionsProfile) { _, profile in
+            guard profile != nil, let consumed = shell.consumePendingSessionsProfile() else { return }
+            handleProfileSelection(consumed)
         }
     }
 
@@ -210,7 +224,8 @@ struct InboxView: View {
                     profileID: appState.activeProfile,
                     displayName: appState.profileDisplayName(appState.activeProfile),
                     photoURL: appState.profileAvatarURL(for: appState.activeProfile),
-                    size: 36
+                    size: 36,
+                    state: appState.avatarState(for: appState.activeProfile)
                 )
                 .frame(width: 44, height: 44)
             }

@@ -6,11 +6,10 @@ struct MessagingInboxView: View {
     @Binding var requestedAction: String?
     let openSession: (String) -> Void
     let openProfileSessions: (String) -> Void
+    let openMessaging: (MessagingDestination) -> Void
     @State private var filter = "All"
     @State private var search = ""
-    @State private var destination: MessagingDestination?
     @State private var newGroup = false
-    @State private var pendingSessionsProfile: String?
     @State private var showArchived = false
     @State private var chooseBot = false
     @State private var pendingDestination: MessagingDestination?
@@ -20,9 +19,11 @@ struct MessagingInboxView: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 20) {
                     ForEach(store.profiles) { profile in
-                        Button { destination = MessagingDestination(conversationID: nil, profileID: profile.id) } label: {
+                        Button {
+                            openMessaging(MessagingDestination(conversationID: nil, profileID: profile.id))
+                        } label: {
                             VStack(spacing: 6) {
-                                AgentAvatar(profileID: profile.name, displayName: profile.displayName, photoURL: appState.profileAvatarURL(for: profile.name), size: 58)
+                                AgentAvatar(profileID: profile.name, displayName: profile.displayName, photoURL: appState.profileAvatarURL(for: profile.name), size: 58, state: appState.avatarState(for: profile.name))
                                 Text(profile.displayName).font(.caption).lineLimit(1)
                             }.frame(width: 78)
                         }.buttonStyle(.plain).disabled(!store.isReady).accessibilityLabel(profile.displayName)
@@ -46,9 +47,11 @@ struct MessagingInboxView: View {
                         Text("Messages").font(.headline).padding(.vertical, 6)
                         ForEach(visibleMessages) { conversation in
                             Button {
-                                destination = conversation.kind == "dm"
-                                    ? MessagingDestination(conversationID: nil, profileID: conversation.profiles.first)
-                                    : MessagingDestination(conversationID: conversation.id, profileID: nil)
+                                openMessaging(
+                                    conversation.kind == "dm"
+                                        ? MessagingDestination(conversationID: nil, profileID: conversation.profiles.first)
+                                        : MessagingDestination(conversationID: conversation.id, profileID: nil)
+                                )
                             } label: { messageRow(conversation) }.buttonStyle(.plain)
                         }
                         if visibleMessages.isEmpty {
@@ -81,7 +84,10 @@ struct MessagingInboxView: View {
             requestedAction = nil
         }
         .sheet(isPresented: $chooseBot, onDismiss: {
-            destination = pendingDestination; pendingDestination = nil
+            if let pendingDestination {
+                openMessaging(pendingDestination)
+            }
+            pendingDestination = nil
         }) {
             NavigationStack {
                 List(store.profiles) { profile in
@@ -93,17 +99,14 @@ struct MessagingInboxView: View {
             }
         }
         .sheet(isPresented: $newGroup, onDismiss: {
-            destination = pendingDestination; pendingDestination = nil
+            if let pendingDestination {
+                openMessaging(pendingDestination)
+            }
+            pendingDestination = nil
         }) {
             NewMessagingGroupSheet(store: store) { conversation in
                 pendingDestination = MessagingDestination(conversationID: conversation.id, profileID: nil)
             }
-        }
-        .fullScreenCover(item: $destination, onDismiss: {
-            if let profile = pendingSessionsProfile { pendingSessionsProfile = nil; openProfileSessions(profile) }
-            Task { await store.refreshConversations() }
-        }) { target in
-            MessagingConversationView(destination: target, owner: store) { pendingSessionsProfile = $0 }
         }
     }
     private var filterKey: String { "conduit.messaging.filter." + (store.capability?.scope ?? "") }
@@ -115,7 +118,7 @@ struct MessagingInboxView: View {
     private func messageRow(_ conversation: MessagingConversation) -> some View {
         HStack(spacing: 12) {
             if conversation.kind == "dm", let profile = store.profiles.first(where: { $0.id == conversation.profiles.first }) {
-                AgentAvatar(profileID: profile.name, displayName: profile.displayName, photoURL: appState.profileAvatarURL(for: profile.name), size: 40)
+                AgentAvatar(profileID: profile.name, displayName: profile.displayName, photoURL: appState.profileAvatarURL(for: profile.name), size: 40, state: appState.avatarState(for: profile.name))
                     .accessibilityHidden(true)
             } else {
                 Image(systemName: "person.2.circle.fill").font(.system(size: 36)).foregroundStyle(Color.conduitAccent).accessibilityHidden(true)
@@ -161,7 +164,7 @@ struct NewMessagingGroupSheet: View {
                     Text("Choose a bot").tag("")
                     ForEach(store.profiles.filter { members.contains($0.id) }) { Text($0.displayName).tag($0.id) }
                 }
-                Text("Every member can read this group's shared messages. Mention specific bots to address them; otherwise the default responder answers.").font(.footnote)
+                Text("Every member can read this group's shared messages. Use the To: menu to address bots; otherwise the default responder answers.").font(.footnote)
                 if let error { Text(error).foregroundStyle(.red) }
             }.disabled(saving)
                 .navigationTitle("New group")

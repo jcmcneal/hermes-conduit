@@ -4,9 +4,10 @@ import SwiftUI
 /// Compact shell presentation owner for the authenticated root.
 ///
 /// Owns whether Inbox or Conversation is the compact destination, the current
-/// conversation-open request, and list transient presentation state. It does
+/// conversation-open request, list transient presentation state, and which
+/// messaging destination (if any) occupies the conversation host. It does
 /// not own selected session identity, recovery, transport, or turn state —
-/// those remain on `AppState`.
+/// those remain on `AppState`. Messaging IDs never enter Hermes session keys.
 @MainActor
 final class AppShellState: ObservableObject {
     enum CompactRoute: Equatable, Hashable {
@@ -33,6 +34,10 @@ final class AppShellState: ObservableObject {
     }
 
     @Published private(set) var compactRoute: CompactRoute = .inbox
+    /// When non-nil, the conversation host shows messaging instead of ChatView.
+    @Published private(set) var messagingDestination: MessagingDestination?
+    /// One-shot: after leaving messaging, Inbox should open this profile's sessions sheet.
+    @Published private(set) var pendingSessionsProfile: String?
     @Published var isConversationSearchActive = false
     @Published var conversationSearchText = ""
     @Published var isCreatingConversation = false
@@ -78,6 +83,7 @@ final class AppShellState: ObservableObject {
             return false
         }
         pendingOpen = nil
+        messagingDestination = nil
         compactRoute = .conversation
         isCreatingConversation = false
         return true
@@ -93,13 +99,45 @@ final class AppShellState: ObservableObject {
     func showInbox() {
         pendingOpen = nil
         isCreatingConversation = false
+        messagingDestination = nil
         compactRoute = .inbox
     }
 
     func showConversationWithoutOpenRequest() {
         // Persistent iPad already shows chat beside inbox; compact callers
         // that only need to reveal an already-selected conversation use this.
+        // Hermes session reveal clears any messaging overlay.
+        messagingDestination = nil
         compactRoute = .conversation
+    }
+
+    /// Present a DM or group in the conversation host without touching Hermes
+    /// session identity.
+    func showMessaging(_ destination: MessagingDestination) {
+        pendingOpen = nil
+        isCreatingConversation = false
+        pendingSessionsProfile = nil
+        messagingDestination = destination
+        compactRoute = .conversation
+    }
+
+    func clearMessagingDestination() {
+        messagingDestination = nil
+    }
+
+    /// Leave messaging for inbox, then ask Inbox to open the profile's sessions.
+    func requestProfileSessionsAfterMessaging(_ profile: String) {
+        pendingOpen = nil
+        isCreatingConversation = false
+        messagingDestination = nil
+        pendingSessionsProfile = profile
+        compactRoute = .inbox
+    }
+
+    func consumePendingSessionsProfile() -> String? {
+        let value = pendingSessionsProfile
+        pendingSessionsProfile = nil
+        return value
     }
 
     /// Prefer Inbox for return-surface presentation without inventing a

@@ -194,3 +194,74 @@ final class ConversationActivityCopyTests: XCTestCase {
         )
     }
 }
+
+final class AgentAvatarStateTests: XCTestCase {
+    private func resolve(turn: TurnState = .idle, connected: Bool = true, switching: Bool = false,
+                         input: Bool = false, failure: Bool = false, tool: Bool = false,
+                         output: Bool = false, reply: Bool = false) -> AgentAvatarState {
+        AgentAvatarState.resolve(turn: turn, connected: connected, switching: switching,
+                                 needsInput: input, hasFailure: failure, hasTool: tool,
+                                 hasOutput: output, hasReply: reply)
+    }
+
+    func testRunningDistinguishesThinkingFromExecution() {
+        XCTAssertEqual(resolve(turn: .running), .thinking)
+        XCTAssertEqual(resolve(turn: .running, tool: true), .working)
+        XCTAssertEqual(resolve(turn: .running, output: true), .working)
+    }
+
+    func testAttentionTakesPrecedenceOverRunningAndOldReply() {
+        XCTAssertEqual(resolve(turn: .running, input: true, output: true), .waiting)
+        XCTAssertEqual(resolve(turn: .running, input: true, failure: true), .blocked)
+        XCTAssertEqual(resolve(connected: false, reply: true), .blocked)
+        XCTAssertEqual(resolve(turn: .unsupportedGateway, reply: true), .blocked)
+    }
+
+    func testSynchronizationNeverClaimsCompletionOrFailure() {
+        XCTAssertEqual(resolve(turn: .synchronizing, connected: false, reply: true), .waiting)
+        XCTAssertEqual(resolve(turn: .reconnecting, connected: false), .waiting)
+        XCTAssertEqual(resolve(switching: true, failure: true), .waiting)
+    }
+
+    func testCompletionRequiresAReplyAndAnIdleTurn() {
+        XCTAssertEqual(resolve(), .idle)
+        XCTAssertEqual(resolve(reply: true), .done)
+        XCTAssertEqual(resolve(turn: .running, reply: true), .thinking)
+    }
+}
+
+@MainActor
+final class AgentAvatarProfileStateTests: XCTestCase {
+    func testLiveStateNeverLeaksIntoAnotherProfile() {
+        let app = AppState(loadSavedConnection: false)
+        app.isConnected = false
+        XCTAssertEqual(app.avatarState(for: app.activeProfile), .blocked)
+        XCTAssertEqual(app.avatarState(for: "another-profile"), .idle)
+    }
+
+    func testOldAttentionCardsDoNotBlockANewCompletedTurn() {
+        let app = AppState(loadSavedConnection: false)
+        app.isConnected = true
+        app.messages = [
+            ChatMessage(id: "approval", role: .approval, content: "", timestamp: "", approval:
+                ApprovalActivity(sessionId: "session", command: "test", description: "test",
+                                 allowPermanent: false, smartDenied: false, status: .error)),
+            ChatMessage(id: "new-turn", role: .user, content: "Try again", timestamp: ""),
+            ChatMessage(id: "reply", role: .assistant, content: "Done", timestamp: "")
+        ]
+        XCTAssertEqual(app.avatarState(for: app.activeProfile), .done)
+    }
+
+    func testCurrentApprovalWaitsInsteadOfClaimingCompletion() {
+        let app = AppState(loadSavedConnection: false)
+        app.isConnected = true
+        app.messages = [
+            ChatMessage(id: "user", role: .user, content: "Run this", timestamp: ""),
+            ChatMessage(id: "reply", role: .assistant, content: "Let me check", timestamp: ""),
+            ChatMessage(id: "approval", role: .approval, content: "", timestamp: "", approval:
+                ApprovalActivity(sessionId: "session", command: "test", description: "test",
+                                 allowPermanent: false, smartDenied: false, status: .pending))
+        ]
+        XCTAssertEqual(app.avatarState(for: app.activeProfile), .waiting)
+    }
+}

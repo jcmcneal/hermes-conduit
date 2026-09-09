@@ -2,62 +2,296 @@ import Foundation
 import SwiftUI
 import UIKit
 
-/// Deterministic original character artwork for profiles.
-/// Appearance is derived from the stable profile ID — never `hashValue`,
-/// display names, list indices, or runtime session IDs.
+/// A profile keeps its character across renames, sessions, and app launches.
 struct AgentAvatar: View {
     let profileID: String
     let displayName: String
     let photoURL: URL?
     var size: CGFloat = 40
-    var showsSelectionRing: Bool = false
+    var showsSelectionRing = false
+    var state: AgentAvatarState = .idle
+    var animates = true
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var visible = false
+    @State private var stateStarted = Date()
+    @State private var completionSettled = false
+
+    private var motionEnabled: Bool {
+        animates && visible && !reduceMotion && scenePhase == .active
+            && !(state == .done && completionSettled)
+    }
 
     var body: some View {
-        ZStack {
-            if let photoURL, let image = cachedImage(at: photoURL) {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: size, height: size)
-                    .clipped()
-            } else {
-                characterArtwork
+        let seed = AgentAvatarIdentity.seed(for: profileID)
+        let palette = AgentAvatarIdentity.palette(for: seed)
+        let photo = photoURL.flatMap { AgentAvatarImageCache.shared.image(at: $0) }
+        TimelineView(.animation(minimumInterval: state == .idle ? 1.0 / 15 : 1.0 / 30,
+                                paused: !motionEnabled || (photo != nil && state == .idle))) { context in
+            let time = motionEnabled ? context.date.timeIntervalSinceReferenceDate : 0
+            let pose = AgentAvatarPose(state: state, time: time,
+                                       elapsed: context.date.timeIntervalSince(stateStarted),
+                                       seed: seed, animated: motionEnabled)
+            ZStack {
+                Circle().fill(palette.background.gradient)
+                if let photo {
+                    Image(uiImage: photo)
+                        .resizable().scaledToFill()
+                        .frame(width: size, height: size).clipped()
+                } else {
+                    character(seed: seed, palette: palette, pose: pose)
+                }
+                if state != .idle {
+                    Circle().trim(from: 0.03, to: state == .thinking || state == .working ? 0.76 : 0.97)
+                        .stroke(state.tint.opacity(0.8), style: StrokeStyle(lineWidth: max(1.5, size * 0.025), lineCap: .round))
+                        .rotationEffect(.degrees(state == .thinking || state == .working ? pose.orbit : -90))
+                        .padding(size * 0.075)
+                }
+            }
+            .frame(width: size, height: size)
+            .clipShape(Circle())
+            .overlay {
+                Circle().strokeBorder(showsSelectionRing ? Color.conduitPrimaryAction : palette.fill.opacity(0.16),
+                                      lineWidth: showsSelectionRing ? max(2.5, size * 0.035) : 1)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                if let symbol = state.symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: max(7, size * 0.13), weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: size * 0.27, height: size * 0.27)
+                        .background(state.tint, in: Circle())
+                        .overlay { Circle().strokeBorder(Color.conduitCanvas, lineWidth: max(1, size * 0.025)) }
+                }
             }
         }
         .frame(width: size, height: size)
-        .clipShape(Circle())
-        .overlay {
-            Circle()
-                .strokeBorder(
-                    showsSelectionRing ? Color.conduitPrimaryAction : Color.conduitSeparator.opacity(0.55),
-                    lineWidth: showsSelectionRing ? max(3.5, size * 0.045) : 1
-                )
+        .animation(reduceMotion || !animates ? nil : .spring(response: 0.38, dampingFraction: 0.72), value: state)
+        .onAppear { visible = true }
+        .onDisappear { visible = false }
+        .task(id: state) {
+            stateStarted = Date()
+            completionSettled = false
+            guard state == .done else { return }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            completionSettled = true
         }
-        .scaleEffect(showsSelectionRing ? 1.04 : 1)
-        .accessibilityHidden(true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(displayName)
+        .accessibilityValue(state.label)
     }
 
-    private var characterArtwork: some View {
-        let seed = AgentAvatarIdentity.seed(for: profileID)
-        let palette = AgentAvatarIdentity.palette(for: seed)
-        let accessory = AgentAvatarIdentity.accessory(for: seed)
-        return ZStack {
-            Circle().fill(palette.background)
-            AgentCharacterShape(kind: AgentAvatarIdentity.shape(for: seed))
-                .fill(palette.fill)
-                .padding(size * 0.08)
-            AgentCharacterFace(seed: seed)
-                .stroke(palette.face, style: StrokeStyle(lineWidth: max(1.6, size * 0.045), lineCap: .round))
-                .padding(size * 0.24)
-            AgentCharacterAccessory(kind: accessory)
-                .fill(palette.accent)
-                .padding(size * 0.06)
+    private func character(seed: UInt64, palette: AgentAvatarIdentity.Palette, pose: AgentAvatarPose) -> some View {
+        ZStack {
+            Ellipse().fill(palette.face.opacity(0.13))
+                .frame(width: size * 0.52, height: size * 0.075)
+                .blur(radius: size * 0.025)
+                .offset(y: size * 0.34)
+                .scaleEffect(x: 1 - abs(pose.lift) * 2, y: 1)
+            ZStack {
+                AgentCharacterShape(kind: AgentAvatarIdentity.shape(for: seed))
+                    .fill(LinearGradient(colors: [palette.accent, palette.fill, palette.fill],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .overlay {
+                        AgentCharacterShape(kind: AgentAvatarIdentity.shape(for: seed))
+                            .stroke(Color.white.opacity(0.28), lineWidth: size * 0.012)
+                    }
+                    .shadow(color: palette.fill.opacity(0.28), radius: size * 0.045, x: 0, y: size * 0.04)
+                    .frame(width: size * 0.71, height: size * 0.70)
+                // A small reflected light gives the bodies a soft, tactile finish.
+                Capsule().fill(.white.opacity(0.24))
+                    .frame(width: size * 0.15, height: size * 0.035)
+                    .rotationEffect(.degrees(-28))
+                    .offset(x: -size * 0.17, y: -size * 0.23)
+                AgentCharacterAccessory(kind: AgentAvatarIdentity.accessory(for: seed))
+                    .fill(AgentAvatarIdentity.accessory(for: seed) == .cheekDot
+                          ? palette.accent.opacity(0.9) : palette.face.opacity(0.88))
+                    .frame(width: size * 0.77, height: size * 0.77)
+                AgentExpressiveFace(state: state, blink: pose.blink, gaze: pose.gaze, time: pose.faceTime)
+                    .foregroundStyle(palette.face)
+                    .frame(width: size * 0.47, height: size * 0.38)
+                    .offset(x: size * pose.gaze * 0.012, y: size * 0.035)
+            }
+            .scaleEffect(x: pose.squash, y: 2 - pose.squash, anchor: .bottom)
+            .rotationEffect(.degrees(pose.tilt), anchor: .bottom)
+            .offset(y: size * (pose.lift - 0.015))
         }
-        .frame(width: size, height: size)
+    }
+}
+
+// Explicit states also make the component usable in previews without AppState.
+enum AgentAvatarState: String, CaseIterable {
+    case idle, thinking, working, waiting, blocked, done
+
+    var label: String { rawValue.capitalized }
+    var symbol: String? {
+        switch self {
+        case .idle, .thinking, .working: return nil
+        case .waiting: return "pause.fill"
+        case .blocked: return "exclamationmark"
+        case .done: return "checkmark"
+        }
+    }
+    var tint: Color {
+        switch self {
+        case .idle: return Color(hex: 0x777D8B)
+        case .thinking: return Color(hex: 0x8263ED)
+        case .working: return Color(hex: 0x198CBA)
+        case .waiting: return Color(hex: 0xB87516)
+        case .blocked: return Color(hex: 0xCE4F62)
+        case .done: return Color(hex: 0x278467)
+        }
     }
 
-    private func cachedImage(at url: URL) -> UIImage? {
-        AgentAvatarImageCache.shared.image(at: url)
+    /// Only the active profile has authoritative live session state.
+    static func resolve(turn: TurnState, connected: Bool, switching: Bool,
+                        needsInput: Bool, hasFailure: Bool, hasTool: Bool,
+                        hasOutput: Bool, hasReply: Bool) -> Self {
+        if switching || turn == .synchronizing || turn == .reconnecting { return .waiting }
+        if !connected || turn == .unsupportedGateway || hasFailure { return .blocked }
+        if needsInput { return .waiting }
+        if turn == .running { return hasTool || hasOutput ? .working : .thinking }
+        return hasReply ? .done : .idle
+    }
+}
+
+extension AppState {
+    func avatarState(for profile: String) -> AgentAvatarState {
+        guard profile == activeProfile else { return .idle }
+        // Only inspect the current turn; an old rejected approval is not a current blocker.
+        let currentTurn = messages.reversed().prefix { $0.role != .user }
+        let needsInput = currentTurn.contains {
+            $0.approval.map { [.pending, .submitting].contains($0.status) } == true
+                || $0.clarify.map { [.pending, .submitting].contains($0.status) } == true
+        }
+        let failure = currentTurn.contains {
+            $0.approval?.status == .error || $0.clarify?.status == .error
+        }
+        return AgentAvatarState.resolve(
+            turn: turnState, connected: isConnected, switching: isProfileSwitching,
+            needsInput: needsInput, hasFailure: failure,
+            hasTool: currentTurn.contains { $0.tool?.status == .running },
+            hasOutput: !streamingText.isEmpty,
+            hasReply: currentTurn.contains { $0.role == .assistant && !$0.content.isEmpty }
+        )
+    }
+}
+
+private struct AgentAvatarPose {
+    var lift = 0.0
+    var tilt = 0.0
+    var squash = 1.0
+    var blink = 1.0
+    var gaze = 0.0
+    var orbit = -90.0
+    var faceTime = 0.0
+
+    init(state: AgentAvatarState, time: Double, elapsed: Double, seed: UInt64, animated: Bool) {
+        guard animated else {
+            if state == .thinking { gaze = 0.7; tilt = -5 }
+            if state == .waiting { tilt = 6 }
+            return
+        }
+        let t = time + Double(seed % 997) / 71
+        let breath = sin(t * 1.8)
+        let blinkPhase = t.truncatingRemainder(dividingBy: 4.7)
+        blink = blinkPhase < 0.16 ? max(0.08, abs(blinkPhase - 0.08) / 0.08) : 1
+        faceTime = t
+        let orbitPeriod = state == .working ? 3.6 : 7.5
+        orbit = t.truncatingRemainder(dividingBy: orbitPeriod) / orbitPeriod * 360 - 90
+        switch state {
+        case .idle:
+            lift = breath * 0.014
+            squash = 1 + breath * 0.012
+            gaze = sin(t * 0.48) * 0.35
+        case .thinking:
+            lift = breath * 0.018
+            tilt = -6 + sin(t * 1.3) * 3
+            gaze = 0.8
+        case .working:
+            lift = -abs(sin(t * 3.8)) * 0.045
+            squash = 1 + sin(t * 7.6) * 0.026
+            tilt = sin(t * 3.8) * 4
+            gaze = sin(t * 2.2) * 0.65
+        case .waiting:
+            tilt = 7 + sin(t * 1.4) * 2
+            lift = breath * 0.009
+        case .blocked:
+            tilt = sin(t * 2) * 2
+            gaze = -0.35
+        case .done:
+            let envelope = max(0, 1 - elapsed / 1.6)
+            lift = -abs(sin(elapsed * 7)) * 0.09 * envelope
+            squash = 1 + sin(elapsed * 14) * 0.04 * envelope
+            tilt = sin(elapsed * 7) * 7 * envelope
+        }
+    }
+}
+
+private struct AgentExpressiveFace: View {
+    let state: AgentAvatarState
+    let blink: Double
+    let gaze: Double
+    let time: Double
+
+    var body: some View {
+        GeometryReader { geometry in
+            let w = geometry.size.width
+            let h = geometry.size.height
+            ZStack {
+                HStack(spacing: w * 0.14) {
+                    eye(width: w * 0.34, height: h * 0.59, right: false)
+                    eye(width: w * 0.34, height: h * 0.59, right: true)
+                }
+                .offset(y: -h * 0.16)
+                mouth(width: w, height: h)
+                    .stroke(style: StrokeStyle(lineWidth: max(1.3, w * 0.06), lineCap: .round))
+            }
+            .frame(width: w, height: h)
+        }
+    }
+
+    private func eye(width: CGFloat, height: CGFloat, right: Bool) -> some View {
+        ZStack {
+            if state == .done {
+                Path { p in
+                    p.move(to: CGPoint(x: width * 0.12, y: height * 0.6))
+                    p.addQuadCurve(to: CGPoint(x: width * 0.88, y: height * 0.6),
+                                   control: CGPoint(x: width * 0.5, y: height * 0.06))
+                }.stroke(style: StrokeStyle(lineWidth: max(1.8, width * 0.2), lineCap: .round))
+            } else {
+                Capsule().fill(Color(hex: 0xFFFDF5))
+                Capsule().frame(width: width * 0.43, height: height * (state == .working ? 0.61 : 0.54))
+                    .offset(x: width * gaze * 0.18, y: state == .thinking ? -height * 0.12 : height * 0.04)
+                if state == .blocked {
+                    Rectangle().frame(height: height * 0.23)
+                        .rotationEffect(.degrees(right ? -15 : 15))
+                        .offset(y: -height * 0.45)
+                }
+            }
+        }
+        .frame(width: width, height: height)
+        .scaleEffect(x: 1, y: blink)
+        .rotationEffect(.degrees(state == .waiting && right ? -9 : 0))
+    }
+
+    private func mouth(width: CGFloat, height: CGFloat) -> Path {
+        Path { p in
+            let y = height * 0.81
+            if state == .thinking {
+                p.move(to: CGPoint(x: width * 0.46, y: y))
+                p.addLine(to: CGPoint(x: width * 0.60, y: y - height * 0.025))
+            } else if state == .working {
+                p.addEllipse(in: CGRect(x: width * 0.44, y: y - height * 0.06,
+                                        width: width * 0.12, height: height * (0.10 + abs(sin(time * 3)) * 0.07)))
+            } else {
+                let curve = state == .blocked ? -0.13 : state == .waiting ? 0.025 : 0.17
+                p.move(to: CGPoint(x: width * 0.35, y: y))
+                p.addQuadCurve(to: CGPoint(x: width * 0.65, y: y),
+                               control: CGPoint(x: width * 0.5, y: y + height * curve))
+            }
+        }
     }
 }
 
@@ -127,7 +361,7 @@ enum AgentAvatarIdentity {
                 accent: Color(hex: 0xFF9BB8)
             ),
         ]
-        return palettes[Int(seed % UInt64(palettes.count))]
+        return palettes[Int((seed / 6) % UInt64(palettes.count))]
     }
 }
 
@@ -214,37 +448,6 @@ private struct AgentCharacterShape: Shape {
     }
 }
 
-private struct AgentCharacterFace: Shape {
-    let seed: UInt64
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let eyeY = rect.minY + rect.height * 0.36
-        let eyeSpread = rect.width * 0.2
-        let eyeRadius = max(1.6, rect.width * 0.07)
-        path.addEllipse(in: CGRect(
-            x: rect.midX - eyeSpread - eyeRadius,
-            y: eyeY - eyeRadius,
-            width: eyeRadius * 2,
-            height: eyeRadius * 2
-        ))
-        path.addEllipse(in: CGRect(
-            x: rect.midX + eyeSpread - eyeRadius,
-            y: eyeY - eyeRadius,
-            width: eyeRadius * 2,
-            height: eyeRadius * 2
-        ))
-        let smileY = rect.minY + rect.height * 0.62
-        let smileWidth = rect.width * (seed.isMultiple(of: 2) ? 0.3 : 0.24)
-        path.move(to: CGPoint(x: rect.midX - smileWidth, y: smileY))
-        path.addQuadCurve(
-            to: CGPoint(x: rect.midX + smileWidth, y: smileY),
-            control: CGPoint(x: rect.midX, y: smileY + rect.height * 0.16)
-        )
-        return path
-    }
-}
-
 private struct AgentCharacterAccessory: Shape {
     let kind: AgentCharacterAccessoryKind
 
@@ -280,7 +483,7 @@ private struct AgentCharacterAccessory: Shape {
             let dotRadius = max(2, rect.width * 0.055)
             path.addEllipse(in: CGRect(
                 x: rect.midX + rect.width * 0.18,
-                y: rect.minY + rect.height * 0.52,
+                y: rect.minY + rect.height * 0.62,
                 width: dotRadius * 2,
                 height: dotRadius * 2
             ))
@@ -331,3 +534,96 @@ extension Color {
         )
     }
 }
+
+#if DEBUG
+/// Run with --avatar-gallery, or open the Xcode preview, to inspect the actual component.
+struct AgentAvatarGallery: View {
+    @State private var selectedState: AgentAvatarState = .thinking
+    @State private var reducedMotion = false
+    private let profiles = ["default", "research", "ops", "studio", "scout", "atlas"]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 28) {
+                HStack {
+                    Label("CONDUIT / CHARACTERS", systemImage: "sparkle")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .tracking(1.8).foregroundStyle(.secondary)
+                    Spacer()
+                    Circle().fill(Color(hex: 0x36A383)).frame(width: 7, height: 7)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("A little more alive.")
+                        .font(.system(size: 32, weight: .bold, design: .rounded))
+                    Text("Familiar faces. A language of motion.")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+                VStack(spacing: 16) {
+                    AgentAvatar(profileID: "research", displayName: "Research", photoURL: nil,
+                                size: 148, state: selectedState, animates: !reducedMotion)
+                    VStack(spacing: 4) {
+                        Text("Research").font(.title3.weight(.semibold))
+                        Text(stateDescription).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 8) {
+                        ForEach(AgentAvatarState.allCases, id: \.self) { state in
+                            Button { selectedState = state } label: {
+                                Text(state.label).font(.caption.weight(.semibold))
+                                    .frame(maxWidth: .infinity).padding(.vertical, 10)
+                                    .foregroundStyle(selectedState == state ? Color.white : Color.primary)
+                                    .background(selectedState == state ? state.tint : Color.primary.opacity(0.05), in: Capsule())
+                            }.buttonStyle(.plain)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity).padding(24)
+                .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 28))
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("SIX STATES. ONE IDENTITY.")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced)).tracking(1.4).foregroundStyle(.secondary)
+                    HStack(spacing: 0) {
+                        ForEach(AgentAvatarState.allCases, id: \.self) { state in
+                            VStack(spacing: 9) {
+                                AgentAvatar(profileID: "research", displayName: "Research", photoURL: nil, size: 43, state: state, animates: !reducedMotion)
+                                Text(state.label).font(.system(size: 9, weight: .medium))
+                            }.frame(maxWidth: .infinity)
+                        }
+                    }
+                }
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("A FAMILY OF INDIVIDUALS")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced)).tracking(1.4).foregroundStyle(.secondary)
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 22) {
+                        ForEach(profiles, id: \.self) { profile in
+                            VStack(spacing: 8) {
+                                AgentAvatar(profileID: profile, displayName: profile.capitalized, photoURL: nil,
+                                            size: 76, state: selectedState, animates: !reducedMotion)
+                                Text(profile.capitalized).font(.caption.weight(.medium))
+                            }
+                        }
+                    }
+                }
+                Toggle("Reduce motion", isOn: $reducedMotion).font(.subheadline)
+                Text("Native vector artwork · Stable profile identities · Motion follows activity")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }.padding(24)
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+    }
+
+    private var stateDescription: String {
+        switch selectedState {
+        case .idle: return "A quiet breath. Ready when you are."
+        case .thinking: return "Looking up. Connecting the dots."
+        case .working: return "In the rhythm. Making things happen."
+        case .waiting: return "An attentive tilt. Your move."
+        case .blocked: return "Needs a hand to keep going."
+        case .done: return "A happy bounce. All taken care of."
+        }
+    }
+}
+
+#Preview("Character studio") {
+    AgentAvatarGallery()
+}
+#endif

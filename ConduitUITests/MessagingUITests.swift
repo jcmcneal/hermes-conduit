@@ -25,15 +25,19 @@ final class MessagingUITests: XCTestCase {
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
         let inbox = XCTAttachment(screenshot: app.screenshot()); inbox.name = "Messaging inbox"; inbox.lifetime = .keepAlways; add(inbox)
         designer.tap()
+        // DM opens in the conversation host (Back to Inbox), not a fullScreenCover.
+        let back = app.buttons["Back to Inbox"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         let composer = app.textFields["messaging.composer"]
         let multiline = app.textViews["messaging.composer"]
         XCTAssertTrue(composer.waitForExistence(timeout: 5) || multiline.exists, app.debugDescription)
         let field = composer.exists ? composer : multiline
         field.tap(); field.typeText("Looks good")
         app.buttons["Send message"].tap()
-        XCTAssertTrue(app.textViews.matching(NSPredicate(format: "value == %@ OR label == %@", "Looks good", "Looks good")).firstMatch.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.textViews.matching(NSPredicate(format: "value == %@ OR label == %@", "Looks good", "Looks good")).firstMatch.waitForExistence(timeout: 5)
+            || app.staticTexts["Looks good"].waitForExistence(timeout: 2), app.debugDescription)
         let chat = XCTAttachment(screenshot: app.screenshot()); chat.name = "Persistent DM"; chat.lifetime = .keepAlways; add(chat)
-        app.buttons["Inbox"].tap()
+        back.tap()
         XCTAssertTrue(designer.waitForExistence(timeout: 5))
     }
 }
