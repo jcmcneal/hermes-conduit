@@ -11,6 +11,9 @@ struct AgentAvatar: View {
     var showsSelectionRing = false
     var state: AgentAvatarState = .idle
     var animates = true
+    var selection: AgentAvatarSelection?
+    var previewImage: UIImage?
+    @AppStorage(AgentAvatarSelectionStore.key) private var savedSelections = Data()
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
@@ -25,8 +28,10 @@ struct AgentAvatar: View {
 
     var body: some View {
         let seed = AgentAvatarIdentity.seed(for: profileID)
-        let palette = AgentAvatarIdentity.palette(for: seed)
-        let photo = photoURL.flatMap { AgentAvatarImageCache.shared.image(at: $0) }
+        let choice = selection ?? AgentAvatarSelectionStore.selections(from: savedSelections)[profileID]
+        let appearance = choice?.character ?? AgentAvatarAppearance.generated(for: profileID)
+        let palette = AgentAvatarIdentity.palette(for: appearance.color.paletteSeed)
+        let photo = choice?.usesPhoto == false ? nil : (previewImage ?? photoURL.flatMap { AgentAvatarImageCache.shared.image(at: $0) })
         TimelineView(.animation(minimumInterval: state == .idle ? 1.0 / 15 : 1.0 / 30,
                                 paused: !motionEnabled || (photo != nil && state == .idle))) { context in
             let time = motionEnabled ? context.date.timeIntervalSinceReferenceDate : 0
@@ -40,7 +45,7 @@ struct AgentAvatar: View {
                         .resizable().scaledToFill()
                         .frame(width: size, height: size).clipped()
                 } else {
-                    character(seed: seed, palette: palette, pose: pose)
+                    character(appearance: appearance, palette: palette, pose: pose)
                 }
                 if state != .idle {
                     Circle().trim(from: 0.03, to: state == .thinking || state == .working ? 0.76 : 0.97)
@@ -82,7 +87,7 @@ struct AgentAvatar: View {
         .accessibilityValue(state.label)
     }
 
-    private func character(seed: UInt64, palette: AgentAvatarIdentity.Palette, pose: AgentAvatarPose) -> some View {
+    private func character(appearance: AgentAvatarAppearance, palette: AgentAvatarIdentity.Palette, pose: AgentAvatarPose) -> some View {
         ZStack {
             Ellipse().fill(palette.face.opacity(0.13))
                 .frame(width: size * 0.52, height: size * 0.075)
@@ -90,11 +95,11 @@ struct AgentAvatar: View {
                 .offset(y: size * 0.34)
                 .scaleEffect(x: 1 - abs(pose.lift) * 2, y: 1)
             ZStack {
-                AgentCharacterShape(kind: AgentAvatarIdentity.shape(for: seed))
+                AgentCharacterShape(kind: appearance.shape)
                     .fill(LinearGradient(colors: [palette.accent, palette.fill, palette.fill],
                                          startPoint: .topLeading, endPoint: .bottomTrailing))
                     .overlay {
-                        AgentCharacterShape(kind: AgentAvatarIdentity.shape(for: seed))
+                        AgentCharacterShape(kind: appearance.shape)
                             .stroke(Color.white.opacity(0.28), lineWidth: size * 0.012)
                     }
                     .shadow(color: palette.fill.opacity(0.28), radius: size * 0.045, x: 0, y: size * 0.04)
@@ -104,8 +109,8 @@ struct AgentAvatar: View {
                     .frame(width: size * 0.15, height: size * 0.035)
                     .rotationEffect(.degrees(-28))
                     .offset(x: -size * 0.17, y: -size * 0.23)
-                AgentCharacterAccessory(kind: AgentAvatarIdentity.accessory(for: seed))
-                    .fill(AgentAvatarIdentity.accessory(for: seed) == .cheekDot
+                AgentCharacterAccessory(kind: appearance.accessory)
+                    .fill(appearance.accessory == .cheekDot
                           ? palette.accent.opacity(0.9) : palette.face.opacity(0.88))
                     .frame(width: size * 0.77, height: size * 0.77)
                 AgentExpressiveFace(state: state, blink: pose.blink, gaze: pose.gaze, time: pose.faceTime)
@@ -365,7 +370,7 @@ enum AgentAvatarIdentity {
     }
 }
 
-enum AgentCharacterKind: CaseIterable {
+enum AgentCharacterKind: String, CaseIterable, Codable {
     case roundBlob
     case tallOval
     case softSquare
@@ -374,7 +379,7 @@ enum AgentCharacterKind: CaseIterable {
     case petal
 }
 
-enum AgentCharacterAccessoryKind: CaseIterable {
+enum AgentCharacterAccessoryKind: String, CaseIterable, Codable {
     case none
     case ear
     case hat

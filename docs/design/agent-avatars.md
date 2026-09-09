@@ -24,3 +24,11 @@ Animation is local to each avatar's TimelineView, capped at 15 fps at rest and 3
 Open the `Character studio` preview in `Conduit/Views/Components/AgentAvatar.swift`, or run a Debug build with the launch argument `--avatar-gallery`. The gallery renders the actual production component, with six state controls, a size comparison, a character family, and a Reduce Motion toggle. It is excluded from Release builds.
 
 The component accepts `state:` and `animates:` without requiring AppState. Live application surfaces use `appState.avatarState(for:)`; settled chat marks pass `animates: false`.
+
+## Choose a profile avatar
+
+In Profiles, tap the palette badge on a profile avatar to open **Choose avatar**. The production sheet provides a live preview, six character shapes, six colors, four accessories, and the existing photo library/crop picker. Animation previews are optional; runtime activity still controls the avatar outside this sheet.
+
+Save persists the draft for that profile on this device. Cancel or swiping the sheet away discards it. Reset to default restores the generated character when saved. Switching to Character hides a saved photo without deleting it; Photo can reuse it later. A newly selected photo is not written until Save.
+
+Choices live under `conduit.profileAvatarSelections.v1`, observed by each avatar so changes update even settled transcript rows. Profiles without a saved choice retain their generated appearance or existing photo. Unknown entries are ignored individually and retained when another profile is edited. Photo replacement invalidates the decoded image cache and records a revision so views refresh even when the file URL stays the same.

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Primary inbox destination: character shelf on Chats; sessions live in a sheet.
+/// Primary bots view: messaging home by default; Sessions shelf via toggle.
 struct InboxView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var shell: AppShellState
@@ -16,6 +16,7 @@ struct InboxView: View {
     var onOpenMessaging: (MessagingDestination) -> Void = { _ in }
 
     @AppStorage("conduit.sidebarTab") private var selectedTabRaw = SidebarTab.sessions.rawValue
+    @AppStorage("conduit.chatsHomePane") private var chatsHomePaneRaw = ChatsHomePane.bots.rawValue
     @Environment(\.scenePhase) private var messagingScenePhase
     @State private var showMessagingSetup = false
     @State private var messagingAction: String?
@@ -33,12 +34,23 @@ struct InboxView: View {
         nonmutating set { selectedTabRaw = newValue.rawValue }
     }
 
+    private var chatsHomePane: ChatsHomePane {
+        get { ChatsHomePane.migrated(rawValue: chatsHomePaneRaw) }
+        nonmutating set { chatsHomePaneRaw = newValue.rawValue }
+    }
+
     private var messagingSetupAgentEnabled: Bool {
         appState.isConnected
             && !appState.isConnecting
             && !appState.isProfileSwitching
             && appState.turnState != .synchronizing
             && !shell.isCreatingConversation
+    }
+
+    private var showMessagingFeatureCard: Bool {
+        !messaging.cardDismissed
+            && messaging.availability != .checking
+            && !messaging.isReady
     }
 
     var body: some View {
@@ -52,23 +64,21 @@ struct InboxView: View {
                     .padding(.bottom, 10)
 
                 if selectedTab == .sessions {
-                    if messaging.showInbox {
+                    chatsHomePanePicker
+                        .padding(.horizontal, horizontalInset)
+                        .padding(.bottom, 10)
+
+                    if chatsHomePane == .bots {
                         MessagingInboxView(
                             store: messaging,
                             requestedAction: $messagingAction,
-                            openSession: onOpenConversation,
-                            openProfileSessions: handleProfileSelection,
-                            openMessaging: onOpenMessaging
+                            openMessaging: onOpenMessaging,
+                            showFeatureCard: showMessagingFeatureCard,
+                            onOpenFeatureCard: { showMessagingSetup = true }
                         )
                     } else {
-                        VStack(spacing: 16) {
-                            ProfileShelf(pinnedSize: profileRailSize) { profile in
-                                handleProfileSelection(profile)
-                            }
-                            if !messaging.cardDismissed && messaging.availability != .checking {
-                                MessagingFeatureCard(open: { showMessagingSetup = true }, dismiss: messaging.dismissCard)
-                                    .padding(.bottom, 12)
-                            }
+                        ProfileShelf(pinnedSize: profileRailSize) { profile in
+                            handleProfileSelection(profile)
                         }
                         .padding(.horizontal, horizontalInset - 4)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -204,6 +214,7 @@ struct InboxView: View {
         }
         .onAppear {
             selectedTabRaw = SidebarTab.migrated(rawValue: selectedTabRaw).rawValue
+            chatsHomePaneRaw = ChatsHomePane.migrated(rawValue: chatsHomePaneRaw).rawValue
             if let profile = shell.consumePendingSessionsProfile() {
                 handleProfileSelection(profile)
             }
@@ -212,6 +223,19 @@ struct InboxView: View {
             guard profile != nil, let consumed = shell.consumePendingSessionsProfile() else { return }
             handleProfileSelection(consumed)
         }
+    }
+
+    private var chatsHomePanePicker: some View {
+        Picker("Home", selection: Binding(
+            get: { chatsHomePane },
+            set: { chatsHomePane = $0 }
+        )) {
+            ForEach(ChatsHomePane.allCases) { pane in
+                Text(pane.title).tag(pane)
+            }
+        }
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("chats.home.pane")
     }
 
     private var toolbar: some View {
@@ -236,7 +260,7 @@ struct InboxView: View {
             Spacer(minLength: 0)
 
             if selectedTab == .sessions {
-                if messaging.showInbox {
+                if chatsHomePane == .bots {
                     Menu {
                         Button("Message a bot") { messagingAction = "message" }
                             .disabled(!messaging.isReady)
@@ -252,32 +276,32 @@ struct InboxView: View {
                             .frame(width: 44, height: 44).conduitPrimaryActionControl(cornerRadius: 22)
                     }.accessibilityLabel("New conversation")
                 } else {
-                Button {
-                    Haptics.selection()
-                    presentSessionsSheet(searching: true)
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(Color.conduitPrimaryText)
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search conversations")
+                    Button {
+                        Haptics.selection()
+                        presentSessionsSheet(searching: true)
+                    } label: {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundStyle(Color.conduitPrimaryText)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Search conversations")
 
-                Button {
-                    guard !shell.isCreatingConversation else { return }
-                    Haptics.medium()
-                    shell.isCreatingConversation = true
-                    onCreateConversation()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 18, weight: .bold))
-                        .frame(width: 44, height: 44)
-                        .conduitPrimaryActionControl(cornerRadius: 22)
-                }
-                .buttonStyle(.plain)
-                .disabled(appState.turnState == .synchronizing || shell.isCreatingConversation)
-                .accessibilityLabel("New conversation")
+                    Button {
+                        guard !shell.isCreatingConversation else { return }
+                        Haptics.medium()
+                        shell.isCreatingConversation = true
+                        onCreateConversation()
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 18, weight: .bold))
+                            .frame(width: 44, height: 44)
+                            .conduitPrimaryActionControl(cornerRadius: 22)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(appState.turnState == .synchronizing || shell.isCreatingConversation)
+                    .accessibilityLabel("New conversation")
                 }
             } else if selectedTab == .kanban {
                 EmptyView()
@@ -394,6 +418,8 @@ struct InboxView: View {
     }
 
     private func handleProfileSelection(_ profile: String) {
+        // Opening Sessions from messaging Browse / profile handoff should land on the shelf pane.
+        chatsHomePane = .sessions
         if profile == appState.activeProfile {
             presentSessionsSheet(searching: false)
             return

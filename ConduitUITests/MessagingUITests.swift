@@ -1,13 +1,24 @@
 import XCTest
 
 final class MessagingUITests: XCTestCase {
-    func testMissingPluginOffersSetupAndPreservesTheSessionShelf() {
+    func testMissingPluginOffersSetupOnBotsAndPreservesSessionsShelf() {
         let app = XCUIApplication()
-        app.launchArguments += ["-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example", "-CONDUIT_UI_TEST_INBOX_FIXTURE", "multi-profile", "-CONDUIT_UI_TEST_MESSAGING", "-CONDUIT_UI_TEST_MESSAGING_MISSING", "-conduit.messaging.discovery.v1.ui-test-messaging", "NO"]
+        app.launchArguments += [
+            "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example",
+            "-CONDUIT_UI_TEST_INBOX_FIXTURE", "multi-profile",
+            "-CONDUIT_UI_TEST_MESSAGING",
+            "-CONDUIT_UI_TEST_MESSAGING_MISSING",
+            "-conduit.messaging.discovery.v1.ui-test-messaging", "NO",
+            "-conduit.chatsHomePane", "bots",
+        ]
         app.launch()
+
+        let homePane = app.segmentedControls["chats.home.pane"]
+        XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(homePane.buttons["Bots"].isSelected)
+
         let enable = app.buttons["messaging.enable"]
-        XCTAssertTrue(enable.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertFalse(app.segmentedControls.firstMatch.exists)
+        XCTAssertTrue(enable.waitForExistence(timeout: 5), "Enable card lives on the default Bots pane")
         enable.tap()
         XCTAssertTrue(app.staticTexts["A shared inbox for your bots"].waitForExistence(timeout: 5))
         let setup = XCTAttachment(screenshot: app.screenshot()); setup.name = "Optional messaging setup"; setup.lifetime = .keepAlways; add(setup)
@@ -15,18 +26,35 @@ final class MessagingUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Install on Hermes"].exists, "Do not offer an unsupported installer")
         app.buttons["Close"].tap()
         XCTAssertTrue(enable.waitForExistence(timeout: 5))
+
+        homePane.buttons["Sessions"].tap()
+        XCTAssertFalse(app.buttons["messaging.enable"].exists, "Sessions shelf has no messaging promo card")
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label CONTAINS[c] %@", "Search conversations")).firstMatch.waitForExistence(timeout: 3)
+                || app.buttons["Search conversations"].waitForExistence(timeout: 1),
+            "Sessions pane restores search + shelf chrome"
+        )
     }
 
     func testMessagingInboxOpensDMAndSendsWithoutSessionSheet() {
         let app = XCUIApplication()
-        app.launchArguments += ["-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example", "-CONDUIT_UI_TEST_INBOX_FIXTURE", "multi-profile", "-CONDUIT_UI_TEST_MESSAGING"]
+        app.launchArguments += [
+            "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example",
+            "-CONDUIT_UI_TEST_INBOX_FIXTURE", "multi-profile",
+            "-CONDUIT_UI_TEST_MESSAGING",
+            "-conduit.chatsHomePane", "bots",
+        ]
         app.launch()
+        let homePane = app.segmentedControls["chats.home.pane"]
+        XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
+        XCTAssertTrue(homePane.buttons["Bots"].isSelected)
+
         let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Designer")).firstMatch
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
         let inbox = XCTAttachment(screenshot: app.screenshot()); inbox.name = "Messaging inbox"; inbox.lifetime = .keepAlways; add(inbox)
         designer.tap()
-        // DM opens in the conversation host (Back to Inbox), not a fullScreenCover.
-        let back = app.buttons["Back to Inbox"]
+        // DM opens in the conversation host (Back to Bots), not a fullScreenCover.
+        let back = app.buttons["Back to Bots"]
         XCTAssertTrue(back.waitForExistence(timeout: 5), app.debugDescription)
         let composer = app.textFields["messaging.composer"]
         let multiline = app.textViews["messaging.composer"]

@@ -20,7 +20,6 @@ final class MessagingStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
     var isReady: Bool { availability == .ready && capability?.isReady == true }
-    var showInbox: Bool { isReady || !conversations.isEmpty }
     var profiles: [MessagingProfile] { capability?.profiles ?? [] }
 
     func connect(requester: (any DashboardJSONRequester)?, scope: String) {

@@ -211,7 +211,7 @@ struct MessagingConversationView: View {
     @ToolbarContentBuilder
     private var standaloneToolbar: some ToolbarContent {
         ToolbarItem(placement: .cancellationAction) {
-            Button("Inbox") { close() }
+            Button("Bots") { close() }
         }
         ToolbarItem(placement: .primaryAction) {
             messagingActionsMenu

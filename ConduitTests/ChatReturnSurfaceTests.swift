@@ -495,8 +495,8 @@ final class ChatReturnSurfaceTests: XCTestCase {
         XCTAssertEqual(harness.appState.chatReturnSurface, .sessions)
     }
 
-    func testSessionsDisplayTitleIsInbox() {
-        XCTAssertEqual(ChatReturnSurface.sessions.title, "Inbox")
+    func testSessionsDisplayTitleIsBots() {
+        XCTAssertEqual(ChatReturnSurface.sessions.title, "Bots")
         XCTAssertEqual(ChatReturnSurface.conversation.title, "Conversation")
     }
 

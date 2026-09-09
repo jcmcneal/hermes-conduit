@@ -77,6 +77,13 @@ final class AgentAvatarIdentityTests: XCTestCase {
         XCTAssertEqual(SidebarTab.kanban.title, "Boards")
     }
 
+    func testChatsHomePaneTitlesPreserveRawValues() {
+        XCTAssertEqual(ChatsHomePane.bots.rawValue, "bots")
+        XCTAssertEqual(ChatsHomePane.sessions.rawValue, "sessions")
+        XCTAssertEqual(ChatsHomePane.bots.title, "Bots")
+        XCTAssertEqual(ChatsHomePane.sessions.title, "Sessions")
+    }
+
     func testAccessoryIsStableForSeed() {
         let research = AgentAvatarIdentity.seed(for: "research")
         let ops = AgentAvatarIdentity.seed(for: "ops")

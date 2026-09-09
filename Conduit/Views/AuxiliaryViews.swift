@@ -999,11 +999,11 @@ private struct ChatReturnBehaviorSettings: View {
                 .pickerStyle(.segmented)
                 .accessibilityHint(
                     surface == .sessions
-                        ? "Conduit opens to the inbox. Used if you leave it without choosing another conversation."
+                        ? "Conduit opens to the bots view. Used if you leave it without choosing another conversation."
                         : "Conduit opens to your conversation."
                 )
                 if surface == .sessions {
-                    Text("Used if you leave the inbox without choosing another conversation.")
+                    Text("Used if you leave the bots view without choosing another conversation.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }

@@ -2358,7 +2358,9 @@ final class AppState: ObservableObject {
     }
 
     func saveProfileAvatar(_ data: Data, for profile: String) throws {
-        profileAvatarURLs[profile] = try ProfileAppearanceStore.saveAvatar(data, for: profile)
+        let url = try ProfileAppearanceStore.saveAvatar(data, for: profile)
+        AgentAvatarImageCache.shared.invalidate(url: url)
+        profileAvatarURLs[profile] = url
     }
 
     func removeProfileAvatar(for profile: String) {

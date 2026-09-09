@@ -275,14 +275,14 @@ struct MainView: View {
                         HStack(spacing: 4) {
                             Image(systemName: "chevron.left")
                                 .font(.system(size: 15, weight: .semibold))
-                            Text("Inbox")
+                            Text("Bots")
                                 .font(.body.weight(.medium))
                         }
                         .foregroundStyle(Color.conduitPrimaryText)
                         .frame(minWidth: 44, minHeight: 44)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("Back to Inbox")
+                    .accessibilityLabel("Back to Bots")
                 } else if !isShowingMessaging {
                     AgentAvatar(
                         profileID: appState.activeProfile,

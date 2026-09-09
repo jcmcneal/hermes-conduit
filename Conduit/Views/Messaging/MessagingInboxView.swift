@@ -4,10 +4,9 @@ struct MessagingInboxView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var store: MessagingStore
     @Binding var requestedAction: String?
-    let openSession: (String) -> Void
-    let openProfileSessions: (String) -> Void
     let openMessaging: (MessagingDestination) -> Void
-    @State private var filter = "All"
+    var showFeatureCard: Bool = false
+    var onOpenFeatureCard: () -> Void = {}
     @State private var search = ""
     @State private var newGroup = false
     @State private var showArchived = false
@@ -30,9 +29,10 @@ struct MessagingInboxView: View {
                     }
                 }.padding(.horizontal, 16)
             }
-            Picker("Inbox filter", selection: $filter) {
-                ForEach(["All", "Messages", "Sessions"], id: \.self) { Text($0) }
-            }.pickerStyle(.segmented).padding(.horizontal, 16)
+            if showFeatureCard {
+                MessagingFeatureCard(open: onOpenFeatureCard, dismiss: store.dismissCard)
+                    .padding(.horizontal, 16)
+            }
             HStack {
                 TextField("Search names and previews", text: $search).textFieldStyle(.roundedBorder)
                 Menu {
@@ -43,41 +43,28 @@ struct MessagingInboxView: View {
             if !store.isReady { Text(store.availability.explanation).font(.footnote).padding(.horizontal) }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
-                    if filter != "Sessions" {
-                        Text("Messages").font(.headline).padding(.vertical, 6)
-                        ForEach(visibleMessages) { conversation in
-                            Button {
-                                openMessaging(
-                                    conversation.kind == "dm"
-                                        ? MessagingDestination(conversationID: nil, profileID: conversation.profiles.first)
-                                        : MessagingDestination(conversationID: conversation.id, profileID: nil)
-                                )
-                            } label: { messageRow(conversation) }.buttonStyle(.plain)
-                        }
-                        if visibleMessages.isEmpty {
-                            Text("Tap a bot to start a DM, or create a group.").font(.subheadline).foregroundStyle(.secondary).padding(.vertical)
-                        }
+                    Text("Messages").font(.headline).padding(.vertical, 6)
+                    ForEach(visibleMessages) { conversation in
+                        Button {
+                            openMessaging(
+                                conversation.kind == "dm"
+                                    ? MessagingDestination(conversationID: nil, profileID: conversation.profiles.first)
+                                    : MessagingDestination(conversationID: conversation.id, profileID: nil)
+                            )
+                        } label: { messageRow(conversation) }.buttonStyle(.plain)
                     }
-                    if filter != "Messages" {
-                        HStack {
-                            Text("Sessions: \(appState.profileDisplayName(appState.activeProfile))").font(.headline)
-                            Spacer()
-                            Button("Browse") { openProfileSessions(appState.activeProfile) }.font(.subheadline)
-                        }.padding(.top, 14)
-                        ForEach(appState.sessions.filter { !$0.isArchived && ($0.profile ?? appState.activeProfile) == appState.activeProfile && matches($0.title) }) { session in
-                            Button { openSession(session.id) } label: {
-                                ConversationRow(session: session, secondaryLine: "Session · " + appState.profileDisplayName(appState.activeProfile), isPinned: appState.isSessionPinned(session), isSelected: false)
-                            }.buttonStyle(.plain)
-                        }
+                    if visibleMessages.isEmpty {
+                        Text("Tap a bot to start a DM, or create a group.").font(.subheadline).foregroundStyle(.secondary).padding(.vertical)
                     }
                 }.padding(.horizontal, 20)
             }.refreshable { await store.refresh() }
         }
         .onAppear {
-            let saved = UserDefaults.standard.string(forKey: filterKey) ?? "All"
-            filter = ["All", "Messages", "Sessions"].contains(saved) ? saved : "All"
+            // Legacy All/Messages/Sessions filter is retired — Hermes sessions live on the Sessions pane.
+            if let scope = store.capability?.scope {
+                UserDefaults.standard.removeObject(forKey: "conduit.messaging.filter." + scope)
+            }
         }
-        .onChange(of: filter) { _, value in UserDefaults.standard.set(value, forKey: filterKey) }
         .onChange(of: requestedAction) { _, action in
             if action == "message" { chooseBot = true }
             if action == "group" { newGroup = true }
@@ -109,7 +96,6 @@ struct MessagingInboxView: View {
             }
         }
     }
-    private var filterKey: String { "conduit.messaging.filter." + (store.capability?.scope ?? "") }
     private func matches(_ text: String) -> Bool { search.isEmpty || text.localizedCaseInsensitiveContains(search) }
     private var visibleMessages: [MessagingConversation] {
         store.conversations.filter { ($0.archived == showArchived) && (matches($0.title) || matches($0.preview)) }

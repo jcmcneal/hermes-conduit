@@ -34,3 +34,26 @@ enum SidebarTab: String, CaseIterable, Identifiable {
         return value
     }
 }
+
+/// Persisted Chats-tab home pane. Bots is the default messaging inbox;
+/// Sessions is the original profile shelf. Raw values match AppStorage.
+enum ChatsHomePane: String, CaseIterable, Identifiable {
+    case bots = "bots"
+    case sessions = "sessions"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .bots: return "Bots"
+        case .sessions: return "Sessions"
+        }
+    }
+
+    static func migrated(rawValue: String?) -> ChatsHomePane {
+        guard let rawValue, let value = ChatsHomePane(rawValue: rawValue) else {
+            return .bots
+        }
+        return value
+    }
+}
