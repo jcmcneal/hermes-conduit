@@ -73,10 +73,11 @@ struct MessagingMessage: Codable, Identifiable, Equatable {
     enum CodingKeys: String, CodingKey { case id, sequence, author, body; case createdAt = "created_at" }
 }
 
-/// Display-only rewrite of `@<profile-id>` tokens. Stored/API bodies keep raw ids for routing.
+/// Display-only rewrite of `@<profile-id>` / `@{<profile-id>}` tokens.
+/// Stored/API bodies keep raw ids for routing.
 enum MessagingMentionDisplay {
     private static let mentionPattern = try! NSRegularExpression(
-        pattern: #"@([A-Za-z0-9_.-]+)"#
+        pattern: #"@\{([A-Za-z0-9_.-]+)\}|@([A-Za-z0-9_.-]+)"#
     )
 
     static func rewriteBody(_ body: String, profiles: [MessagingProfile]) -> String {
@@ -92,11 +93,19 @@ enum MessagingMentionDisplay {
         var cursor = 0
         for match in matches {
             let full = match.range
-            let tokenRange = match.range(at: 1)
             if full.location > cursor {
                 result += nsBody.substring(with: NSRange(location: cursor, length: full.location - cursor))
             }
-            let token = nsBody.substring(with: tokenRange)
+            let token: String
+            if match.range(at: 1).location != NSNotFound {
+                token = nsBody.substring(with: match.range(at: 1))
+            } else if match.range(at: 2).location != NSNotFound {
+                token = nsBody.substring(with: match.range(at: 2))
+            } else {
+                result += nsBody.substring(with: full)
+                cursor = full.location + full.length
+                continue
+            }
             if let display = byID[token.lowercased()] {
                 result += "@\(display)"
             } else {

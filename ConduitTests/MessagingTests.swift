@@ -351,6 +351,10 @@ final class MessagingTests: XCTestCase {
             MessagingMentionDisplay.rewriteBody("Ping @unknown-bot please", profiles: profiles),
             "Ping @unknown-bot please"
         )
+        XCTAssertEqual(
+            MessagingMentionDisplay.rewriteBody("Hand to @{swe-id} please", profiles: profiles),
+            "Hand to @SWE please"
+        )
     }
 }
 
