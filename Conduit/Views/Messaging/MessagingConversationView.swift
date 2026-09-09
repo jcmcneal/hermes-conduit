@@ -11,6 +11,7 @@ struct MessagingConversationView: View {
     @State private var recipients: Set<String> = []
     @State private var showMembers = false
     @State private var showRuns = false
+    @State private var confirmDeleteGroup = false
     @State private var viewportHeight: CGFloat = 0
     @State private var isAtBottom = true
     /// When true, the conversation host owns navigation chrome (Back / title).
@@ -75,6 +76,16 @@ struct MessagingConversationView: View {
                 }.navigationTitle("Runs")
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { showRuns = false } } }
             }
+        }
+        .alert("Delete this group?", isPresented: $confirmDeleteGroup) {
+            Button("Delete group", role: .destructive) {
+                Task {
+                    if await model.deleteGroup() { close() }
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Messages and session bindings for this group are removed. Hermes chat history is kept.")
         }
         .onChange(of: model.draft) { _, _ in model.saveDraft() }
         .onChange(of: owner.generation) { _, _ in close() }
@@ -241,6 +252,11 @@ struct MessagingConversationView: View {
                     Button(conversation.archived ? "Reopen" : "Archive (work continues)") {
                         Task { await model.updateUserState(["archived": !conversation.archived]) }
                     }
+                    if conversation.kind == "group" {
+                        Button("Delete group", role: .destructive) {
+                            confirmDeleteGroup = true
+                        }
+                    }
                 }
             } label: {
                 Image(systemName: "ellipsis")
@@ -278,7 +294,7 @@ struct MessagingConversationView: View {
                 } label: {
                     Label(
                         recipients.isEmpty
-                            ? "To: Default responder"
+                            ? "To: Auto"
                             : "To: " + recipients.sorted().map(profileName).joined(separator: ", "),
                         systemImage: "at"
                     )

@@ -22,6 +22,15 @@ final class MessagingStore: ObservableObject {
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
     var isReady: Bool { availability == .ready && capability?.isReady == true }
     var profiles: [MessagingProfile] { capability?.profiles ?? [] }
+    /// Active groups for the Bots list. DMs stay on the profile shelf.
+    var visibleGroupConversations: [MessagingConversation] {
+        conversations.filter { $0.kind == "group" && !$0.archived }
+            .sorted { lhs, rhs in
+                if lhs.pinned != rhs.pinned { return lhs.pinned }
+                if lhs.updatedAt != rhs.updatedAt { return lhs.updatedAt > rhs.updatedAt }
+                return lhs.id < rhs.id
+            }
+    }
 
     func connect(requester: (any DashboardJSONRequester)?, scope: String) {
         let identity = requester.map { ObjectIdentifier($0) }

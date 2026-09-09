@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Bots home: pin-able messaging profile shelf. Tap opens that bot's DM.
+/// Bots home: pin-able DM shelf plus existing groups.
 struct MessagingInboxView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject var store: MessagingStore
@@ -69,6 +69,8 @@ struct MessagingInboxView: View {
                             .foregroundStyle(.secondary)
                             .padding(.vertical)
                     }
+
+                    groupsSection
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 4)
@@ -168,6 +170,87 @@ struct MessagingInboxView: View {
     }
 
     @ViewBuilder
+    private var groupsSection: some View {
+        let groups = store.visibleGroupConversations
+        let canGroup = store.capability?.supportsGroups == true
+        if canGroup || !groups.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Groups")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.conduitSecondaryText)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+                    .accessibilityAddTraits(.isHeader)
+
+                if groups.isEmpty {
+                    Text("Create a group to chat with several bots at once.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 8)
+                } else {
+                    ForEach(groups) { conversation in
+                        groupRow(conversation)
+                    }
+                }
+            }
+        }
+    }
+
+    private func groupRow(_ conversation: MessagingConversation) -> some View {
+        Button {
+            openMessaging(MessagingDestination(conversationID: conversation.id, profileID: nil))
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "person.2.circle.fill")
+                    .font(.system(size: unpinnedSize - 4))
+                    .foregroundStyle(Color.conduitAccent)
+                    .frame(width: unpinnedSize, height: unpinnedSize)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(conversation.title)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(Color.conduitPrimaryText)
+                            .lineLimit(1)
+                        if conversation.pinned {
+                            Image(systemName: "pin.fill")
+                                .font(.caption2)
+                                .foregroundStyle(Color.conduitSecondaryText)
+                                .accessibilityHidden(true)
+                        }
+                        Spacer(minLength: 0)
+                        Text(
+                            Date(timeIntervalSince1970: conversation.updatedAt),
+                            format: .relative(presentation: .numeric, unitsStyle: .abbreviated)
+                        )
+                        .font(.caption)
+                        .foregroundStyle(Color.conduitSecondaryText)
+                    }
+                    Text(conversation.preview.isEmpty ? "Group conversation" : conversation.preview)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.conduitSecondaryText)
+                        .lineLimit(1)
+                }
+                if conversation.unread > 0 {
+                    Circle()
+                        .fill(Color.conduitAccent)
+                        .frame(width: 8, height: 8)
+                        .accessibilityLabel("Unread")
+                }
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.conduitSecondaryText)
+            }
+            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!store.isReady)
+        .accessibilityLabel(conversation.title)
+        .accessibilityHint("Opens this group conversation")
+    }
+
+    @ViewBuilder
     private func pinMenu(for profile: MessagingProfile) -> some View {
         Button {
             Haptics.light()
@@ -214,7 +297,7 @@ struct NewMessagingGroupSheet: View {
                     Text("Choose a bot").tag("")
                     ForEach(store.profiles.filter { members.contains($0.id) }) { Text($0.displayName).tag($0.id) }
                 }
-                Text("Every member can read this group's shared messages. Use the To: menu to address bots; otherwise the default responder answers.").font(.footnote)
+                Text("Every member can read this group's shared messages. Leave To: on Auto to let turn-taking choose who speaks; the default responder is only used if that call fails. Use the To: menu to address specific bots.").font(.footnote)
                 if let error { Text(error).foregroundStyle(.red) }
             }.disabled(saving)
                 .navigationTitle("New group")

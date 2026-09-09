@@ -12,6 +12,11 @@ final class MessagingUITestFixture: DashboardJSONRequester {
          "preview": "Here's the revised session picker.", "updated_at": Date().timeIntervalSince1970 - 120, "unread": 1,
          "archived": false, "pinned": false, "muted": false]
     }
+    private var group: [String: Any] {
+        ["id": "group-fixture", "kind": "group", "title": "Design crew", "profiles": ["designer-id", "swe-id"], "default_responder": "designer-id", "revision": 1,
+         "preview": "Let's ship the picker together.", "updated_at": Date().timeIntervalSince1970 - 60, "unread": 0,
+         "archived": false, "pinned": false, "muted": false]
+    }
     func requestJSON(path: String, method: String, body: [String: Any]?, timeoutMilliseconds: Int, maxResponseBytes: Int) async throws -> [String: Any] {
         let path = String(path.split(separator: "?", maxSplits: 1)[0])
         if path.hasSuffix("/hub"), ProcessInfo.processInfo.arguments.contains("-CONDUIT_UI_TEST_MESSAGING_MISSING") { return ["plugins": []] }
@@ -24,7 +29,8 @@ final class MessagingUITestFixture: DashboardJSONRequester {
                     "profiles": [["id": "designer-id", "name": "default", "displayName": "Designer"], ["id": "swe-id", "name": "research", "displayName": "SWE"]]]
         }
         if path.hasSuffix("/read-state") { return ["sequence": body?["sequence"] ?? 0] }
-        if path.hasSuffix("/conversations") { return ["conversations": [conversation]] }
+        if method == "POST" && path.hasSuffix("/conversations") { return group }
+        if path.hasSuffix("/conversations") { return ["conversations": [conversation, group]] }
         if method == "POST" && path.hasSuffix("/messages") {
             let message: [String: Any] = ["id": body?["client_message_id"] ?? UUID().uuidString, "author": "user", "body": body?["body"] ?? "", "sequence": sent.count + 3, "created_at": Date().timeIntervalSince1970]
             sent.append(message)

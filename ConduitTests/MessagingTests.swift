@@ -253,6 +253,88 @@ final class MessagingTests: XCTestCase {
         XCTAssertFalse(reloaded.isBotPinned("swe-id"))
         XCTAssertTrue(reloaded.pinnedBotIDs.isEmpty)
     }
+
+    func testVisibleGroupsSkipDMsAndArchivedAndSortPinnedFirst() async {
+        let requester = MessagingRequester { path, _, _ in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") {
+                return [
+                    "server_id": "server", "principal_id": "alice", "api_version": 1, "state": "ready",
+                    "features": ["dm", "groups"],
+                    "profiles": [
+                        ["id": "swe-id", "name": "swe", "displayName": "SWE"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                    ],
+                ]
+            }
+            return [
+                "conversations": [
+                    ["id": "dm-1", "kind": "dm", "title": "SWE", "profiles": ["swe-id"], "default_responder": "swe-id", "revision": 1, "preview": "hi", "updated_at": 90, "unread": 0, "archived": false, "pinned": false, "muted": false],
+                    ["id": "g-old", "kind": "group", "title": "Old crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "later", "updated_at": 40, "unread": 0, "archived": false, "pinned": false, "muted": false],
+                    ["id": "g-hot", "kind": "group", "title": "Hot crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "now", "updated_at": 80, "unread": 1, "archived": false, "pinned": false, "muted": false],
+                    ["id": "g-pin", "kind": "group", "title": "Pinned crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "pin", "updated_at": 10, "unread": 0, "archived": false, "pinned": true, "muted": false],
+                    ["id": "g-arch", "kind": "group", "title": "Archived crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "gone", "updated_at": 100, "unread": 0, "archived": true, "pinned": true, "muted": false],
+                ]
+            ]
+        }
+        let store = MessagingStore()
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+        XCTAssertEqual(store.visibleGroupConversations.map(\.id), ["g-pin", "g-hot", "g-old"])
+    }
+
+    func testDeleteGroupIssuesDeleteAndClearsHistory() async {
+        var deletedPath: String?
+        var methods: [String] = []
+        let requester = MessagingRequester { path, method, _ in
+            methods.append(method)
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") {
+                return [
+                    "server_id": "server", "principal_id": "alice", "api_version": 1, "state": "ready",
+                    "features": ["dm", "groups"],
+                    "profiles": [
+                        ["id": "swe-id", "name": "swe", "displayName": "SWE"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                    ],
+                ]
+            }
+            if path.hasSuffix("/conversations") { return ["conversations": []] }
+            if path.contains("/conversations/g-1") && method == "GET" {
+                return [
+                    "conversation": [
+                        "id": "g-1", "kind": "group", "title": "Room",
+                        "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id",
+                        "revision": 1, "preview": "hi", "updated_at": 1, "unread": 0,
+                        "archived": false, "pinned": false, "muted": false,
+                    ],
+                    "messages": [["id": "m1", "sequence": 1, "author": "user", "body": "hi", "created_at": 1]],
+                    "runs": [],
+                ]
+            }
+            if path.contains("/conversations/g-1") && method == "DELETE" {
+                deletedPath = path
+                return ["ok": true]
+            }
+            return [:]
+        }
+        let owner = MessagingStore()
+        owner.connect(requester: requester, scope: "server")
+        await owner.refresh()
+        let model = MessagingConversationStore(
+            destination: .init(conversationID: "g-1", profileID: nil),
+            owner: owner,
+            defaults: UserDefaults(suiteName: UUID().uuidString)!
+        )
+        await model.load()
+        XCTAssertEqual(model.history?.conversation.id, "g-1")
+        let ok = await model.deleteGroup()
+        XCTAssertTrue(ok)
+        XCTAssertNil(model.history)
+        XCTAssertNotNil(deletedPath)
+        XCTAssertTrue(deletedPath?.contains("/conversations/") == true)
+        XCTAssertTrue(methods.contains("DELETE"))
+    }
 }
 
 @MainActor

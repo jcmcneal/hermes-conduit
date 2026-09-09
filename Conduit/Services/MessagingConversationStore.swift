@@ -137,6 +137,22 @@ final class MessagingConversationStore: ObservableObject {
         guard canWrite else { throw MessagingError.staleContext }
         await load(); await owner.refreshConversations()
     }
+
+    func deleteGroup() async -> Bool {
+        guard canWrite, let service = owner.service, let conversation = history?.conversation, conversation.kind == "group" else { return false }
+        struct Receipt: Decodable { let ok: Bool }
+        do {
+            _ = try await service.request(Receipt.self, "/conversations/" + service.component(conversation.id), method: "DELETE")
+            guard canWrite else { return false }
+            history = nil
+            await owner.refreshConversations()
+            return true
+        } catch {
+            record(error)
+            return false
+        }
+    }
+
     private func record(_ failure: Error) {
         guard epoch == owner.generation else { return }
         if case DashboardTicketBridgeError.http(let status, _) = failure, status == 403 || status == 401 {
