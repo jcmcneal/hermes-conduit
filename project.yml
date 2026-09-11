@@ -31,7 +31,7 @@ targets:
         buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.hypecouch.conduit
+        PRODUCT_BUNDLE_IDENTIFIER: com.hypecouch.penelope
         PRODUCT_NAME: Conduit
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Conduit/Info.plist
