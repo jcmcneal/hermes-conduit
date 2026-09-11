@@ -196,7 +196,7 @@ struct LoginView: View {
                     }
 
                 VStack(spacing: 6) {
-                    Text("Conduit")
+                    Text("Penelope")
                         .font(.system(size: 38, weight: .bold, design: .rounded))
                     Text("A focused home for your Hermes work")
                         .font(.subheadline)

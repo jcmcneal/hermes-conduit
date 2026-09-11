@@ -3113,7 +3113,7 @@ final class AppState: ObservableObject {
 
         if credentials.requiresFaceID {
             guard BiometricAuth.isFaceIDAvailable,
-                  await BiometricAuth.authenticate(reason: "Unlock Conduit") else {
+                  await BiometricAuth.authenticate(reason: "Unlock Penelope") else {
                 showLogin = true
                 return
             }

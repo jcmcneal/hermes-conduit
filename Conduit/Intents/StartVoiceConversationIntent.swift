@@ -8,7 +8,7 @@ import Foundation
 
 @available(iOS 16.0, *)
 struct ConduitProfileEntity: AppEntity, Identifiable {
-    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Conduit profile")
+    static var typeDisplayRepresentation = TypeDisplayRepresentation(name: "Penelope profile")
     static var defaultQuery = ConduitProfileEntityQuery()
 
     let id: String
