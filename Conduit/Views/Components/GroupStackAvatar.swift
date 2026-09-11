@@ -22,17 +22,11 @@ struct GroupStackAvatar: View {
         ZStack(alignment: .bottomTrailing) {
             HStack(spacing: -overlap) {
                 ForEach(visibleMembers) { profile in
-                    AgentAvatar(
-                        profileID: profile.name,
-                        displayName: profile.displayName,
-                        photoURL: photoURL(profile),
-                        size: face,
-                        animates: animates
-                    )
-                    .overlay {
-                        Circle()
-                            .strokeBorder(Color.conduitCanvas, lineWidth: max(2, face * 0.055))
-                    }
+                    stackFace(profile, size: face)
+                        .overlay {
+                            Circle()
+                                .strokeBorder(Color.conduitCanvas, lineWidth: max(2, face * 0.055))
+                        }
                 }
             }
 
@@ -51,5 +45,20 @@ struct GroupStackAvatar: View {
         }
         .frame(width: size, height: size, alignment: .center)
         .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func stackFace(_ profile: MessagingProfile, size: CGFloat) -> some View {
+        if ConduitAvatarIdentity.usesBrandMark(displayName: profile.displayName, name: profile.name) {
+            BrandMarkAvatar(size: size)
+        } else {
+            AgentAvatar(
+                profileID: profile.name,
+                displayName: profile.displayName,
+                photoURL: photoURL(profile),
+                size: size,
+                animates: animates
+            )
+        }
     }
 }
