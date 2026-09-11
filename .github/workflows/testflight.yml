@@ -1,0 +1,218 @@
+name: TestFlight
+
+# Archive a Release IPA and upload it to App Store Connect / TestFlight.
+# Secrets required:
+#   APP_STORE_CONNECT_API_KEY   — AuthKey_*.p8 PEM body
+#   APP_STORE_CONNECT_KEY_ID    — key id (also accepted: APP_STORE_CONNECT_API_KEY_ID)
+#   APP_STORE_CONNECT_ISSUER_ID — issuer UUID
+
+on:
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: "Optional MARKETING_VERSION override (e.g. 1.0.1). Empty = project.yml."
+        required: false
+        default: ""
+      build_number:
+        description: "Optional CURRENT_PROJECT_VERSION override. Empty = project.yml."
+        required: false
+        default: ""
+  push:
+    tags:
+      - "ios/v*"
+
+concurrency:
+  group: testflight-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DERIVED_DATA_PATH: ${{ github.workspace }}/tf-derived-data
+  ARCHIVE_PATH: ${{ github.workspace }}/build/Penelope.xcarchive
+  EXPORT_PATH: ${{ github.workspace }}/build/export
+  DEVELOPMENT_TEAM: WWP5F4M4AR
+  PRODUCT_BUNDLE_IDENTIFIER: com.hypecouch.penelope
+
+jobs:
+  testflight:
+    name: Archive & upload
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Resolve API key id
+        id: key
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          KEY_ID="${APP_STORE_CONNECT_KEY_ID:-${APP_STORE_CONNECT_API_KEY_ID:-}}"
+          if [ -z "$KEY_ID" ]; then
+            echo "Missing APP_STORE_CONNECT_KEY_ID (or APP_STORE_CONNECT_API_KEY_ID)." >&2
+            exit 1
+          fi
+          echo "id=${KEY_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Install App Store Connect API key
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          KEY_ID: ${{ steps.key.outputs.id }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_STORE_CONNECT_API_KEY}" ]; then
+            echo "Missing APP_STORE_CONNECT_API_KEY secret." >&2
+            exit 1
+          fi
+          mkdir -p \
+            "${HOME}/.appstoreconnect/private_keys" \
+            "${HOME}/private_keys" \
+            "${RUNNER_TEMP}/private_keys"
+          # altool / xcodebuild look for AuthKey_<KEY_ID>.p8 under these paths.
+          printf '%s\n' "${APP_STORE_CONNECT_API_KEY}" \
+            > "${HOME}/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+          cp "${HOME}/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8" \
+            "${HOME}/private_keys/AuthKey_${KEY_ID}.p8"
+          cp "${HOME}/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8" \
+            "${RUNNER_TEMP}/private_keys/AuthKey_${KEY_ID}.p8"
+          chmod 600 "${HOME}/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8"
+          echo "API_KEY_PATH=${HOME}/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8" \
+            >> "${GITHUB_ENV}"
+
+      - name: Apply optional version overrides
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          MARKETING_VERSION: ${{ inputs.marketing_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import os, re
+          path = Path("project.yml")
+          text = path.read_text()
+          marketing = os.environ.get("MARKETING_VERSION", "").strip()
+          build = os.environ.get("BUILD_NUMBER", "").strip()
+          if marketing:
+              text, n = re.subn(
+                  r'(MARKETING_VERSION:\s*")[^"]*(")',
+                  rf"\g<1>{marketing}\2",
+                  text,
+                  count=1,
+              )
+              if n != 1:
+                  raise SystemExit("Failed to patch MARKETING_VERSION in project.yml")
+              print(f"MARKETING_VERSION -> {marketing}")
+          if build:
+              text, n = re.subn(
+                  r'(CURRENT_PROJECT_VERSION:\s*")[^"]*(")',
+                  rf"\g<1>{build}\2",
+                  text,
+                  count=1,
+              )
+              if n != 1:
+                  raise SystemExit("Failed to patch CURRENT_PROJECT_VERSION in project.yml")
+              print(f"CURRENT_PROJECT_VERSION -> {build}")
+          if marketing or build:
+              path.write_text(text)
+          else:
+              print("No version overrides; using project.yml as-is")
+          PY
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Show version being shipped
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          text = Path("project.yml").read_text()
+          marketing = re.search(r'MARKETING_VERSION:\s*"([^"]+)"', text).group(1)
+          build = re.search(r'CURRENT_PROJECT_VERSION:\s*"([^"]+)"', text).group(1)
+          print(f"Shipping Penelope {marketing} ({build}) — com.hypecouch.penelope")
+          PY
+
+      - name: Archive Release
+        env:
+          KEY_ID: ${{ steps.key.outputs.id }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$ARCHIVE_PATH")"
+          xcodebuild archive \
+            -project Conduit.xcodeproj \
+            -scheme Conduit \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$API_KEY_PATH" \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            CODE_SIGN_STYLE=Automatic \
+            PRODUCT_BUNDLE_IDENTIFIER="$PRODUCT_BUNDLE_IDENTIFIER"
+
+      - name: Export App Store IPA
+        env:
+          KEY_ID: ${{ steps.key.outputs.id }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$EXPORT_PATH"
+          EXPORT_OPTIONS="$RUNNER_TEMP/ExportOptions.plist"
+          python3 - "$EXPORT_OPTIONS" "$DEVELOPMENT_TEAM" <<'PY'
+          import plistlib, sys
+          from pathlib import Path
+          path, team = Path(sys.argv[1]), sys.argv[2]
+          path.write_bytes(plistlib.dumps({
+              "method": "app-store-connect",
+              "destination": "export",
+              "signingStyle": "automatic",
+              "teamID": team,
+              "uploadSymbols": True,
+              "manageAppVersionAndBuildNumber": False,
+          }))
+          PY
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist "$EXPORT_OPTIONS" \
+            -exportPath "$EXPORT_PATH" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$API_KEY_PATH" \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: penelope-testflight-ipa
+          path: build/export/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload to TestFlight
+        env:
+          KEY_ID: ${{ steps.key.outputs.id }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          IPA=$(ls -1 "$EXPORT_PATH"/*.ipa | head -n 1)
+          echo "Uploading ${IPA}"
+          xcrun altool --upload-app \
+            --type ios \
+            --file "$IPA" \
+            --apiKey "$KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER_ID"
