@@ -277,9 +277,12 @@ struct MainView: View {
                                 .font(.system(size: 15, weight: .semibold))
                             Text("Bots")
                                 .font(.body.weight(.medium))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundStyle(Color.conduitPrimaryText)
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minHeight: 44)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Back to Bots")
@@ -400,6 +403,7 @@ struct MainView: View {
                         .lineLimit(1)
                 }
             }
+            .frame(minWidth: 0, maxWidth: 220, alignment: .leading)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(subtitle.isEmpty ? messagingHostTitle : "\(messagingHostTitle), \(subtitle)")
