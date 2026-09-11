@@ -9,6 +9,15 @@ extension ShapeStyle where Self == Color {
     static var conduitSecondaryText: Color { .conduitSecondaryTextColor }
     static var conduitSeparator: Color { .conduitSeparatorColor }
     static var conduitPrimaryAction: Color { .conduitPrimaryActionColor }
+    static var conduitField: Color { .conduitFieldColor }
+
+    /// Figma Ink aliases of the same providers (bg / ink / muted / surface / field / line / accent / onAccent).
+    static var conduitBg: Color { .conduitCanvasColor }
+    static var conduitInk: Color { .conduitPrimaryTextColor }
+    static var conduitMuted: Color { .conduitSecondaryTextColor }
+    static var conduitLine: Color { .conduitSeparatorColor }
+    static var conduitAccentInk: Color { .conduitPrimaryActionColor }
+    static var conduitOnAccent: Color { .conduitPrimaryActionForegroundColor }
 }
 
 extension Color {
@@ -53,6 +62,20 @@ extension Color {
             ? UIColor(red: 0.094, green: 0.098, blue: 0.106, alpha: 1)
             : UIColor(red: 0.980, green: 0.980, blue: 0.973, alpha: 1)
     })
+
+    /// Composer / input field (Figma `field`: dark `#16181B`, light white).
+    static let conduitFieldColor = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.086, green: 0.094, blue: 0.106, alpha: 1) // #16181B
+            : UIColor(red: 1, green: 1, blue: 1, alpha: 1)
+    })
+
+    static var conduitBgColor: Color { conduitCanvasColor }
+    static var conduitInkColor: Color { conduitPrimaryTextColor }
+    static var conduitMutedColor: Color { conduitSecondaryTextColor }
+    static var conduitLineColor: Color { conduitSeparatorColor }
+    static var conduitAccentInkColor: Color { conduitPrimaryActionColor }
+    static var conduitOnAccentColor: Color { conduitPrimaryActionForegroundColor }
 }
 
 enum ConduitInboxMetrics {

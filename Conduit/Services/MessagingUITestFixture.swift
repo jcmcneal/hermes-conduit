@@ -8,7 +8,7 @@ final class MessagingUITestFixture: DashboardJSONRequester {
     static var requested: Bool { ProcessInfo.processInfo.arguments.contains("-CONDUIT_UI_TEST_MESSAGING") }
     private var sent: [[String: Any]] = []
     private var conversation: [String: Any] {
-        ["id": "dm-fixture", "kind": "dm", "title": "Designer", "profiles": ["designer-id"], "default_responder": "designer-id", "revision": 1,
+        ["id": "dm-fixture", "kind": "dm", "title": "Penelope Bot", "profiles": ["designer-id"], "default_responder": "designer-id", "revision": 1,
          "preview": "Here's the revised session picker.", "updated_at": Date().timeIntervalSince1970 - 120, "unread": 1,
          "archived": false, "pinned": false, "muted": false]
     }
@@ -26,7 +26,7 @@ final class MessagingUITestFixture: DashboardJSONRequester {
         }
         if path.hasSuffix("/capabilities") {
             return ["server_id": "fixture-server", "principal_id": "fixture-account", "api_version": 1, "state": "ready", "features": ["dm", "groups"],
-                    "profiles": [["id": "designer-id", "name": "default", "displayName": "Designer"], ["id": "swe-id", "name": "research", "displayName": "SWE"]]]
+                    "profiles": [["id": "designer-id", "name": "default", "displayName": "Penelope Bot"], ["id": "swe-id", "name": "research", "displayName": "SWE"]]]
         }
         if path.hasSuffix("/read-state") { return ["sequence": body?["sequence"] ?? 0] }
         if method == "POST" && path.hasSuffix("/conversations") { return group }
