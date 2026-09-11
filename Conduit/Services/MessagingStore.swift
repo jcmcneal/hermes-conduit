@@ -44,6 +44,56 @@ final class MessagingStore: ObservableObject {
         }
     }
 
+    func conversation(for destination: MessagingDestination) -> MessagingConversation? {
+        if let conversationID = destination.conversationID {
+            return conversations.first { $0.id == conversationID }
+        }
+        if let profileID = destination.profileID {
+            return dmConversation(for: profileID)
+        }
+        return nil
+    }
+
+    func dmConversation(for profileID: String) -> MessagingConversation? {
+        conversations.first {
+            $0.kind != "group" && !$0.archived && $0.profiles.contains(profileID)
+        }
+    }
+
+    func members(for conversation: MessagingConversation) -> [MessagingProfile] {
+        let byID = Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
+        return conversation.profiles.compactMap { byID[$0] }
+    }
+
+    func members(for item: MessagingShelfItem) -> [MessagingProfile] {
+        switch item {
+        case .bot(let profile):
+            return [profile]
+        case .group(let conversation):
+            return members(for: conversation)
+        }
+    }
+
+    func presentation(for item: MessagingShelfItem) -> MessagingShelfPresentation {
+        switch item {
+        case .bot(let profile):
+            let conversation = dmConversation(for: profile.id)
+            return MessagingShelfPresentation(
+                item: item,
+                preview: conversation?.preview ?? "",
+                time: RelativeTimestamp.format(conversation?.updatedAt),
+                members: [profile]
+            )
+        case .group(let conversation):
+            return MessagingShelfPresentation(
+                item: item,
+                preview: conversation.preview,
+                time: RelativeTimestamp.format(conversation.updatedAt),
+                members: members(for: conversation)
+            )
+        }
+    }
+
     /// Unpinned bots (capability order) then unpinned groups (newest first).
     var unpinnedShelfItems: [MessagingShelfItem] {
         let pinned = Set(pinnedBotIDs)

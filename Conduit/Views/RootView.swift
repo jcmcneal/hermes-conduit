@@ -277,9 +277,12 @@ struct MainView: View {
                                 .font(.system(size: 15, weight: .semibold))
                             Text("Bots")
                                 .font(.body.weight(.medium))
+                                .lineLimit(1)
+                                .fixedSize()
                         }
                         .foregroundStyle(Color.conduitPrimaryText)
-                        .frame(minWidth: 44, minHeight: 44)
+                        .frame(minHeight: 44)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Back to Bots")
@@ -295,16 +298,9 @@ struct MainView: View {
                 }
             }
             ToolbarItem(placement: .principal) {
-                if isShowingMessaging {
-                    Text(messagingHostTitle)
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(Color.conduitPrimaryText)
-                        .lineLimit(1)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .conduitRaisedSurface(cornerRadius: 16)
-                        .accessibilityLabel(messagingHostTitle)
-                } else {
+                if isShowingMessaging, let destination = shell.messagingDestination {
+                    messagingHostHeader(destination)
+                } else if !isShowingMessaging {
                     Button {
                         appState.requestChatScrollToTop()
                     } label: {
@@ -361,6 +357,56 @@ struct MainView: View {
                 ConnectionStatusIndicator()
             }
         }
+    }
+
+    @ViewBuilder
+    private func messagingHostHeader(_ destination: MessagingDestination) -> some View {
+        let conversation = messaging.conversation(for: destination)
+        let isGroup = conversation?.kind == "group"
+        let members: [MessagingProfile] = {
+            if let conversation {
+                return messaging.members(for: conversation)
+            }
+            if let profileID = destination.profileID,
+               let profile = messaging.profiles.first(where: { $0.id == profileID }) {
+                return [profile]
+            }
+            return []
+        }()
+        let subtitle = isGroup ? MessagingThreadChrome.memberSubtitle(members: members) : ""
+        HStack(spacing: 8) {
+            if isGroup {
+                ConduitAvatar.group(
+                    members,
+                    photoURL: { appState.profileAvatarURL(for: $0.name) },
+                    size: 48,
+                    animates: false
+                )
+            } else if let profile = members.first {
+                ConduitAvatar.bot(
+                    profile,
+                    photoURL: appState.profileAvatarURL(for: profile.name),
+                    state: appState.avatarState(for: profile.name),
+                    size: 32,
+                    animates: true
+                )
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(messagingHostTitle)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.conduitPrimaryText)
+                    .lineLimit(1)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color.conduitSecondaryText)
+                        .lineLimit(1)
+                }
+            }
+            .frame(minWidth: 0, maxWidth: 220, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(subtitle.isEmpty ? messagingHostTitle : "\(messagingHostTitle), \(subtitle)")
     }
 
     private var messagingHostTitle: String {

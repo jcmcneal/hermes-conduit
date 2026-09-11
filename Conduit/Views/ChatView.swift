@@ -2591,7 +2591,7 @@ struct EmptyChatState: View {
             VStack(spacing: 6) {
                 Text("Start a conversation")
                     .font(.title3.weight(.semibold))
-                Text("Conduit is ready when you are.")
+                Text("Penelope is ready when you are.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }

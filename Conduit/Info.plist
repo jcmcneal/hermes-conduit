@@ -48,6 +48,8 @@
 	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleDisplayName</key>
+	<string>Penelope</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
@@ -79,11 +81,11 @@
 		</dict>
 	</dict>
 	<key>NSFaceIDUsageDescription</key>
-	<string>Conduit uses Face ID to unlock saved Hermes credentials.</string>
+	<string>Penelope uses Face ID to unlock saved Hermes credentials.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Conduit uses the microphone for voice conversations and foreground wake phrases.</string>
+	<string>Penelope uses the microphone for voice conversations and foreground wake phrases.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Conduit uses on-device Apple speech recognition to turn your voice into text when you select On this iPhone.</string>
+	<string>Penelope uses on-device Apple speech recognition to turn your voice into text when you select On this iPhone.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

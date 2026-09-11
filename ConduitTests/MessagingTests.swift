@@ -226,7 +226,7 @@ final class MessagingTests: XCTestCase {
                     "features": ["dm", "groups"],
                     "profiles": [
                         ["id": "swe-id", "name": "swe", "displayName": "SWE"],
-                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Penelope Bot"],
                     ],
                 ]
             }
@@ -268,7 +268,7 @@ final class MessagingTests: XCTestCase {
                     "features": ["dm", "groups"],
                     "profiles": [
                         ["id": "swe-id", "name": "swe", "displayName": "SWE"],
-                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Penelope Bot"],
                     ],
                 ]
             }
@@ -318,7 +318,7 @@ final class MessagingTests: XCTestCase {
                     "features": ["dm", "groups"],
                     "profiles": [
                         ["id": "swe-id", "name": "swe", "displayName": "SWE"],
-                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Penelope Bot"],
                     ],
                 ]
             }
@@ -357,7 +357,7 @@ final class MessagingTests: XCTestCase {
                     "features": ["dm", "groups"],
                     "profiles": [
                         ["id": "swe-id", "name": "swe", "displayName": "SWE"],
-                        ["id": "designer-id", "name": "designer", "displayName": "Designer"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Penelope Bot"],
                     ],
                 ]
             }
@@ -401,14 +401,14 @@ final class MessagingTests: XCTestCase {
 
     func testMentionDisplayRewritesProfileIdsOnly() {
         let profiles = [
-            MessagingProfile(id: "designer-id", name: "designer", displayName: "Designer"),
+            MessagingProfile(id: "designer-id", name: "designer", displayName: "Penelope Bot"),
             MessagingProfile(id: "swe-id", name: "swe", displayName: "SWE"),
         ]
         let body = "Ask @designer-id and @Designer; also `@swe-id` stays code-like but still rewrites outside fences."
         let rewritten = MessagingMentionDisplay.rewriteBody(body, profiles: profiles)
         XCTAssertEqual(
             rewritten,
-            "Ask @Designer and @Designer; also `@SWE` stays code-like but still rewrites outside fences."
+            "Ask @Penelope Bot and @Designer; also `@SWE` stays code-like but still rewrites outside fences."
         )
         XCTAssertEqual(
             MessagingMentionDisplay.rewriteBody("Ping @unknown-bot please", profiles: profiles),
@@ -485,6 +485,78 @@ final class MessagingTests: XCTestCase {
         let ok = await model.send(recipients: [], text: "from composer")
         XCTAssertTrue(ok)
         XCTAssertEqual(bodies, ["from composer"])
+    }
+
+    func testGroupStackOverflowBadgeAndThreadSubtitle() {
+        XCTAssertNil(GroupStackOverflow.badge(memberCount: 0))
+        XCTAssertNil(GroupStackOverflow.badge(memberCount: 2))
+        XCTAssertEqual(GroupStackOverflow.badge(memberCount: 3), "+1")
+        XCTAssertEqual(GroupStackOverflow.badge(memberCount: 5), "+3")
+        XCTAssertNil(GroupStackOverflow.badge(memberCount: 5, visibleLimit: 5))
+
+        let members = [
+            MessagingProfile(id: "designer-id", name: "designer", displayName: "Penelope Bot"),
+            MessagingProfile(id: "swe-id", name: "swe", displayName: "SWE"),
+        ]
+        XCTAssertEqual(
+            MessagingThreadChrome.memberSubtitle(members: members),
+            "Penelope Bot · SWE · You"
+        )
+        XCTAssertEqual(
+            MessagingThreadChrome.memberSubtitle(members: members, includeYou: false),
+            "Penelope Bot · SWE"
+        )
+        XCTAssertTrue(ConduitAvatarIdentity.usesBrandMark(displayName: "Penelope Bot", name: "default"))
+        XCTAssertFalse(ConduitAvatarIdentity.usesBrandMark(displayName: "SWE", name: "research"))
+    }
+
+    func testShelfPresentationLooksUpBotDMPreview() async throws {
+        let requester = MessagingRequester { path, _, _ in
+            if path.hasSuffix("/hub") { return self.hub() }
+            if path.hasSuffix("/capabilities") {
+                return [
+                    "server_id": "server", "principal_id": "alice", "api_version": 1, "state": "ready",
+                    "features": ["dm", "groups"],
+                    "profiles": [
+                        ["id": "swe-id", "name": "swe", "displayName": "SWE"],
+                        ["id": "designer-id", "name": "designer", "displayName": "Penelope Bot"],
+                    ],
+                ]
+            }
+            return [
+                "conversations": [
+                    ["id": "dm-1", "kind": "dm", "title": "SWE", "profiles": ["swe-id"], "default_responder": "swe-id", "revision": 1, "preview": "Route references sent", "updated_at": 1_700_000_000, "unread": 0, "archived": false, "pinned": false, "muted": false],
+                    ["id": "g-hot", "kind": "group", "title": "Design crew", "profiles": ["swe-id", "designer-id"], "default_responder": "swe-id", "revision": 1, "preview": "Let's ship the picker together.", "updated_at": 80, "unread": 1, "archived": false, "pinned": false, "muted": false],
+                ]
+            ]
+        }
+        let store = MessagingStore()
+        store.connect(requester: requester, scope: "server")
+        await store.refresh()
+
+        let swe = store.presentation(for: .bot(MessagingProfile(id: "swe-id", name: "swe", displayName: "SWE")))
+        XCTAssertEqual(swe.preview, "Route references sent")
+        XCTAssertFalse(swe.time.isEmpty)
+        XCTAssertEqual(swe.members.map(\.id), ["swe-id"])
+
+        let penelope = store.presentation(for: .bot(MessagingProfile(id: "designer-id", name: "designer", displayName: "Penelope Bot")))
+        XCTAssertEqual(penelope.preview, "", "No DM conversation means no preview")
+        XCTAssertEqual(penelope.time, "")
+
+        let group = try XCTUnwrap(store.unarchivedGroups.first)
+        let presented = store.presentation(for: .group(group))
+        XCTAssertEqual(presented.preview, "Let's ship the picker together.")
+        XCTAssertEqual(presented.members.map(\.displayName), ["SWE", "Penelope Bot"])
+        XCTAssertEqual(
+            MessagingThreadChrome.memberSubtitle(members: presented.members),
+            "SWE · Penelope Bot · You"
+        )
+    }
+
+    func testRelativeTimestampEmptyInputs() {
+        XCTAssertEqual(RelativeTimestamp.format(nil), "")
+        XCTAssertEqual(RelativeTimestamp.format(0), "")
+        XCTAssertEqual(RelativeTimestamp.format(-1), "")
     }
 }
 

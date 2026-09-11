@@ -231,6 +231,46 @@ enum MessagingShelfItem: Identifiable, Equatable {
     }
 }
 
+struct MessagingShelfPresentation: Equatable {
+    let item: MessagingShelfItem
+    let preview: String
+    let time: String
+    let members: [MessagingProfile]
+}
+
+enum GroupStackOverflow {
+    static let visibleLimit = 2
+
+    static func badge(memberCount: Int, visibleLimit: Int = visibleLimit) -> String? {
+        let extra = memberCount - visibleLimit
+        return extra > 0 ? "+\(extra)" : nil
+    }
+}
+
+enum MessagingThreadChrome {
+    static func memberSubtitle(members: [MessagingProfile], includeYou: Bool = true) -> String {
+        var names = members.map(\.displayName)
+        if includeYou { names.append("You") }
+        return names.joined(separator: " · ")
+    }
+}
+
+enum RelativeTimestamp {
+    private static let formatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
+
+    static func format(_ epoch: Double?) -> String {
+        guard let epoch, epoch > 0 else { return "" }
+        let seconds = epoch > 10_000_000_000 ? epoch / 1_000 : epoch
+        let date = Date(timeIntervalSince1970: seconds)
+        guard date.timeIntervalSince1970 > 0 else { return "" }
+        return formatter.localizedString(for: date, relativeTo: Date())
+    }
+}
+
 struct PendingMessagingSend: Codable, Equatable {
     let id: String
     let text: String
