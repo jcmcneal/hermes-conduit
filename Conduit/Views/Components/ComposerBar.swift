@@ -16,7 +16,6 @@ struct ComposerBar: View {
     var showsModelPicker: Bool = true
     var messaging: MessagingComposerAdapter? = nil
     @EnvironmentObject var appState: AppState
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var text = ""
     @State private var composerTextHeight = ComposerPasteTextView.minimumHeight
@@ -239,9 +238,15 @@ struct ComposerBar: View {
         case .stop: return .red
         case .steer: return .conduitAura
         case .interrupt: return .orange
-        case .send: return .conduitAccent
+        case .send: return isMessaging ? .conduitPrimaryActionColor : .conduitAccent
         case .unavailable: return .secondary.opacity(0.48)
         }
+    }
+
+    private var actionForeground: Color {
+        if action == .unavailable { return Color.secondary.opacity(0.48) }
+        if isMessaging, action == .send { return .conduitPrimaryActionForegroundColor }
+        return .white
     }
 
     private var actionSurfaceTint: Color {
@@ -257,7 +262,7 @@ struct ComposerBar: View {
     }
 
     private var fieldFoundation: Color {
-        Color.conduitCanvas.opacity(colorScheme == .dark ? 0.55 : 0.85)
+        Color.conduitField
     }
 
     private var fieldStroke: Color {
@@ -564,7 +569,10 @@ struct ComposerBar: View {
                 .frame(width: 44, height: 44)
         }
         .disabled(!composerEnabled || (!isMessaging && appState.isBusy))
-        .conduitGlassControl(cornerRadius: 22, tint: .conduitAccent.opacity(0.08))
+        .conduitGlassControl(
+            cornerRadius: 22,
+            tint: isMessaging ? Color.conduitPrimaryAction.opacity(0.08) : Color.conduitAccent.opacity(0.08)
+        )
         .photosPicker(isPresented: $showAttachmentMenu, selection: $photoItem)
     }
 
@@ -598,7 +606,7 @@ struct ComposerBar: View {
                         .transition(.opacity.combined(with: .move(edge: .trailing)))
                 }
             }
-            .foregroundStyle(action == .unavailable ? Color.secondary.opacity(0.48) : Color.white)
+            .foregroundStyle(actionForeground)
             .frame(minWidth: actionTitle == nil ? 44 : 94, minHeight: 44)
             .padding(.horizontal, actionTitle == nil ? 0 : 4)
             .animation(ConduitMotion.transition, value: action)

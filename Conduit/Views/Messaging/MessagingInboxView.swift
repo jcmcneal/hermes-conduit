@@ -106,14 +106,8 @@ struct MessagingInboxView: View {
         Button {
             open(item)
         } label: {
-            VStack(spacing: 8) {
+            PinnedShelfCell(title: item.title, size: pinnedSize) {
                 shelfArtwork(item, size: pinnedSize)
-                Text(item.title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Color.conduitPrimaryText)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .frame(width: pinnedSize + 8)
             }
         }
         .buttonStyle(.plain)
@@ -124,22 +118,20 @@ struct MessagingInboxView: View {
     }
 
     private func unpinnedRow(_ item: MessagingShelfItem) -> some View {
-        Button {
+        let presentation = store.presentation(for: item)
+        return Button {
             open(item)
         } label: {
-            HStack(spacing: 14) {
+            ConversationRow(
+                model: ConversationRowModel(
+                    title: item.title,
+                    preview: presentation.preview,
+                    time: presentation.time
+                ),
+                artworkSize: unpinnedSize
+            ) {
                 shelfArtwork(item, size: unpinnedSize)
-                Text(item.title)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(Color.conduitPrimaryText)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.conduitSecondaryText)
             }
-            .padding(.vertical, 8)
-            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .disabled(!store.isReady)
@@ -152,19 +144,20 @@ struct MessagingInboxView: View {
     private func shelfArtwork(_ item: MessagingShelfItem, size: CGFloat) -> some View {
         switch item {
         case .bot(let profile):
-            AgentAvatar(
-                profileID: profile.name,
-                displayName: profile.displayName,
+            ConduitAvatar.bot(
+                profile,
                 photoURL: appState.profileAvatarURL(for: profile.name),
+                state: .idle,
                 size: size,
-                state: appState.avatarState(for: profile.name)
+                animates: false
             )
         case .group:
-            Image(systemName: "person.2.circle.fill")
-                .font(.system(size: size - 4))
-                .foregroundStyle(Color.conduitAccent)
-                .frame(width: size, height: size)
-                .accessibilityHidden(true)
+            ConduitAvatar.group(
+                store.members(for: item),
+                photoURL: { appState.profileAvatarURL(for: $0.name) },
+                size: size,
+                animates: false
+            )
         }
     }
 

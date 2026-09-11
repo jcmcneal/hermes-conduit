@@ -49,7 +49,7 @@ final class MessagingUITests: XCTestCase {
         XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertTrue(homePane.buttons["Bots"].isSelected)
 
-        let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Designer")).firstMatch
+        let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Penelope Bot")).firstMatch
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
         XCTAssertFalse(app.staticTexts["Messages"].exists, "Bots home is a profile shelf, not a Messages list")
         XCTAssertFalse(app.staticTexts["Groups"].exists, "Groups sit inline with bots, not a separate section")
@@ -95,12 +95,12 @@ final class MessagingUITests: XCTestCase {
         let presence = app.otherElements["messaging.run-presence"]
         XCTAssertTrue(presence.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(app.otherElements["messaging.run-presence.designer-id"].waitForExistence(timeout: 3)
-            || app.descendants(matching: .any)["Designer is queued"].waitForExistence(timeout: 2),
+            || app.descendants(matching: .any)["Penelope Bot is queued"].waitForExistence(timeout: 2),
             app.debugDescription)
         XCTAssertTrue(app.otherElements["messaging.run-presence.swe-id"].exists
             || app.descendants(matching: .any)["SWE is running"].exists,
             app.debugDescription)
-        XCTAssertFalse(app.staticTexts["Designer: queued"].exists)
+        XCTAssertFalse(app.staticTexts["Penelope Bot: queued"].exists)
         XCTAssertFalse(app.staticTexts["SWE: running"].exists)
         XCTAssertFalse(app.otherElements["messaging.awaiting-reply"].exists)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "Group run presence"; shot.lifetime = .keepAlways; add(shot)
@@ -117,7 +117,7 @@ final class MessagingUITests: XCTestCase {
         app.launch()
         let homePane = app.segmentedControls["chats.home.pane"]
         XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
-        let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Designer")).firstMatch
+        let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Penelope Bot")).firstMatch
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
         designer.tap()
         XCTAssertTrue(app.buttons["Back to Bots"].waitForExistence(timeout: 5), app.debugDescription)
