@@ -9,16 +9,13 @@ final class MessagingUITests: XCTestCase {
             "-CONDUIT_UI_TEST_MESSAGING",
             "-CONDUIT_UI_TEST_MESSAGING_MISSING",
             "-conduit.messaging.discovery.v1.ui-test-messaging", "NO",
-            "-conduit.chatsHomePane", "bots",
         ]
         app.launch()
 
-        let homePane = app.segmentedControls["chats.home.pane"]
-        XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(homePane.buttons["Bots"].isSelected)
+        selectHomePane("Bots", in: app)
 
         let enable = app.buttons["messaging.enable"]
-        XCTAssertTrue(enable.waitForExistence(timeout: 5), "Enable card lives on the default Bots pane")
+        XCTAssertTrue(enable.waitForExistence(timeout: 5), "Enable card lives on the Bots pane")
         enable.tap()
         XCTAssertTrue(app.staticTexts["A shared inbox for your bots"].waitForExistence(timeout: 5))
         let setup = XCTAttachment(screenshot: app.screenshot()); setup.name = "Optional messaging setup"; setup.lifetime = .keepAlways; add(setup)
@@ -27,8 +24,10 @@ final class MessagingUITests: XCTestCase {
         app.buttons["Close"].tap()
         XCTAssertTrue(enable.waitForExistence(timeout: 5))
 
-        homePane.buttons["Sessions"].tap()
-        XCTAssertFalse(app.buttons["messaging.enable"].exists, "Sessions list has no messaging promo card")
+        selectHomePane("Sessions", in: app)
+        let enableDisappeared = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: enable)
+        XCTAssertEqual(XCTWaiter.wait(for: [enableDisappeared], timeout: 5), .completed,
+                       "Sessions list has no messaging promo card")
         XCTAssertTrue(
             app.buttons["New Chat"].waitForExistence(timeout: 5)
                 || app.staticTexts["New Chat"].waitForExistence(timeout: 2),
@@ -42,12 +41,9 @@ final class MessagingUITests: XCTestCase {
             "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example",
             "-CONDUIT_UI_TEST_INBOX_FIXTURE", "multi-profile",
             "-CONDUIT_UI_TEST_MESSAGING",
-            "-conduit.chatsHomePane", "bots",
         ]
         app.launch()
-        let homePane = app.segmentedControls["chats.home.pane"]
-        XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
-        XCTAssertTrue(homePane.buttons["Bots"].isSelected)
+        selectHomePane("Bots", in: app)
 
         let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Penelope Bot")).firstMatch
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
@@ -83,11 +79,9 @@ final class MessagingUITests: XCTestCase {
             "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example",
             "-CONDUIT_UI_TEST_INBOX_FIXTURE", "multi-profile",
             "-CONDUIT_UI_TEST_MESSAGING",
-            "-conduit.chatsHomePane", "bots",
         ]
         app.launch()
-        let homePane = app.segmentedControls["chats.home.pane"]
-        XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
+        selectHomePane("Bots", in: app)
         let group = app.buttons.matching(NSPredicate(format: "label == %@", "Design crew")).firstMatch
         XCTAssertTrue(group.waitForExistence(timeout: 10), app.debugDescription)
         group.tap()
@@ -112,11 +106,9 @@ final class MessagingUITests: XCTestCase {
             "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD", "https://conduit-uitest.example",
             "-CONDUIT_UI_TEST_INBOX_FIXTURE", "multi-profile",
             "-CONDUIT_UI_TEST_MESSAGING",
-            "-conduit.chatsHomePane", "bots",
         ]
         app.launch()
-        let homePane = app.segmentedControls["chats.home.pane"]
-        XCTAssertTrue(homePane.waitForExistence(timeout: 10), app.debugDescription)
+        selectHomePane("Bots", in: app)
         let designer = app.buttons.matching(NSPredicate(format: "label == %@", "Penelope Bot")).firstMatch
         XCTAssertTrue(designer.waitForExistence(timeout: 10), app.debugDescription)
         designer.tap()
@@ -136,4 +128,18 @@ final class MessagingUITests: XCTestCase {
         XCTAssertFalse(app.otherElements["messaging.run-presence"].exists)
         let shot = XCTAttachment(screenshot: app.screenshot()); shot.name = "DM awaiting reply"; shot.lifetime = .keepAlways; add(shot)
     }
+
+    private func selectHomePane(_ title: String, in app: XCUIApplication,
+                                file: StaticString = #filePath, line: UInt = #line) {
+        let picker = app.segmentedControls["chats.home.pane"]
+        XCTAssertTrue(picker.waitForExistence(timeout: 10), app.debugDescription, file: file, line: line)
+        let button = picker.buttons[title]
+        // Exercise the real selection binding. A launch-argument defaults override wins
+        // over persisted @AppStorage writes and prevents switching panes during the test.
+        if !button.isSelected { button.tap() }
+        let selected = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in button.isSelected }, object: button)
+        XCTAssertEqual(XCTWaiter.wait(for: [selected], timeout: 5), .completed,
+                       "Expected the \(title) pane to be selected", file: file, line: line)
+    }
+
 }

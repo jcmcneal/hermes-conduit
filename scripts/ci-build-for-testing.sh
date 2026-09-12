@@ -42,18 +42,16 @@ fi
 started_at=$(now_iso)
 start=$(date +%s)
 status=0
+# Keep Xcode's normal simulator ad-hoc signing. An unsigned host can stall
+# Security/Keychain operations during tests; simulator signing needs no
+# distribution certificate or provisioning profile.
 run_with_deadline "$BUILD_TIMEOUT_SECS" "$LOG_DIR/build.log" \
   build-for-testing \
   -project "$PROJECT" \
   -scheme "$SCHEME" \
   -destination "$DESTINATION" \
   -configuration Debug \
-  -derivedDataPath "$DERIVED_DATA_PATH" \
-  CODE_SIGN_IDENTITY="" \
-  CODE_SIGNING_REQUIRED=NO \
-  CODE_SIGNING_ALLOWED=NO \
-  DEVELOPMENT_TEAM="" \
-  PROVISIONING_PROFILE_SPECIFIER="" || status=$?
+  -derivedDataPath "$DERIVED_DATA_PATH" || status=$?
 finished_at=$(now_iso)
 duration=$(( $(date +%s) - start ))
 

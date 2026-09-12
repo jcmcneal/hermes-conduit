@@ -403,7 +403,16 @@ final class AppState: ObservableObject {
 
     // MARK: - Connection
 
-    @Published var connection: HermesConnection?
+    @Published var connection: HermesConnection? {
+        didSet {
+            // Tickets can change principals even on the same server. Keep
+            // full transcript snapshots scoped to this authenticated connection.
+            if connection != oldValue {
+                sessionTranscriptCache.removeAll()
+                warmTranscriptIdentity = nil
+            }
+        }
+    }
     @Published var client: HermesClient?
     @Published var isConnected = false
     @Published var isConnecting = false
@@ -1069,6 +1078,18 @@ final class AppState: ObservableObject {
     private var sessionCatalogCache = SessionCatalogCache()
     private var projectsRequestGeneration = 0
     private let sessionPresentationCache: SessionPresentationCache
+    private let sessionTranscriptCache = SessionTranscriptCache()
+    /// Set only when a resume was applied, or a previously admitted snapshot
+    /// restored. Prevents an outgoing transcript from being saved under a new
+    /// identity during a profile/connection transition or cancelled open.
+    private var warmTranscriptIdentity: ConversationIdentity?
+
+    private func cacheActiveTranscriptForNavigation() {
+        guard connection != nil, let identity = warmTranscriptIdentity,
+              identity.profile == activeProfile, identity.contains(activeSessionId) else { return }
+        sessionTranscriptCache.save(messages: messages, window: persistedTranscriptWindow,
+                                    identity: identity)
+    }
     private let sessionYoloStore: SessionYoloStore
     private let conversationIdentityIndex: ConversationIdentityIndex
     private var sessionYoloWriteRevision: UInt64 = 0
@@ -1243,6 +1264,7 @@ final class AppState: ObservableObject {
     /// do not simplify either away.
     private func setActiveProfile(_ newValue: String) {
         guard newValue != activeProfile else { return }
+        warmTranscriptIdentity = nil
         activeProfile = newValue
         presentationCacheProfileEpoch &+= 1
     }
@@ -2085,6 +2107,8 @@ final class AppState: ObservableObject {
         defaults.set(identity, forKey: chatResumeServerIdentityKey)
         guard let previousIdentity, previousIdentity != identity else { return false }
 
+        sessionTranscriptCache.removeAll()
+        warmTranscriptIdentity = nil
         retireSpeechOperationsForServerReplacement(previousIdentity: previousIdentity, identity: identity)
         chatResumeCoordinator.clearResumeState()
         cancelOwnedAutomaticOperations()
@@ -4441,6 +4465,7 @@ final class AppState: ObservableObject {
                 updated.isActive = false
                 return updated
             }
+            warmTranscriptIdentity = captureConversationIdentity(for: runtimeSessionID)
             if resumePurpose == .automaticReturn {
                 _ = selectChatResumeTarget(
                     in: [summary],
@@ -4528,6 +4553,7 @@ final class AppState: ObservableObject {
             includePendingApprovals: restorePendingDecisionCards
         )
         messages = mergeCachedReviews(into: restored, sessionId: result.sessionId)
+        warmTranscriptIdentity = captureConversationIdentity(for: result.sessionId)
         // The gateway's authoritative pending clarification restores the
         // answerable card even when the one-shot clarify.request fired while
         // this device was detached; answers locked before the detach come
@@ -6999,6 +7025,11 @@ final class AppState: ObservableObject {
     /// mappings, scroll/resume state, and cached presentation (with any
     /// pending cards) must not survive under any of its aliases.
     func revokeDeletedConversationIdentity(sessionIDs: Set<String>, profile: String) {
+        sessionTranscriptCache.remove(sessionIDs: sessionIDs, profile: profile)
+        if let identity = warmTranscriptIdentity, identity.profile == profile,
+           !identity.acceptedSessionIDs.isDisjoint(with: sessionIDs) {
+            warmTranscriptIdentity = nil
+        }
         conversationIdentityIndex.removeSessionIDs(sessionIDs, profile: profile)
         chatResumeCoordinator.removeSessions(
             profile: profile,
@@ -7173,12 +7204,15 @@ final class AppState: ObservableObject {
         // through `eventBelongsToActiveSession` and repopulating the
         // cleared message array while reconciliation is in flight.
         flushPendingPresentationCache()
+        cacheActiveTranscriptForNavigation()
         let openedIdentity = captureConversationIdentity(for: sessionId)
+        let warmSnapshot = openedIdentity.flatMap { sessionTranscriptCache.snapshot(for: $0) }
         let token = beginReconciliation()
         let acceptedSessionIDs = knownSessionIDs(for: sessionId)
         setActiveSessionState(id: sessionId)
-        messages = []
-        persistedTranscriptWindow = nil
+        messages = warmSnapshot?.messages ?? []
+        persistedTranscriptWindow = warmSnapshot?.window
+        warmTranscriptIdentity = warmSnapshot == nil ? nil : openedIdentity
         // Freshness evidence belongs to the conversation it was captured
         // for; the reconcile below re-establishes it authoritatively.
         resetTranscriptLifecycleEvidence()
@@ -7485,6 +7519,7 @@ final class AppState: ObservableObject {
         }
         let profile = activeProfile
         cacheMessagePresentation()
+        cacheActiveTranscriptForNavigation()
         activeSessionTitle = "New conversation"
         let token = beginReconciliation()
         turnState = .synchronizing
@@ -10501,7 +10536,8 @@ final class AppState: ObservableObject {
     /// re-pin on some later unrelated transcript change.
     @discardableResult
     func loadEarlierMessages() async -> Bool {
-        guard let window = persistedTranscriptWindow,
+        guard !activeChatScrollSessionIdentity.isReconciling,
+              let window = persistedTranscriptWindow,
               window.canLoadEarlier,
               !window.isLoadingEarlier else {
             return false
@@ -10750,7 +10786,8 @@ final class AppState: ObservableObject {
     /// never render for a window the action would reject (the production
     /// no-op regression).
     var canLoadEarlierMessagesForActiveConversation: Bool {
-        guard let window = persistedTranscriptWindow,
+        guard !activeChatScrollSessionIdentity.isReconciling,
+              let window = persistedTranscriptWindow,
               window.canLoadEarlier,
               !messages.isEmpty,
               persistedTranscriptWindowOwnershipIsCurrent(window) else {
