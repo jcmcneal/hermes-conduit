@@ -162,6 +162,7 @@ struct LoginView: View {
                     // OAuth and cloud dashboard logins do not provide a
                     // password credential that Conduit can safely reuse.
                     KeychainHelper.clearCredentials()
+                    appState.beginNewAuthenticatedCacheSession(for: baseUrl)
                     appState.rememberDashboardURL(baseUrl)
                     await appState.connect(with: HermesConnection(baseUrl: baseUrl, ticket: ticket))
                 }
@@ -541,6 +542,7 @@ struct LoginView: View {
                 KeychainHelper.clearCredentials()
             }
             if let access { KeychainHelper.saveCloudflareAccess(access, origin: serverUrl) } else { KeychainHelper.clearCloudflareAccess() }
+            appState.beginNewAuthenticatedCacheSession(for: serverUrl)
             authenticatedConnection.commitCookies()
             await appState.connect(with: HermesConnection(baseUrl: serverUrl, ticket: authenticatedConnection.ticket))
         } catch is CancellationError {

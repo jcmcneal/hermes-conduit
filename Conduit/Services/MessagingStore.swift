@@ -23,15 +23,18 @@ final class MessagingStore: ObservableObject {
     /// True after a successful conversations fetch in this connection generation.
     private var hasLoadedConversations = false
     private let defaults: UserDefaults
+    private let namespaceStore: ConnectionCacheNamespaceStore
     private let catalogCache: MessagingCatalogCache
     private var catalogPartition: String?
     private var catalogScope: String?
     private weak var dashboardBridge: DashboardTicketBridge?
+    var onCacheIdentityChanged: (() -> Void)?
     private var catalogBootstrapID: UUID?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         catalogCache = MessagingCatalogCache(defaults: defaults)
+        namespaceStore = ConnectionCacheNamespaceStore(defaults: defaults)
     }
     var isReady: Bool { availability == .ready && capability?.isReady == true }
     var profiles: [MessagingProfile] { capability?.profiles ?? cachedDisplayProfiles }
@@ -153,45 +156,28 @@ final class MessagingStore: ObservableObject {
     /// Local credential partitioning finishes before the caller starts any network refresh.
     /// Cached profiles are display-only: capability and readiness remain unverified.
     func connectDashboard(_ bridge: DashboardTicketBridge?, scope: String) async {
-        let previousPartition = catalogPartition
-        let previousScope = presentationScope
-        connect(requester: bridge, scope: scope)
+        guard !Task.isCancelled else { return }
+        let partition = bridge == nil ? nil : namespaceStore.namespace(for: scope)
+        connect(requester: bridge, scope: scope, catalogPartition: partition)
         let epoch = generation
         guard let bridge else { return }
         let bootstrapID = UUID()
         catalogBootstrapID = bootstrapID
         defer { if catalogBootstrapID == bootstrapID { catalogBootstrapID = nil } }
-        let partition = await bridge.catalogCachePartition()
-        guard !Task.isCancelled, epoch == generation, catalogBootstrapID == bootstrapID,
-              bridgeID == ObjectIdentifier(bridge) else { return }
         dashboardBridge = bridge
-        if previousScope == scope, let previousPartition, previousPartition != partition {
-            catalogCache.remove(previousPartition)
-        }
-        if catalogPartition != partition {
-            if catalogPartition != nil {
-                purgeCatalog()
-                generation = UUID()
-                resetQueries()
-                capability = nil
-                service?.capability = nil
-                conversations = []
-                hasLoadedConversations = false
-                availability = .checking
-            }
-            catalogPartition = partition
-            restoreCatalog()
-            loadPinnedBots()
-        }
+        await historyCache.configure(partition: partition)
+        guard !Task.isCancelled, epoch == generation else { return }
     }
 
     private func restoreCatalog() {
         guard let catalogPartition, let snapshot = catalogCache.snapshot(for: catalogPartition) else { return }
         catalogScope = snapshot.verifiedScope
+        if let saved = snapshot.conversations { conversations = saved }
         if cachedDisplayProfiles != snapshot.profiles { cachedDisplayProfiles = snapshot.profiles }
     }
 
     private func purgeCatalog() {
+        historyCache.purge()
         if let catalogPartition { catalogCache.remove(catalogPartition) }
         catalogScope = nil
         if !cachedDisplayProfiles.isEmpty { cachedDisplayProfiles = [] }
@@ -263,12 +249,10 @@ final class MessagingStore: ObservableObject {
         defaults.set(pinnedBotIDs, forKey: pinnedBotsKey)
     }
 
-    func refresh() async { await refresh(allowCatalogRetry: true) }
-
-    private func refresh(allowCatalogRetry: Bool) async {
+    func refresh() async {
         guard let service, !isRefreshing, catalogBootstrapID == nil else { return }
         var epoch = generation
-        let refreshPartition = catalogPartition
+        var refreshPartition = catalogPartition
         let refreshBridge = dashboardBridge
         isRefreshing = true
         defer { if generation == epoch { isRefreshing = false } }
@@ -282,6 +266,7 @@ final class MessagingStore: ObservableObject {
                     let parts = [presentationScope, identity["provider"] as? String ?? "", user, identity["org_id"] as? String ?? ""]
                     dismissalScope = (try? JSONEncoder().encode(parts).base64EncodedString()) ?? presentationScope
                     if let previous = verifiedIdentityScope, previous != dismissalScope {
+                        onCacheIdentityChanged?()
                         generation = UUID(); epoch = generation
                         resetQueries()
                         purgeCatalog()
@@ -316,6 +301,7 @@ final class MessagingStore: ObservableObject {
                     return
                 }
                 if let oldScope = capability?.scope ?? catalogScope, oldScope != result.scope {
+                    onCacheIdentityChanged?()
                     purgeCatalog()
                     conversations = []
                     hasLoadedConversations = false
@@ -323,25 +309,21 @@ final class MessagingStore: ObservableObject {
                     epoch = generation
                     resetQueries()
                 }
-                if let refreshBridge {
-                    let actualPartition = await refreshBridge.catalogCachePartition()
-                    guard !Task.isCancelled, epoch == generation else { return }
+                if refreshBridge != nil {
+                    guard !Task.isCancelled else { return }
+                    guard let actualPartition = namespaceStore.verify(principal: result.scope, for: presentationScope,
+                                                                          expectedNamespace: refreshPartition) else { return }
                     if actualPartition != refreshPartition {
-                        // Do not admit or save a response across a local authentication change.
-                        rejectCatalog()
+                        onCacheIdentityChanged?()
+                        purgeCatalog()
                         generation = UUID(); epoch = generation
                         resetQueries()
                         conversations = []
                         hasLoadedConversations = false
                         catalogPartition = actualPartition
-                        restoreCatalog()
-                        loadPinnedBots()
-                        availability = .checking
-                        if allowCatalogRetry {
-                            isRefreshing = false
-                            await refresh(allowCatalogRetry: false)
-                        }
-                        return
+                        refreshPartition = actualPartition
+                        await historyCache.configure(partition: actualPartition)
+                        guard !Task.isCancelled, epoch == generation else { return }
                     }
                 }
                 if capability != result { capability = result }
@@ -352,7 +334,7 @@ final class MessagingStore: ObservableObject {
                     catalogScope = result.scope
                     if cachedDisplayProfiles != result.profiles { cachedDisplayProfiles = result.profiles }
                     if let refreshPartition, refreshPartition == catalogPartition {
-                        catalogCache.save(profiles: result.profiles, verifiedScope: result.scope, for: refreshPartition)
+                        catalogCache.save(profiles: result.profiles, verifiedScope: result.scope, for: refreshPartition, conversations: conversations)
                     }
                 } else {
                     rejectCatalog()
@@ -427,6 +409,10 @@ final class MessagingStore: ObservableObject {
             } while cursor != nil
             if conversations != collected { conversations = collected }
             hasLoadedConversations = true
+            if let catalogPartition, let capability {
+                catalogCache.save(profiles: capability.profiles, verifiedScope: capability.scope,
+                                  for: catalogPartition, conversations: collected)
+            }
             prunePinnedBots()
             if error != nil { error = nil }
         } catch { if epoch == generation, !Task.isCancelled { handle(error) } }
