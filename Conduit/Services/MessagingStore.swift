@@ -13,6 +13,8 @@ final class MessagingStore: ObservableObject {
     @Published private(set) var pinnedBotIDs: [String] = []
     private(set) var service: MessagingService?
     private(set) var generation = UUID()
+    let historyCache = MessagingHistoryCache()
+    private var conversationRefresh: (id: UUID, task: Task<Void, Never>)?
     private var bridgeID: ObjectIdentifier?
     private var presentationScope = ""
     private var dismissalScope = ""
@@ -114,6 +116,7 @@ final class MessagingStore: ObservableObject {
         let identity = requester.map { ObjectIdentifier($0) }
         guard identity != bridgeID || scope != presentationScope else { return }
         generation = UUID()
+        resetQueries()
         bridgeID = identity
         presentationScope = scope
         dismissalScope = scope
@@ -203,6 +206,7 @@ final class MessagingStore: ObservableObject {
                     dismissalScope = (try? JSONEncoder().encode(parts).base64EncodedString()) ?? presentationScope
                     if let previous = verifiedIdentityScope, previous != dismissalScope {
                         generation = UUID(); epoch = generation
+                        resetQueries()
                         capability = nil; service.capability = nil; conversations = []
                         hasLoadedConversations = false
                     }
@@ -234,6 +238,8 @@ final class MessagingStore: ObservableObject {
                     conversations = []
                     hasLoadedConversations = false
                     generation = UUID()
+                    epoch = generation
+                    resetQueries()
                     isRefreshing = false
                 }
                 capability = result
@@ -258,14 +264,37 @@ final class MessagingStore: ObservableObject {
     func handle(_ failure: Error) {
         isRefreshing = false
         if case DashboardTicketBridgeError.signInRequired = failure {
-            availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID()
+            availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID(); resetQueries()
         } else if case DashboardTicketBridgeError.http(let status, _) = failure, status == 401 || status == 403 {
-            availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID()
+            availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID(); resetQueries()
         } else { availability = .unavailable }
         error = failure.localizedDescription
     }
 
-    func refreshConversations() async {
+    private func resetQueries() {
+        historyCache.reset()
+        conversationRefresh?.task.cancel()
+        conversationRefresh = nil
+    }
+
+    func refreshConversations(force: Bool = false) async {
+        guard isReady else { return }
+        if force {
+            conversationRefresh?.task.cancel()
+            conversationRefresh = nil
+        }
+        if let current = conversationRefresh { await current.task.value; return }
+        let id = UUID()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.fetchConversations()
+        }
+        conversationRefresh = (id, task)
+        await task.value
+        if conversationRefresh?.id == id { conversationRefresh = nil }
+    }
+
+    private func fetchConversations() async {
         guard isReady, let service else { return }
         struct Page: Decodable { let conversations: [MessagingConversation]; let cursor: String? }
         let epoch = generation
@@ -276,16 +305,16 @@ final class MessagingStore: ObservableObject {
             repeat {
                 let path = try cursor.map { "/conversations?cursor=" + (try service.component($0)) } ?? "/conversations"
                 let page = try await service.request(Page.self, path)
-                guard epoch == generation else { return }
+                guard epoch == generation, !Task.isCancelled else { return }
                 collected.append(contentsOf: page.conversations)
                 cursor = page.cursor
                 if let cursor, !seen.insert(cursor).inserted { throw MessagingError.invalidResponse }
             } while cursor != nil
-            conversations = collected
+            if conversations != collected { conversations = collected }
             hasLoadedConversations = true
             prunePinnedBots()
-            error = nil
-        } catch { if epoch == generation { handle(error) } }
+            if error != nil { error = nil }
+        } catch { if epoch == generation, !Task.isCancelled { handle(error) } }
     }
 
     func createGroup(name: String, members: [String], responder: String, requestID: String) async throws -> MessagingConversation {
@@ -295,7 +324,7 @@ final class MessagingStore: ObservableObject {
             "title": name, "profiles": members, "default_responder": responder, "client_request_id": requestID
         ])
         guard epoch == generation else { throw MessagingError.staleContext }
-        await refreshConversations()
+        await refreshConversations(force: true)
         return result
     }
 }
