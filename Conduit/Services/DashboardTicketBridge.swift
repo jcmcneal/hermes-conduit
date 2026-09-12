@@ -17,7 +17,7 @@ import Security
 /// device-local and are cleared with the saved connection on explicit sign-out.
 @MainActor
 enum DashboardCookiePersistence {
-    private struct StoredCookie: Codable {
+    struct StoredCookie: Codable {
         let name: String
         let value: String
         let domain: String
@@ -43,9 +43,12 @@ enum DashboardCookiePersistence {
                 .name: name,
                 .value: value,
                 .domain: domain,
-                .path: path,
-                .secure: isSecure ? "TRUE" : "FALSE"
+                .path: path
             ]
+            // HTTPCookie treats any .secure value (even "FALSE") as Secure.
+            // Omit the key for HTTP cookies so supported local dashboards
+            // keep their session after a persisted-cookie restore.
+            if isSecure { properties[.secure] = "TRUE" }
             if let expiresDate { properties[.expires] = expiresDate }
             if isHTTPOnly { properties[.init("HttpOnly")] = "TRUE" }
             if let sameSitePolicy { properties[.sameSitePolicy] = sameSitePolicy }
@@ -256,6 +259,8 @@ final class DashboardTicketBridge: NSObject {
     /// any caller (mint retries and AppState's sign-in recovery alike).
     /// Diagnostic/test counter for the cold-bridge recovery path.
     private(set) var reloadCount = 0
+    private var cookieBootstrapTask: Task<Void, Never>?
+    private var cookieBootstrapGeneration = UUID()
 
     init(
         baseURL: String,
@@ -284,16 +289,7 @@ final class DashboardTicketBridge: NSObject {
         super.init()
         configuration.userContentController.add(WeakScriptMessageHandler(self), name: "dashboard-response")
         webView.navigationDelegate = self
-        Task { [weak self] in
-            guard let self else { return }
-            await DashboardCookiePersistence.restore(into: self.webView.configuration.websiteDataStore.httpCookieStore)
-            await DashboardCookiePersistence.restoreNativeCookies(
-                into: self.webView.configuration.websiteDataStore.httpCookieStore,
-                for: self.baseURL
-            )
-            guard !self.isInvalidated else { return }
-            self.loadDashboardSession()
-        }
+        bootstrapCookiesAndLoad()
     }
 
     deinit {
@@ -301,6 +297,7 @@ final class DashboardTicketBridge: NSObject {
         // deinit; cancelling here stops deadline tasks from outliving the
         // bridge they were created to guard.
         for deadline in requestDeadlines.values { deadline.cancel() }
+        cookieBootstrapTask?.cancel()
         requestDeadlines.removeAll()
         pendingRequests.rejectAll(with: DashboardTicketBridgeError.notReady)
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "dashboard-response")
@@ -309,6 +306,7 @@ final class DashboardTicketBridge: NSObject {
     func invalidate() {
         guard !isInvalidated else { return }
         isInvalidated = true
+        cookieBootstrapTask?.cancel()
         isReady = false
         // A torn-down bridge must report plain unreadiness: leaving a stale
         // login verdict would surface .signInRequired (with its session
@@ -342,16 +340,46 @@ final class DashboardTicketBridge: NSObject {
         didLandOnLogin = false
         applySimulatedLanding()
         rejectPending(with: DashboardTicketBridgeError.notReady)
-        Task { [weak self] in
-            guard let self else { return }
+        bootstrapCookiesAndLoad()
+    }
+
+    private func bootstrapCookiesAndLoad() {
+        let previous = cookieBootstrapTask
+        previous?.cancel()
+        let generation = UUID()
+        cookieBootstrapGeneration = generation
+        cookieBootstrapTask = Task { [weak self] in
+            // WK cookie writes are not cancellation-aware. Drain a superseded
+            // restore before starting this one so it cannot overwrite the new jar.
+            await previous?.value
+            guard let self, !Task.isCancelled, !self.isInvalidated,
+                  generation == self.cookieBootstrapGeneration else { return }
             await DashboardCookiePersistence.restore(into: self.webView.configuration.websiteDataStore.httpCookieStore)
+            guard !Task.isCancelled, !self.isInvalidated, generation == self.cookieBootstrapGeneration else { return }
             await DashboardCookiePersistence.restoreNativeCookies(
                 into: self.webView.configuration.websiteDataStore.httpCookieStore,
                 for: self.baseURL
             )
-            guard !self.isInvalidated else { return }
+            guard !Task.isCancelled, !self.isInvalidated, generation == self.cookieBootstrapGeneration else { return }
             self.loadDashboardSession()
         }
+    }
+
+    /// Reads only the local, effective cookie jar. It does not wait for the
+    /// dashboard navigation or network readiness, so warm catalog display can
+    /// precede discovery without trusting a stale native or Keychain mirror.
+    func catalogCachePartition() async -> String? {
+        while !isInvalidated, !Task.isCancelled {
+            let generation = cookieBootstrapGeneration
+            await cookieBootstrapTask?.value
+            guard !isInvalidated, !Task.isCancelled else { return nil }
+            guard generation == cookieBootstrapGeneration else { continue }
+            let cookies = await webView.configuration.websiteDataStore.httpCookieStore.allCookies()
+            guard !isInvalidated, !Task.isCancelled else { return nil }
+            guard generation == cookieBootstrapGeneration else { continue }
+            return MessagingCatalogPartition.make(baseURL: baseURL, cookies: cookies)
+        }
+        return nil
     }
 
     /// Re-asserts the test-simulated landing state; a no-op in production.
