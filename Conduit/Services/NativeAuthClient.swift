@@ -166,6 +166,12 @@ struct NativeAuthClient {
         configuration.httpCookieAcceptPolicy = .never
         configuration.httpCookieStorage = HTTPCookieStorage()
         configuration.httpShouldSetCookies = false
+        // Bound auth RTTs so an unreachable dashboard fails closed quickly
+        // instead of sitting on URLSession's ~60s defaults during connect.
+        if sessionConfiguration == nil {
+            configuration.timeoutIntervalForRequest = 20
+            configuration.timeoutIntervalForResource = 45
+        }
         // Endpoint identity is derived from the normalized base URL because
         // deployments may mount the gateway under a path prefix
         // (https://example.com/hermes → /hermes/auth/password-login).

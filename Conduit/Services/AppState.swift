@@ -2647,6 +2647,10 @@ final class AppState: ObservableObject {
             showLogin = false
             isConnecting = true
             turnState = .synchronizing
+            // Warm the dashboard bridge before the async hop so cookie restore
+            // overlaps scheduling, then mint a fresh single-use ticket on the
+            // restore path instead of burning a spent Keychain ticket first.
+            prepareDashboardBridge(for: saved.baseUrl)
             Task { await restoreSavedConnection(saved) }
         }
     }
@@ -3098,14 +3102,83 @@ final class AppState: ObservableObject {
         return client
     }
 
-    /// Match the React Native client's recovery order: the securely persisted
-    /// connection is the first cold-start attempt. The dashboard bridge is
-    /// only needed to mint a replacement ticket after that socket actually
-    /// disconnects or fails. Requiring a freshly restored WebKit cookie before
-    /// every launch was what turned a healthy saved Hermes session into login.
+    /// Prefer a freshly minted single-use WebSocket ticket on cold start.
+    /// Reusing the Keychain ticket after a successful handshake forces a
+    /// fail → backoff → remint cycle on every launch because tickets are
+    /// single-use. If minting fails for any reason other than an expired
+    /// dashboard session (including `.notReady` while WebKit cookies warm),
+    /// fall back to the persisted ticket so a slow bridge cannot bounce a
+    /// healthy session to login — that false-logout regression is why cold
+    /// start historically tried the saved ticket first.
     private func restoreSavedConnection(_ saved: HermesConnection) async {
         prepareDashboardBridge(for: saved.baseUrl)
-        await connect(with: saved, profile: activeProfile)
+
+        do {
+            let ticket = try await mintChatResumeTicket(for: saved)
+            await connect(
+                with: HermesConnection(baseUrl: saved.baseUrl, ticket: ticket),
+                profile: activeProfile
+            )
+        } catch {
+            if let bridgeError = error as? DashboardTicketBridgeError,
+               case .signInRequired = bridgeError {
+                await recoverColdStartSignInRequired(
+                    saved: saved,
+                    bridgeError: bridgeError
+                )
+                return
+            }
+            // Bridge still warming, transient mint failure, etc. Attempt the
+            // persisted ticket; a spent ticket still fails into reconnect,
+            // which mints again with the same recovery rules as before.
+            await connect(with: saved, profile: activeProfile)
+        }
+    }
+
+    /// Cold-start counterpart to reconnect's silent renewal: try saved
+    /// password credentials before forcing the login card when the bridge
+    /// reports an expired dashboard session.
+    private func recoverColdStartSignInRequired(
+        saved: HermesConnection,
+        bridgeError: DashboardTicketBridgeError
+    ) async {
+        var silentRenewalReauthError: Error?
+        if let credentials = KeychainHelper.loadCredentials(),
+           credentials.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            == saved.baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
+            do {
+                let authenticatedConnection = try await NativeAuthClient(
+                    baseURL: credentials.baseURL,
+                    cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: credentials.baseURL)
+                ).connect(
+                    username: credentials.username,
+                    password: credentials.password
+                )
+                authenticatedConnection.commitCookies()
+                dashboardTicketBridge?.reload()
+                await connect(
+                    with: HermesConnection(
+                        baseUrl: credentials.baseURL,
+                        ticket: authenticatedConnection.ticket
+                    ),
+                    profile: activeProfile
+                )
+                return
+            } catch is CancellationError {
+                showLogin = true
+                return
+            } catch {
+                silentRenewalReauthError = error
+            }
+        }
+
+        lastConnectionFailure = .loginRequired
+        requireSignIn(
+            failure: Self.silentRenewalSignInFailure(
+                reauthError: silentRenewalReauthError,
+                bridgeError: bridgeError
+            )
+        )
     }
 
     private func restoreSavedCredentials(_ credentials: DashboardCredentials) async {

@@ -1792,6 +1792,112 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertEqual(harness.appState.turnState, .idle)
     }
 
+    func testColdStartMintsFreshTicketBeforeConnecting() async {
+        let connectGate = ControlledSuspension()
+        var mintedTickets: [String] = []
+        var connectedTickets: [String] = []
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                connectClient: { client in
+                    connectedTickets.append(client.connection.ticket)
+                    await connectGate.suspend()
+                },
+                mintTicket: { _ in
+                    mintedTickets.append("fresh-ticket")
+                    return "fresh-ticket"
+                }
+            )
+        )
+        let saved = HermesConnection(baseUrl: "https://one.example", ticket: "saved-ticket")
+        KeychainHelper.clearCredentials()
+        KeychainHelper.saveConnection(saved)
+        addTeardownBlock {
+            KeychainHelper.clearConnection()
+            KeychainHelper.clearCredentials()
+        }
+
+        harness.appState.loadSavedConnection()
+        await connectGate.waitUntilSuspended()
+
+        XCTAssertEqual(mintedTickets, ["fresh-ticket"])
+        XCTAssertEqual(connectedTickets, ["fresh-ticket"])
+        XCTAssertEqual(harness.appState.connection?.ticket, "fresh-ticket")
+        XCTAssertTrue(harness.appState.isConnecting)
+
+        connectGate.resume()
+    }
+
+    func testColdStartFallsBackToPersistedTicketWhenBridgeNotReady() async {
+        let connectGate = ControlledSuspension()
+        var mintAttempts = 0
+        var connectedTickets: [String] = []
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                connectClient: { client in
+                    connectedTickets.append(client.connection.ticket)
+                    await connectGate.suspend()
+                },
+                mintTicket: { _ in
+                    mintAttempts += 1
+                    throw DashboardTicketBridgeError.notReady
+                }
+            )
+        )
+        let saved = HermesConnection(baseUrl: "https://one.example", ticket: "saved-ticket")
+        KeychainHelper.clearCredentials()
+        KeychainHelper.saveConnection(saved)
+        addTeardownBlock {
+            KeychainHelper.clearConnection()
+            KeychainHelper.clearCredentials()
+        }
+
+        harness.appState.loadSavedConnection()
+        await connectGate.waitUntilSuspended()
+
+        XCTAssertEqual(mintAttempts, 1)
+        XCTAssertEqual(connectedTickets, ["saved-ticket"])
+        XCTAssertEqual(harness.appState.connection?.ticket, "saved-ticket")
+
+        connectGate.resume()
+    }
+
+    func testColdStartSignInRequiredWithoutCredentialsForcesLogin() async {
+        let mintGate = ControlledSuspension()
+        var connectCount = 0
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                connectClient: { _ in
+                    connectCount += 1
+                },
+                mintTicket: { _ in
+                    await mintGate.suspend()
+                    throw DashboardTicketBridgeError.signInRequired
+                }
+            )
+        )
+        let saved = HermesConnection(baseUrl: "https://one.example", ticket: "saved-ticket")
+        KeychainHelper.clearCredentials()
+        KeychainHelper.saveConnection(saved)
+        addTeardownBlock {
+            KeychainHelper.clearConnection()
+            KeychainHelper.clearCredentials()
+        }
+
+        harness.appState.loadSavedConnection()
+        await mintGate.waitUntilSuspended()
+        mintGate.resume()
+
+        // Allow the cold-start task to finish the sign-in handoff.
+        for _ in 0..<50 where !harness.appState.showLogin {
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(connectCount, 0)
+        XCTAssertTrue(harness.appState.showLogin)
+        XCTAssertFalse(harness.appState.isConnecting)
+    }
+
     func testSameEpochAutomaticSyncAttemptCannotOverwriteNewerAttempt() async {
         let staleCatalogGate = ControlledSuspension()
         var catalogLoadCount = 0
