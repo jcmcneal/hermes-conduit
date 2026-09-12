@@ -114,7 +114,7 @@ struct MessagingSettingsView: View {
             }
         )
         .task(id: appState.dashboardTicketBridge.map(ObjectIdentifier.init)) {
-            store.connect(requester: appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
+            await store.connectDashboard(appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
             await store.refresh()
         }
     }
