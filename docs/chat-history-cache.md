@@ -30,9 +30,22 @@ credentials clears these snapshots, so cross-profile flows that mint a new
 ticket intentionally start cold. Pending decision controls remain governed by
 the existing presentation cache and authoritative resume admission.
 
-These caches are not written to disk and do not bypass server validation. They
+The transcript caches are not written to disk and do not bypass server validation. They
 improve navigation within an authenticated app session; they are not an offline
 message database. Cold app launches still fetch history.
+
+The Bots catalog separately persists display names and profile IDs for up to
+seven days, bounded to four authentication partitions and 256 KiB. A partition
+is a digest of the normalized server address and effective local dashboard
+authentication cookies after the bridge restores its cookie jar. Cookie values
+are not stored with the catalog. Returning to the same authenticated session
+restores the catalog and pin namespace before network discovery. Cached profiles
+never supply capability or write permission; fresh server verification is still
+required. Authentication failures, explicit sign-out, and confirmed missing or
+disabled messaging remove the cached catalog. Transient failures retain it.
+
+The regular session profile picker already restores its known profile names
+from local preferences. That existing cache is separate from the Bots catalog.
 
 Regression coverage lives in `MessagingHistoryCacheTests`,
 `MessagingTranscriptProjectionTests`, `MessagingServiceDecodingTests`, and

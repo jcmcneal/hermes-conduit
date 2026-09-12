@@ -11,6 +11,7 @@ final class MessagingStore: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var cardDismissed = false
     @Published private(set) var pinnedBotIDs: [String] = []
+    @Published private(set) var cachedDisplayProfiles: [MessagingProfile] = []
     private(set) var service: MessagingService?
     private(set) var generation = UUID()
     let historyCache = MessagingHistoryCache()
@@ -22,10 +23,18 @@ final class MessagingStore: ObservableObject {
     /// True after a successful conversations fetch in this connection generation.
     private var hasLoadedConversations = false
     private let defaults: UserDefaults
+    private let catalogCache: MessagingCatalogCache
+    private var catalogPartition: String?
+    private var catalogScope: String?
+    private weak var dashboardBridge: DashboardTicketBridge?
+    private var catalogBootstrapID: UUID?
 
-    init(defaults: UserDefaults = .standard) { self.defaults = defaults }
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        catalogCache = MessagingCatalogCache(defaults: defaults)
+    }
     var isReady: Bool { availability == .ready && capability?.isReady == true }
-    var profiles: [MessagingProfile] { capability?.profiles ?? [] }
+    var profiles: [MessagingProfile] { capability?.profiles ?? cachedDisplayProfiles }
 
     var unarchivedGroups: [MessagingConversation] {
         conversations.filter { $0.kind == "group" && !$0.archived }
@@ -112,12 +121,20 @@ final class MessagingStore: ObservableObject {
         return items
     }
 
-    func connect(requester: (any DashboardJSONRequester)?, scope: String) {
+    func connect(requester: (any DashboardJSONRequester)?, scope: String, catalogPartition: String? = nil) {
         let identity = requester.map { ObjectIdentifier($0) }
-        guard identity != bridgeID || scope != presentationScope else { return }
+        guard identity != bridgeID || scope != presentationScope
+                || (catalogPartition != nil && catalogPartition != self.catalogPartition) else { return }
+        if requester == nil || (scope == presentationScope && catalogPartition != nil
+            && self.catalogPartition != nil && catalogPartition != self.catalogPartition) { purgeCatalog() }
         generation = UUID()
         resetQueries()
         bridgeID = identity
+        dashboardBridge = nil
+        catalogBootstrapID = nil
+        self.catalogPartition = catalogPartition
+        catalogScope = nil
+        if !cachedDisplayProfiles.isEmpty { cachedDisplayProfiles = [] }
         presentationScope = scope
         dismissalScope = scope
         verifiedIdentityScope = nil
@@ -129,11 +146,66 @@ final class MessagingStore: ObservableObject {
         isRefreshing = false
         availability = requester == nil ? .unavailable : .checking
         cardDismissed = defaults.bool(forKey: dismissalKey)
+        restoreCatalog()
         loadPinnedBots()
     }
+
+    /// Local credential partitioning finishes before the caller starts any network refresh.
+    /// Cached profiles are display-only: capability and readiness remain unverified.
+    func connectDashboard(_ bridge: DashboardTicketBridge?, scope: String) async {
+        let previousPartition = catalogPartition
+        let previousScope = presentationScope
+        connect(requester: bridge, scope: scope)
+        let epoch = generation
+        guard let bridge else { return }
+        let bootstrapID = UUID()
+        catalogBootstrapID = bootstrapID
+        defer { if catalogBootstrapID == bootstrapID { catalogBootstrapID = nil } }
+        let partition = await bridge.catalogCachePartition()
+        guard !Task.isCancelled, epoch == generation, catalogBootstrapID == bootstrapID,
+              bridgeID == ObjectIdentifier(bridge) else { return }
+        dashboardBridge = bridge
+        if previousScope == scope, let previousPartition, previousPartition != partition {
+            catalogCache.remove(previousPartition)
+        }
+        if catalogPartition != partition {
+            if catalogPartition != nil {
+                purgeCatalog()
+                generation = UUID()
+                resetQueries()
+                capability = nil
+                service?.capability = nil
+                conversations = []
+                hasLoadedConversations = false
+                availability = .checking
+            }
+            catalogPartition = partition
+            restoreCatalog()
+            loadPinnedBots()
+        }
+    }
+
+    private func restoreCatalog() {
+        guard let catalogPartition, let snapshot = catalogCache.snapshot(for: catalogPartition) else { return }
+        catalogScope = snapshot.verifiedScope
+        if cachedDisplayProfiles != snapshot.profiles { cachedDisplayProfiles = snapshot.profiles }
+    }
+
+    private func purgeCatalog() {
+        if let catalogPartition { catalogCache.remove(catalogPartition) }
+        catalogScope = nil
+        if !cachedDisplayProfiles.isEmpty { cachedDisplayProfiles = [] }
+    }
+
+    private func rejectCatalog() {
+        purgeCatalog()
+        capability = nil
+        service?.capability = nil
+    }
+
     private var dismissalKey: String { "conduit.messaging.discovery.v1." + dismissalScope }
     private var pinnedBotsKey: String {
-        "conduit.messaging.pinnedBots.v1." + (capability?.scope ?? presentationScope)
+        "conduit.messaging.pinnedBots.v1." + (capability?.scope ?? catalogScope ?? presentationScope)
     }
     func dismissCard() { cardDismissed = true; defaults.set(true, forKey: dismissalKey) }
 
@@ -171,7 +243,8 @@ final class MessagingStore: ObservableObject {
     }
 
     private func prunePinnedBots() {
-        let knownProfiles = Set(profiles.map(\.id))
+        // A stale display catalog must never remove a stored pin.
+        let knownProfiles = capability.map { Set($0.profiles.map(\.id)) }
         // Keep group pins until conversations have loaded; otherwise a mid-refresh
         // capability prune would wipe every group favourite.
         let knownGroups: Set<String>? = hasLoadedConversations
@@ -182,7 +255,7 @@ final class MessagingStore: ObservableObject {
                 guard let knownGroups else { return true }
                 return knownGroups.contains(groupID)
             }
-            guard !knownProfiles.isEmpty else { return true }
+            guard let knownProfiles, !knownProfiles.isEmpty else { return true }
             return knownProfiles.contains(key)
         }
         guard pruned != pinnedBotIDs else { return }
@@ -190,9 +263,13 @@ final class MessagingStore: ObservableObject {
         defaults.set(pinnedBotIDs, forKey: pinnedBotsKey)
     }
 
-    func refresh() async {
-        guard let service, !isRefreshing else { return }
+    func refresh() async { await refresh(allowCatalogRetry: true) }
+
+    private func refresh(allowCatalogRetry: Bool) async {
+        guard let service, !isRefreshing, catalogBootstrapID == nil else { return }
         var epoch = generation
+        let refreshPartition = catalogPartition
+        let refreshBridge = dashboardBridge
         isRefreshing = true
         defer { if generation == epoch { isRefreshing = false } }
         do {
@@ -207,6 +284,7 @@ final class MessagingStore: ObservableObject {
                     if let previous = verifiedIdentityScope, previous != dismissalScope {
                         generation = UUID(); epoch = generation
                         resetQueries()
+                        purgeCatalog()
                         capability = nil; service.capability = nil; conversations = []
                         hasLoadedConversations = false
                     }
@@ -220,10 +298,12 @@ final class MessagingStore: ObservableObject {
             guard epoch == generation else { return }
             let rows = hub["plugins"] as? [[String: Any]] ?? []
             guard let plugin = rows.first(where: { $0["name"] as? String == "bot-coms" }) else {
+                rejectCatalog()
                 availability = .missing
                 return
             }
             guard plugin["runtime_status"] as? String == "enabled" else {
+                rejectCatalog()
                 availability = .disabled
                 return
             }
@@ -231,29 +311,62 @@ final class MessagingStore: ObservableObject {
                 let result = try await service.request(MessagingCapability.self, "/capabilities")
                 guard epoch == generation else { return }
                 if result.serverID.isEmpty || result.principalID.isEmpty {
+                    rejectCatalog()
                     availability = .needsConfiguration
                     return
                 }
-                if let old = capability, old.scope != result.scope {
+                if let oldScope = capability?.scope ?? catalogScope, oldScope != result.scope {
+                    purgeCatalog()
                     conversations = []
                     hasLoadedConversations = false
                     generation = UUID()
                     epoch = generation
                     resetQueries()
-                    isRefreshing = false
                 }
-                capability = result
+                if let refreshBridge {
+                    let actualPartition = await refreshBridge.catalogCachePartition()
+                    guard !Task.isCancelled, epoch == generation else { return }
+                    if actualPartition != refreshPartition {
+                        // Do not admit or save a response across a local authentication change.
+                        rejectCatalog()
+                        generation = UUID(); epoch = generation
+                        resetQueries()
+                        conversations = []
+                        hasLoadedConversations = false
+                        catalogPartition = actualPartition
+                        restoreCatalog()
+                        loadPinnedBots()
+                        availability = .checking
+                        if allowCatalogRetry {
+                            isRefreshing = false
+                            await refresh(allowCatalogRetry: false)
+                        }
+                        return
+                    }
+                }
+                if capability != result { capability = result }
                 service.capability = result
-                availability = result.apiVersion != 1 ? .needsUpdate : (result.isReady ? .ready : .needsConfiguration)
-                error = nil
+                let nextAvailability: MessagingAvailability = result.apiVersion != 1 ? .needsUpdate : (result.isReady ? .ready : .needsConfiguration)
+                if availability != nextAvailability { availability = nextAvailability }
+                if result.isReady {
+                    catalogScope = result.scope
+                    if cachedDisplayProfiles != result.profiles { cachedDisplayProfiles = result.profiles }
+                    if let refreshPartition, refreshPartition == catalogPartition {
+                        catalogCache.save(profiles: result.profiles, verifiedScope: result.scope, for: refreshPartition)
+                    }
+                } else {
+                    rejectCatalog()
+                }
+                if error != nil { error = nil }
                 loadPinnedBots()
                 if isReady { await refreshConversations() }
             } catch DashboardTicketBridgeError.http(let status, _) where status == 404 {
-                if epoch == generation { availability = .needsConfiguration }
+                if epoch == generation { rejectCatalog(); availability = .needsConfiguration }
             }
         } catch {
             guard epoch == generation else { return }
             if case DashboardTicketBridgeError.http(let status, _) = error, status == 404 {
+                rejectCatalog()
                 availability = .legacy
             } else {
                 handle(error)
@@ -264,8 +377,10 @@ final class MessagingStore: ObservableObject {
     func handle(_ failure: Error) {
         isRefreshing = false
         if case DashboardTicketBridgeError.signInRequired = failure {
+            purgeCatalog()
             availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID(); resetQueries()
         } else if case DashboardTicketBridgeError.http(let status, _) = failure, status == 401 || status == 403 {
+            purgeCatalog()
             availability = .forbidden; capability = nil; conversations = []; hasLoadedConversations = false; generation = UUID(); resetQueries()
         } else { availability = .unavailable }
         error = failure.localizedDescription

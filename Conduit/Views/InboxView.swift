@@ -111,10 +111,10 @@ struct InboxView: View {
             if MessagingUITestFixture.requested {
                 messaging.connect(requester: MessagingUITestFixture.shared, scope: "ui-test-messaging")
             } else {
-                messaging.connect(requester: appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
+                await messaging.connectDashboard(appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
             }
             #else
-            messaging.connect(requester: appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
+            await messaging.connectDashboard(appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
             #endif
             await messaging.refresh()
         }
