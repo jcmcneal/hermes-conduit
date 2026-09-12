@@ -111,7 +111,9 @@ final class SessionTranscriptCacheTests: XCTestCase {
         }, loadEarlierTranscriptPage: { id, _, offset in
             self.page(id, range: 0..<120, offset: offset)
         })
-        _ = await state.openSession("a")
+        let initialOpen = await state.openSession("a")
+        XCTAssertTrue(initialOpen)
+        XCTAssertTrue(state.canLoadEarlierMessagesForActiveConversation)
         let backfilled = await state.loadEarlierMessages()
         XCTAssertTrue(backfilled)
         XCTAssertEqual(state.messages.count, 240)
@@ -204,7 +206,7 @@ final class SessionTranscriptCacheTests: XCTestCase {
         .payload([
             "session_id": id,
             "messages": range.map { row in
-                ["id": row, "role": "assistant", "content": "row \(row)",
+                ["id": row + 1, "role": "assistant", "content": "row \(row)",
                  "timestamp": "2026-09-12T10:00:00Z"] as [String: Any]
             },
             "pagination": ["limit": 120, "offset": offset, "order": "latest", "returned": range.count]
