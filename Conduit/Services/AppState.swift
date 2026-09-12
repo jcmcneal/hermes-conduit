@@ -405,10 +405,13 @@ final class AppState: ObservableObject {
 
     @Published var connection: HermesConnection? {
         didSet {
-            // Tickets can change principals even on the same server. Keep
-            // full transcript snapshots scoped to this authenticated connection.
             if connection != oldValue {
-                sessionTranscriptCache.removeAll()
+                if connection == nil {
+                    _ = connectionCacheNamespaces.revoke()
+                    sessionTranscriptCache.removeAllPartitions()
+                } else if let oldValue, oldValue.baseUrl != connection?.baseUrl {
+                    sessionTranscriptCache.removeAll()
+                }
                 warmTranscriptIdentity = nil
             }
         }
@@ -1078,11 +1081,61 @@ final class AppState: ObservableObject {
     private var sessionCatalogCache = SessionCatalogCache()
     private var projectsRequestGeneration = 0
     private let sessionPresentationCache: SessionPresentationCache
-    private let sessionTranscriptCache = SessionTranscriptCache()
+    private let sessionTranscriptCache: SessionTranscriptCache
+    private var connectionCacheNamespaces: ConnectionCacheNamespaceStore {
+        ConnectionCacheNamespaceStore(defaults: defaults)
+    }
+
+    /// Only explicit accepted sign-ins replace the account namespace. Ticket
+    /// minting and automatic credential restoration preserve the saved cache.
+    func beginNewAuthenticatedCacheSession(for baseURL: String) {
+        sessionTranscriptCache.removeAllPartitions()
+        warmTranscriptIdentity = nil
+        _ = connectionCacheNamespaces.replace(for: baseURL)
+    }
     /// Set only when a resume was applied, or a previously admitted snapshot
     /// restored. Prevents an outgoing transcript from being saved under a new
     /// identity during a profile/connection transition or cancelled open.
     private var warmTranscriptIdentity: ConversationIdentity?
+
+    func invalidateTranscriptCacheForAccountChange() {
+        client?.disconnect()
+        client = nil
+        isConnected = false
+        isConnecting = false
+        turnState = .synchronizing
+        cancelChatResumeTransportRecovery()
+        cancelExplicitSessionOpen()
+        cancelOwnedAutomaticOperations()
+        invalidateReconciliation()
+        clearStreamingText()
+        activeAssistantMessageId = nil
+        resetReasoningTurn()
+        sessionTranscriptCache.removeAll()
+        sessionTranscriptCache.clearMemory()
+        warmTranscriptIdentity = nil
+        messages = []
+        persistedTranscriptWindow = nil
+        resetTranscriptLifecycleEvidence()
+    }
+
+    private func prepareColdConnectionDisplay(_ saved: HermesConnection) async {
+        await sessionTranscriptCache.configure(partition: connectionCacheNamespaces.namespace(for: saved.baseUrl))
+        guard !Task.isCancelled, connection == saved else { return }
+        restoreColdTranscriptDisplay(profile: activeProfile)
+    }
+
+    private func restoreColdTranscriptDisplay(profile: String) {
+        guard messages.isEmpty, chatResumeBehavior == .continueWhereLeftOff,
+              PushNotificationService.shared.pendingTarget == nil,
+              let sessionID = chatResumeCoordinator.lastSessionID(for: profile),
+              let snapshot = sessionTranscriptCache.snapshot(profile: profile, sessionID: sessionID) else { return }
+        setActiveSessionState(id: sessionID)
+        messages = snapshot.messages
+        persistedTranscriptWindow = snapshot.window
+        warmTranscriptIdentity = snapshot.identity
+        resetTranscriptLifecycleEvidence()
+    }
 
     private func cacheActiveTranscriptForNavigation() {
         guard connection != nil, let identity = warmTranscriptIdentity,
@@ -1234,6 +1287,7 @@ final class AppState: ObservableObject {
                 return
             }
             self.cacheMessagePresentation(for: [sessionId])
+            self.cacheActiveTranscriptForNavigation()
             self.lastPresentationCacheFlushDate = Date()
             self.presentationCacheFlushTask = nil
         }
@@ -1246,6 +1300,7 @@ final class AppState: ObservableObject {
         presentationCacheFlushTask = nil
         lastPresentationCacheFlushDate = Date()
         cacheMessagePresentation()
+        cacheActiveTranscriptForNavigation()
     }
 
     /// Assigns the active profile and fences deferred presentation-cache
@@ -1357,6 +1412,7 @@ final class AppState: ObservableObject {
         reconnectExecutor: ChatResumeReconnectExecutor? = nil,
         chatResumeLifecycleOperations: ChatResumeLifecycleOperations = .live,
         sessionPresentationCache: SessionPresentationCache = .shared,
+        sessionTranscriptCache: SessionTranscriptCache? = nil,
         sessionYoloStore: SessionYoloStore? = nil,
         conversationIdentityIndex: ConversationIdentityIndex? = nil,
         presentationCacheDebounceSuspension: (@Sendable (Duration) async throws -> Void)? = nil
@@ -1365,6 +1421,7 @@ final class AppState: ObservableObject {
             presentationCacheDebounceSuspension
             ?? { duration in try await Task.sleep(for: duration) }
         self.defaults = defaults
+        self.sessionTranscriptCache = sessionTranscriptCache ?? SessionTranscriptCache()
         self.sessionPresentationCache = sessionPresentationCache
         self.sessionYoloStore = sessionYoloStore ?? SessionYoloStore(defaults: defaults)
         self.conversationIdentityIndex = conversationIdentityIndex ?? ConversationIdentityIndex()
@@ -2661,7 +2718,18 @@ final class AppState: ObservableObject {
         }
         #endif
         if let credentials = KeychainHelper.loadCredentials() {
-            Task { await restoreSavedCredentials(credentials) }
+            let saved = KeychainHelper.loadConnection()
+            if let saved, saved.baseUrl == credentials.baseURL {
+                connection = saved
+                showLogin = false
+                isConnecting = true
+                turnState = .synchronizing
+                prepareDashboardBridge(for: saved.baseUrl)
+            }
+            Task {
+                if let saved, connection == saved { await prepareColdConnectionDisplay(saved) }
+                await restoreSavedCredentials(credentials)
+            }
         } else if let saved = KeychainHelper.loadConnection() {
             rememberDashboardURL(saved.baseUrl)
             // Keep the authenticated app shell in place while WebKit restores
@@ -2675,7 +2743,10 @@ final class AppState: ObservableObject {
             // overlaps scheduling, then mint a fresh single-use ticket on the
             // restore path instead of burning a spent Keychain ticket first.
             prepareDashboardBridge(for: saved.baseUrl)
-            Task { await restoreSavedConnection(saved) }
+            Task {
+                await prepareColdConnectionDisplay(saved)
+                await restoreSavedConnection(saved)
+            }
         }
     }
 
@@ -2738,6 +2809,9 @@ final class AppState: ObservableObject {
             automaticWorkToken,
             reconnectOperationID: transportOperationID
         ) else { return }
+        await sessionTranscriptCache.configure(partition: connectionCacheNamespaces.namespace(for: normalizedBaseURL))
+        guard automaticChatResumeWorkIsCurrent(automaticWorkToken, reconnectOperationID: transportOperationID),
+              !Task.isCancelled else { return }
         rememberDashboardURL(conn.baseUrl)
         cancelScheduledReconnect()
         isConnecting = true
@@ -2761,6 +2835,7 @@ final class AppState: ObservableObject {
         restorePinnedSessions(for: profile)
         defaults.set(profile, forKey: activeProfileKey)
         turnState = .synchronizing
+        restoreColdTranscriptDisplay(profile: profile)
         prepareDashboardBridge(for: conn.baseUrl)
 
         let previousClient = client
@@ -2949,12 +3024,14 @@ final class AppState: ObservableObject {
             // (login and ticket mint both succeeded first) — they are
             // naturally superseded by the next explicit test or sign-in and
             // are deliberately not rolled back.
+            beginNewAuthenticatedCacheSession(for: candidate.configuration.serverURL)
             candidate.nativeConnection.commitCookies()
             outcome = await activateRepairedConnection(with: HermesConnection(
                 baseUrl: candidate.configuration.serverURL,
                 ticket: candidate.nativeConnection.ticket
             ))
         case .browserSignIn(let ticket, let baseURL, _):
+            beginNewAuthenticatedCacheSession(for: baseURL)
             outcome = await activateRepairedConnection(with: HermesConnection(
                 baseUrl: baseURL,
                 ticket: ticket
@@ -5691,6 +5768,7 @@ final class AppState: ObservableObject {
             // Flush any pending coalesced cache writes before the app
             // suspends — iOS may kill the process before the debounce fires.
             flushPendingPresentationCache()
+            Task { await sessionTranscriptCache.flush() }
             // A suspended socket may still look open. Invalidate incomplete
             // snapshots so foreground always obtains a fresh authoritative one.
             invalidateReconciliation()

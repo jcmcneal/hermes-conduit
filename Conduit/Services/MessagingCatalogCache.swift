@@ -8,6 +8,7 @@ final class MessagingCatalogCache {
         let profiles: [MessagingProfile]
         let verifiedScope: String
         let savedAt: Date
+        var conversations: [MessagingConversation]? = nil
     }
     private struct Store: Codable {
         var version = 1
@@ -34,9 +35,9 @@ final class MessagingCatalogCache {
         load().partitions[partition]
     }
 
-    func save(profiles: [MessagingProfile], verifiedScope: String, for partition: String) {
+    func save(profiles: [MessagingProfile], verifiedScope: String, for partition: String, conversations: [MessagingConversation] = []) {
         guard !partition.isEmpty, !verifiedScope.isEmpty, valid(profiles) else { return }
-        let snapshot = Snapshot(profiles: profiles, verifiedScope: verifiedScope, savedAt: now())
+        let snapshot = Snapshot(profiles: profiles, verifiedScope: verifiedScope, savedAt: now(), conversations: conversations)
         guard let entryData = try? JSONEncoder().encode(Store(partitions: [partition: snapshot])),
               entryData.count <= maxBytes else { return }
         var store = load()

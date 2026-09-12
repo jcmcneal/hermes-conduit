@@ -24,7 +24,7 @@ import Foundation
 ///
 /// Catalog absence is not navigation authority: this value, not the newest
 /// catalog snapshot, decides what preserve-current recovery owns.
-struct ConversationIdentity: Equatable {
+struct ConversationIdentity: Equatable, Codable {
     let profile: String
     let durableSessionID: String?
     let runtimeSessionID: String?

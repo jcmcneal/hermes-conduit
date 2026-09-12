@@ -84,7 +84,7 @@ enum PersistedTranscriptPagination {
 /// window. One value describes "how much of this conversation's persisted
 /// history is on screen and whether older pages remain" — the pagination
 /// counterpart of the compact resume's runtime state, never mixed into it.
-struct PersistedTranscriptWindowState: Equatable {
+struct PersistedTranscriptWindowState: Equatable, Codable {
     /// Session ID the window was hydrated for (as requested). The resolved
     /// stored ID and the runtime ID are tracked separately because the
     /// endpoint may re-home a runtime alias and `session.resume` may answer

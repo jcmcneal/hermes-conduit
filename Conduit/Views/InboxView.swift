@@ -107,6 +107,7 @@ struct InboxView: View {
             }
         }
         .task(id: appState.dashboardTicketBridge.map(ObjectIdentifier.init)) {
+            messaging.onCacheIdentityChanged = { [weak appState] in appState?.invalidateTranscriptCacheForAccountChange() }
             #if DEBUG
             if MessagingUITestFixture.requested {
                 messaging.connect(requester: MessagingUITestFixture.shared, scope: "ui-test-messaging")
@@ -119,7 +120,10 @@ struct InboxView: View {
             await messaging.refresh()
         }
         .task(id: messagingScenePhase) {
-            guard messagingScenePhase == .active else { return }
+            guard messagingScenePhase == .active else {
+                await messaging.historyCache.flushPersistence()
+                return
+            }
             while !Task.isCancelled {
                 await messaging.refresh()
                 do { try await Task.sleep(for: .seconds(20)) } catch { return }

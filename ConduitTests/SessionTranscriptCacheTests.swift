@@ -23,7 +23,7 @@ final class SessionTranscriptCacheTests: XCTestCase {
         XCTAssertEqual(state.messages.map(\.content), ["a response 2"])
     }
 
-    func testChangedCredentialsClearWarmHistoryEvenOnSameServer() async throws {
+    func testExplicitAccountReplacementClearsWarmHistoryEvenOnSameServer() async throws {
         var state: AppState!
         var calls = 0
         state = try makeState(openSession: { _, id, _ in
@@ -35,7 +35,25 @@ final class SessionTranscriptCacheTests: XCTestCase {
         })
         _ = await state.openSession("a")
         _ = await state.openSession("b")
+        state.beginNewAuthenticatedCacheSession(for: "https://one.example")
         state.connection = HermesConnection(baseUrl: "https://one.example", ticket: "other-principal")
+        _ = await state.openSession("a")
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testRenewedTicketRetainsWarmHistoryForSavedAccount() async throws {
+        var state: AppState!
+        var calls = 0
+        state = try makeState(openSession: { _, id, _ in
+            if id == "a" {
+                calls += 1
+                if calls == 2 { XCTAssertEqual(state.messages.map(\.content), ["remembered a"]) }
+            }
+            return self.result(id, content: "remembered \(id)")
+        })
+        _ = await state.openSession("a")
+        _ = await state.openSession("b")
+        state.connection = HermesConnection(baseUrl: "https://one.example", ticket: "renewed-ticket")
         _ = await state.openSession("a")
         XCTAssertEqual(calls, 2)
     }

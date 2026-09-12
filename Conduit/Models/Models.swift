@@ -397,7 +397,7 @@ struct ApprovalActivity: Codable, Equatable {
 
 // MARK: - ChatMessage
 
-struct ChatMessage: Identifiable, Equatable {
+struct ChatMessage: Identifiable, Equatable, Codable {
     let id: String
     let role: MessageRole
     var content: String
@@ -418,8 +418,8 @@ struct ChatMessage: Identifiable, Equatable {
     /// notice without re-deriving it from text.
     let displayKind: String?
 
-    // Non-codable because it contains closures in some uses; serialization
-    // is handled by the gateway, not by us. We construct these from RPC results.
+    // The local transcript cache serializes this display model. Gateway
+    // responses still pass through their own normalization/admission path.
 
     init(
         id: String,
