@@ -111,7 +111,7 @@ struct MessagingInboxView: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(!store.isReady)
+        .disabled(!store.isReady && store.profiles.isEmpty)
         .contextMenu { pinMenu(for: item) }
         .accessibilityLabel(item.title)
         .accessibilityHint(accessibilityHint(for: item))
@@ -134,7 +134,7 @@ struct MessagingInboxView: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(!store.isReady)
+        .disabled(!store.isReady && store.profiles.isEmpty)
         .contextMenu { pinMenu(for: item) }
         .accessibilityLabel(item.title)
         .accessibilityHint(accessibilityHint(for: item))

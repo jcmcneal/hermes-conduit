@@ -1,5 +1,6 @@
 import Combine
 import XCTest
+import WebKit
 @testable import Conduit
 
 @MainActor
@@ -29,6 +30,105 @@ final class MessagingCatalogCacheTests: XCTestCase {
         XCTAssertFalse(conversation.canWrite)
         _ = await conversation.send(recipients: [], text: "must not send")
         XCTAssertEqual(requester.requests, 0)
+    }
+
+    func testFreshStoreWithRealOfflineBridgeRestoresBotsWithoutCookiesOrServerResponse() async throws {
+        let defaults = makeDefaults()
+        let server = "https://cold-bots-\(UUID().uuidString.lowercased()).invalid"
+        let namespace = try XCTUnwrap(ConnectionCacheNamespaceStore(defaults: defaults).namespace(for: server))
+        let first = MessagingStore(defaults: defaults)
+        first.connect(requester: CatalogRequester(), scope: server, catalogPartition: namespace)
+        await first.refresh()
+        XCTAssertTrue(first.isReady)
+
+        // Recreate every cache owner from persisted defaults, as on launch.
+        // No cookie is seeded and the reserved .invalid host cannot serve a
+        // capability response. Restoring the catalog must be entirely local.
+        let restartedDefaults = try XCTUnwrap(UserDefaults(suiteName: try XCTUnwrap(suites.last)))
+        let cold = MessagingStore(defaults: restartedDefaults)
+        var accountChanges = 0
+        cold.onCacheIdentityChanged = { accountChanges += 1 }
+        let requests = DashboardTicketBridgePendingRequests()
+        let bridge = DashboardTicketBridge(baseURL: server, pendingRequests: requests, readinessPollAttempts: 0)
+        defer { bridge.invalidate() }
+        await cold.connectDashboard(bridge, scope: server)
+
+        XCTAssertEqual(cold.profiles, profiles)
+        XCTAssertEqual(cold.availability, .checking)
+        XCTAssertFalse(cold.isReady)
+        XCTAssertFalse(cold.isRefreshing)
+        XCTAssertNil(cold.capability)
+        XCTAssertNil(cold.service?.capability)
+        XCTAssertEqual(requests.count, 0)
+        XCTAssertEqual(accountChanges, 0)
+        XCTAssertNil(MessagingCatalogPartition.make(baseURL: server, cookies: []),
+                     "A missing cookie partition must no longer prevent cold catalog display")
+        let conversation = MessagingConversationStore(destination: .init(conversationID: nil, profileID: "swe-id"),
+                                                       owner: cold, defaults: restartedDefaults)
+        let sent = await conversation.send(recipients: [], text: "must not send before verification")
+        XCTAssertFalse(sent)
+        XCTAssertFalse(conversation.canWrite)
+        XCTAssertEqual(requests.count, 0)
+    }
+
+    func testRealBridgeCredentialRotationKeepsPersistedLogicalConnectionCatalog() async throws {
+        let defaults = makeDefaults()
+        let host = "rotating-bots-\(UUID().uuidString.lowercased()).invalid"
+        let server = "https://\(host)"
+        let namespace = try XCTUnwrap(ConnectionCacheNamespaceStore(defaults: defaults).namespace(for: server))
+        MessagingCatalogCache(defaults: defaults).save(profiles: profiles, verifiedScope: "server/alice", for: namespace)
+        let oldToken = try XCTUnwrap(HTTPCookie(properties: [
+            .name: "hermes_session_at", .value: "synthetic-old-token", .domain: host, .path: "/", .secure: "TRUE"
+        ]))
+        let newToken = try XCTUnwrap(HTTPCookie(properties: [
+            .name: "hermes_session_at", .value: "synthetic-renewed-token", .domain: host, .path: "/", .secure: "TRUE"
+        ]))
+        XCTAssertNotEqual(MessagingCatalogPartition.make(baseURL: server, cookies: [oldToken]),
+                          MessagingCatalogPartition.make(baseURL: server, cookies: [newToken]))
+        HTTPCookieStorage.shared.setCookie(oldToken)
+        let firstBridge = DashboardTicketBridge(baseURL: server, readinessPollAttempts: 0)
+        let first = MessagingStore(defaults: defaults)
+        await first.connectDashboard(firstBridge, scope: server)
+        _ = await firstBridge.catalogCachePartition()
+        firstBridge.invalidate()
+        HTTPCookieStorage.shared.setCookie(newToken)
+        let renewedBridge = DashboardTicketBridge(baseURL: server, readinessPollAttempts: 0)
+        let restarted = MessagingStore(defaults: defaults)
+        var accountChanges = 0
+        restarted.onCacheIdentityChanged = { accountChanges += 1 }
+        await restarted.connectDashboard(renewedBridge, scope: server)
+        _ = await renewedBridge.catalogCachePartition()
+        renewedBridge.invalidate()
+        HTTPCookieStorage.shared.deleteCookie(newToken)
+        await DashboardCookiePersistence.clear(from: renewedBridge.webView.configuration.websiteDataStore.httpCookieStore,
+                                               for: URL(string: server))
+
+        XCTAssertEqual(first.profiles, profiles)
+        XCTAssertEqual(restarted.profiles, profiles)
+        XCTAssertFalse(restarted.isReady)
+        XCTAssertEqual(accountChanges, 0)
+        XCTAssertEqual(ConnectionCacheNamespaceStore(defaults: defaults).namespace(for: server), namespace)
+        XCTAssertNotNil(MessagingCatalogCache(defaults: defaults).snapshot(for: namespace))
+    }
+
+    func testNilDashboardBridgePurgesColdCatalogAtSignOut() async throws {
+        let defaults = makeDefaults()
+        let server = "https://signout-bots-\(UUID().uuidString.lowercased()).invalid"
+        let namespaces = ConnectionCacheNamespaceStore(defaults: defaults)
+        let namespace = try XCTUnwrap(namespaces.namespace(for: server))
+        MessagingCatalogCache(defaults: defaults).save(profiles: profiles, verifiedScope: "server/alice", for: namespace)
+        let bridge = DashboardTicketBridge(baseURL: server, readinessPollAttempts: 0)
+        defer { bridge.invalidate() }
+        let store = MessagingStore(defaults: defaults)
+        await store.connectDashboard(bridge, scope: server)
+        XCTAssertEqual(store.profiles, profiles)
+
+        namespaces.revoke() // AppState's explicit sign-out lifecycle boundary.
+        await store.connectDashboard(nil, scope: server)
+        XCTAssertTrue(store.profiles.isEmpty)
+        XCTAssertFalse(store.isReady)
+        XCTAssertNil(MessagingCatalogCache(defaults: defaults).snapshot(for: namespace))
+        XCTAssertNotEqual(namespaces.namespace(for: server), namespace)
     }
 
     func testColdCatalogRestoresPinsFromVerifiedScope() async {

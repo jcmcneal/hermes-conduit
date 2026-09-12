@@ -114,6 +114,7 @@ struct MessagingSettingsView: View {
             }
         )
         .task(id: appState.dashboardTicketBridge.map(ObjectIdentifier.init)) {
+            store.onCacheIdentityChanged = { [weak appState] in appState?.invalidateTranscriptCacheForAccountChange() }
             await store.connectDashboard(appState.dashboardTicketBridge, scope: appState.connection?.baseUrl ?? "")
             await store.refresh()
         }

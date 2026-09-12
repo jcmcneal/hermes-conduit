@@ -10,6 +10,7 @@ final class MessagingHistoryCache {
         let history: MessagingHistory
         let cost: Int
         var access: UInt64
+        let savedAt: Date
     }
     private struct RequestKey: Hashable {
         let destination: String
@@ -26,10 +27,70 @@ final class MessagingHistoryCache {
     private var revisions: [String: UUID] = [:]
     private let maxConversations: Int
     private let maxBytes: Int
+    private let persistence: MessagingHistoryPersistence
+    private let persistenceDelay: Duration
+    private var persistenceTask: Task<Void, Never>?
+    private var persistenceDirty = false
+    private var partition: String?
+    private var isHydrated = false
 
-    init(maxConversations: Int = 24, maxBytes: Int = 8_000_000) {
+    init(maxConversations: Int = 24, maxBytes: Int = 8_000_000, persistenceDirectory: URL? = nil,
+         persistenceTTL: TimeInterval = 7 * 24 * 60 * 60, persistenceDelay: Duration = .milliseconds(250)) {
         self.maxConversations = maxConversations
         self.maxBytes = maxBytes
+        self.persistenceDelay = persistenceDelay
+        persistence = MessagingHistoryPersistence(directory: persistenceDirectory, ttl: persistenceTTL,
+                                                   maxConversations: maxConversations, maxBytes: maxBytes)
+    }
+
+    deinit {
+        persistenceTask?.cancel()
+        if persistenceDirty, let partition {
+            let records = entries.mapValues { entry in
+                let display = MessagingHistory(conversation: entry.history.conversation, messages: entry.history.messages,
+                                               runs: [], before: entry.history.before)
+                return MessagingHistoryPersistence.Record(history: display, savedAt: entry.savedAt, access: entry.access)
+            }
+            persistence.save(partition: partition, records: records)
+        }
+    }
+
+    /// Await local hydration before discovery/history requests. Restored rows are display-only;
+    /// live run state and messaging authority always come from the fresh authenticated service.
+    func configure(partition: String?) async {
+        let normalized = partition.flatMap { $0.isEmpty ? nil : $0 }
+        guard normalized != self.partition || !isHydrated else { return }
+        reset()
+        self.partition = normalized
+        guard let normalized else { return }
+        let expectedEpoch = epoch
+        let records = await persistence.load(partition: normalized)
+        guard !Task.isCancelled, expectedEpoch == epoch, self.partition == normalized else { return }
+        for (key, record) in records.sorted(by: { $0.value.access < $1.value.access }) {
+            let display = Self.displayOnly(record.history)
+            access &+= 1
+            entries[key] = Entry(history: display, cost: Self.cost(display), access: access, savedAt: record.savedAt)
+        }
+        trimEntries()
+        isHydrated = true
+        for (key, entry) in entries { changes.send((key, entry.history)) }
+    }
+
+    /// Remove the active account's durable data. Pending old writes are ordered before the
+    /// removal on the I/O queue, so a delayed completion cannot restore signed-out content.
+    func purge() {
+        persistenceTask?.cancel()
+        persistenceTask = nil
+        persistenceDirty = false
+        if let partition { persistence.purge(partition: partition) }
+        reset()
+        partition = nil
+    }
+
+    /// Used at app backgrounding and by tests to drain the coalesced write plus disk queue.
+    func flushPersistence() async {
+        enqueuePersistence()
+        await persistence.flush()
     }
 
     func snapshot(for destination: MessagingDestination) -> MessagingHistory? {
@@ -41,6 +102,8 @@ final class MessagingHistoryCache {
     }
 
     func reset() {
+        enqueuePersistence()
+        isHydrated = false
         epoch = UUID()
         flights.values.forEach { $0.task.cancel() }
         flights.removeAll()
@@ -59,6 +122,8 @@ final class MessagingHistoryCache {
         if removeSnapshot {
             entries.removeValue(forKey: key)
             changes.send((key, nil))
+            persistenceDirty = true
+            enqueuePersistence()
         }
     }
 
@@ -152,25 +217,65 @@ final class MessagingHistoryCache {
     }
 
     private func publish(_ history: MessagingHistory, for destination: MessagingDestination) {
-        let changed = !Self.equivalent(entries[destination.id]?.history, history)
+        let existing = entries[destination.id]
+        let changed = !Self.equivalent(existing?.history, history)
+        let durableChanged = existing.map {
+            $0.history.conversation != history.conversation || $0.history.messages != history.messages || $0.history.before != history.before
+        } ?? true
         access &+= 1
-        // Account for payload plus approximate value/index overhead; never persist transcripts to disk.
-        let conversation = history.conversation
-        let metadataCost = [conversation.id, conversation.kind, conversation.title, conversation.defaultResponder,
-                            conversation.preview].reduce(512) { $0 + $1.utf8.count }
-            + conversation.profiles.reduce(0) { $0 + $1.utf8.count + 32 }
-        let runsCost = history.runs.reduce(0) { $0 + $1.id.utf8.count + $1.profile.utf8.count
-            + $1.status.utf8.count + $1.detail.utf8.count + 128 }
-        let cost = history.messages.reduce(metadataCost + runsCost) {
-            $0 + $1.body.utf8.count + $1.id.utf8.count + $1.author.utf8.count + 192
+        entries[destination.id] = Entry(history: history, cost: Self.cost(history), access: access,
+                                       savedAt: durableChanged ? Date() : (existing?.savedAt ?? Date()))
+        trimEntries()
+        if changed {
+            changes.send((destination.id, history))
         }
-        entries[destination.id] = Entry(history: history, cost: cost, access: access)
+        if durableChanged { schedulePersistence() }
+    }
+
+    private func trimEntries() {
         var total = entries.values.reduce(0) { $0 + $1.cost }
         while entries.count > maxConversations || total > maxBytes {
             guard let oldest = entries.min(by: { $0.value.access < $1.value.access }) else { break }
             total -= oldest.value.cost
             entries.removeValue(forKey: oldest.key)
         }
-        if changed { changes.send((destination.id, history)) }
+    }
+
+    private func schedulePersistence() {
+        guard partition != nil else { return }
+        persistenceDirty = true
+        // Coalesce a burst without indefinitely postponing persistence during a live reply.
+        guard persistenceTask == nil else { return }
+        persistenceTask = Task { @MainActor [weak self, persistenceDelay] in
+            do { try await Task.sleep(for: persistenceDelay) } catch { return }
+            self?.enqueuePersistence()
+        }
+    }
+
+    private func enqueuePersistence() {
+        persistenceTask?.cancel()
+        persistenceTask = nil
+        guard persistenceDirty, let partition else { return }
+        persistenceDirty = false
+        let records = entries.mapValues {
+            MessagingHistoryPersistence.Record(history: Self.displayOnly($0.history), savedAt: $0.savedAt, access: $0.access)
+        }
+        persistence.save(partition: partition, records: records)
+    }
+
+    private static func displayOnly(_ history: MessagingHistory) -> MessagingHistory {
+        MessagingHistory(conversation: history.conversation, messages: history.messages, runs: [], before: history.before)
+    }
+
+    private static func cost(_ history: MessagingHistory) -> Int {
+        let conversation = history.conversation
+        let metadataCost = [conversation.id, conversation.kind, conversation.title, conversation.defaultResponder,
+                            conversation.preview].reduce(512) { $0 + $1.utf8.count }
+            + conversation.profiles.reduce(0) { $0 + $1.utf8.count + 32 }
+        let runsCost = history.runs.reduce(0) { $0 + $1.id.utf8.count + $1.profile.utf8.count
+            + $1.status.utf8.count + $1.detail.utf8.count + 128 }
+        return history.messages.reduce(metadataCost + runsCost) {
+            $0 + $1.body.utf8.count + $1.id.utf8.count + $1.author.utf8.count + 192
+        }
     }
 }
