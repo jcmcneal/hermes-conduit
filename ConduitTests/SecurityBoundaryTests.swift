@@ -4,7 +4,7 @@ import XCTest
 
 final class SecurityBoundaryTests: XCTestCase {
     func testAppTransportSecurityAllowsTailscaleCGNATRange() throws {
-        let appInfo = try XCTUnwrap(Bundle(identifier: "com.milim.relay")?.infoDictionary)
+        let appInfo = try XCTUnwrap(Bundle(for: AppState.self).infoDictionary)
         let appTransportSecurity = try XCTUnwrap(
             appInfo["NSAppTransportSecurity"] as? [String: Any]
         )

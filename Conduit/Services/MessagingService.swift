@@ -16,7 +16,18 @@ final class MessagingService {
         }
         let object = try await requester.requestJSON(path: Self.namespace + scopedPath, method: method, body: body,
                                                    timeoutMilliseconds: 12_000, maxResponseBytes: 2_000_000)
-        return try JSONDecoder().decode(type, from: JSONSerialization.data(withJSONObject: object))
+        return try await Self.decode(type, object: object)
+    }
+
+    // A nonisolated async function executes on the generic executor. Keep both
+    // serialization of the bridge's JSON value and typed decoding off the UI
+    // actor; the requester and capability admission remain on the main actor.
+    private nonisolated static func decode<T: Decodable>(_ type: T.Type, object: [String: Any]) async throws -> T {
+        try Task.checkCancellation()
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let result = try JSONDecoder().decode(type, from: data)
+        try Task.checkCancellation()
+        return result
     }
     func hub() async throws -> [String: Any] {
         try await requester.requestJSON(path: "/api/dashboard/plugins/hub", method: "GET", body: nil,

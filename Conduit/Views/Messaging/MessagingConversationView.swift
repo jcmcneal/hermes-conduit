@@ -17,6 +17,7 @@ struct MessagingConversationView: View {
     @State private var scrollViewportFrame: CGRect?
     @State private var renderedScrollTargets = ChatRenderedScrollTargets()
     @State private var transcriptRevision: UInt64 = 0
+    @State private var transcript = MessagingTranscriptProjection()
     @State private var armedAnimatedBottomRetry: ChatViewportCommand?
     @State private var backfillViewportTask: Task<Void, Never>?
     @State private var scrollToLatestPulse = 0
@@ -71,14 +72,6 @@ struct MessagingConversationView: View {
 
     private var bottomAnchor: String {
         "chat-latest-\(scrollSessionKey.profile)-\(scrollSessionKey.sessionID)"
-    }
-
-    private var transcriptMessages: [ChatMessage] {
-        (model.history?.messages ?? []).map(chatMessage(from:))
-    }
-
-    private var messagesByID: [String: MessagingMessage] {
-        Dictionary((model.history?.messages ?? []).map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
     }
 
     private var renderedScrollScope: ChatRenderedScrollScope? {
@@ -213,8 +206,8 @@ struct MessagingConversationView: View {
                 }
 
                 ForEach(viewport.targets) { target in
-                    if let message = messagesByID[target.id] {
-                        messagingBubble(message)
+                    if let entry = transcript.entriesByID[target.id] {
+                        messagingBubble(entry.source, chat: entry.chat)
                             .id(target.id)
                             .background {
                                 GeometryReader { geometry in
@@ -234,7 +227,7 @@ struct MessagingConversationView: View {
                             .background(GeometryReader { geometry in
                                 Color.clear.preference(
                                     key: MessagingVisibleMessages.self,
-                                    value: [message.sequence: geometry.frame(in: .named("messagingScroll"))]
+                                    value: [entry.source.sequence: geometry.frame(in: .named("messagingScroll"))]
                                 )
                             })
                     }
@@ -305,6 +298,7 @@ struct MessagingConversationView: View {
     private func messagingObservers(proxy: ScrollViewProxy, content: some View) -> some View {
         content
             .onAppear {
+                transcript.update(messages: model.history?.messages ?? [], profiles: owner.profiles)
                 performViewportEffects(
                     viewport.renderedSessionChanged(
                         to: scrollSessionKey,
@@ -316,7 +310,7 @@ struct MessagingConversationView: View {
                 )
                 performViewportEffects(
                     viewport.transcriptChanged(
-                        messages: transcriptMessages,
+                        messages: transcript.messages,
                         transcriptRevision: transcriptRevision,
                         viewportTransitionGeneration: 1,
                         isInitialSync: true
@@ -358,20 +352,28 @@ struct MessagingConversationView: View {
                 executePendingFollowCorrection(pending, using: proxy)
             }
             .onChange(of: model.history?.messages) { _, _ in
-                transcriptRevision &+= 1
-                performViewportEffects(
-                    viewport.transcriptChanged(
-                        messages: transcriptMessages,
-                        transcriptRevision: transcriptRevision,
-                        viewportTransitionGeneration: 1,
-                        activeSessionKey: scrollSessionKey
-                    ),
-                    using: proxy
-                )
+                updateTranscript(using: proxy)
+            }
+            .onChange(of: owner.profiles) { _, _ in
+                updateTranscript(using: proxy)
             }
             .onChange(of: scrollToLatestPulse) { _, _ in
                 performViewportEffects(viewport.explicitLatestRequested(), using: proxy)
             }
+    }
+
+    private func updateTranscript(using proxy: ScrollViewProxy) {
+        guard transcript.update(messages: model.history?.messages ?? [], profiles: owner.profiles) else { return }
+        transcriptRevision &+= 1
+        performViewportEffects(
+            viewport.transcriptChanged(
+                messages: transcript.messages,
+                transcriptRevision: transcriptRevision,
+                viewportTransitionGeneration: 1,
+                activeSessionKey: scrollSessionKey
+            ),
+            using: proxy
+        )
     }
 
     private func currentLayoutFacts() -> ChatViewportLayoutFacts {
@@ -479,8 +481,7 @@ struct MessagingConversationView: View {
     }
 
     @ViewBuilder
-    private func messagingBubble(_ message: MessagingMessage) -> some View {
-        let chat = chatMessage(from: message)
+    private func messagingBubble(_ message: MessagingMessage, chat: ChatMessage) -> some View {
         if message.author == "user" {
             UserBubble(message: chat, gatewayResolver: nil)
         } else if let profile = owner.profiles.first(where: { $0.id == message.author }) {
@@ -508,16 +509,6 @@ struct MessagingConversationView: View {
             .equatable()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    private func chatMessage(from message: MessagingMessage) -> ChatMessage {
-        ChatMessage(
-            id: message.id,
-            role: message.author == "user" ? .user : .assistant,
-            content: MessagingMentionDisplay.rewriteBody(message.body, profiles: owner.profiles),
-            timestamp: ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: message.createdAt)),
-            author: message.author == "user" ? nil : message.author
-        )
     }
 
     @ToolbarContentBuilder

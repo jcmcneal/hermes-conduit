@@ -1,11 +1,12 @@
 import Foundation
 import XCTest
+@testable import Conduit
 
 final class InterfaceOrientationTests: XCTestCase {
-    private let appBundleIdentifier = "com.milim.relay"
-
     private func appInfoDictionary() throws -> [String: Any] {
-        let bundle = try XCTUnwrap(Bundle(identifier: appBundleIdentifier))
+        // Resolve the executable hosting the app type so product renames and
+        // configuration-specific bundle identifiers keep testing the real app.
+        let bundle = Bundle(for: AppState.self)
         let infoData = try Data(contentsOf: bundle.bundleURL.appendingPathComponent("Info.plist"))
         return try XCTUnwrap(
             PropertyListSerialization.propertyList(from: infoData, options: [], format: nil) as? [String: Any]

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import SwiftUI
 
@@ -22,7 +23,7 @@ final class MessagingConversationStore: ObservableObject {
     private let epoch: UUID
     private let defaults: UserDefaults
     private let draftKey: String
-    private var loading = false
+    private var historySubscription: AnyCancellable?
     private var lastRead = 0
     private var awaitingReplyTimeoutTask: Task<Void, Never>?
     private var urgentPollingTask: Task<Void, Never>?
@@ -31,6 +32,12 @@ final class MessagingConversationStore: ObservableObject {
         self.destination = destination; self.owner = owner; self.epoch = owner.generation; self.defaults = defaults
         // DM keys remain profile-based so first-send identity resolution never strands a draft.
         draftKey = "conduit.messaging.draft." + ((try? JSONEncoder().encode([owner.capability?.scope ?? "", destination.id]).base64EncodedString()) ?? UUID().uuidString)
+        history = owner.historyCache.snapshot(for: destination)
+        historySubscription = owner.historyCache.changes.sink { [weak self] change in
+            guard let self, change.key == nil || change.key == self.destination.id else { return }
+            guard change.history == nil || self.epoch == self.owner.generation else { return }
+            self.adopt(change.history)
+        }
         draft = defaults.string(forKey: draftKey) ?? ""
         if let data = defaults.data(forKey: draftKey + ".pending") {
             pending = try? JSONDecoder().decode(PendingMessagingSend.self, from: data)
@@ -47,39 +54,26 @@ final class MessagingConversationStore: ObservableObject {
     func saveDraft() { defaults.set(draft, forKey: draftKey) }
 
     var historyPollInterval: Duration {
-        prefersUrgentPolling ? Self.urgentPollInterval : .seconds(4)
+        let hasActiveRun = history?.runs.contains { ["queued", "running"].contains($0.status.lowercased()) } == true
+        return prefersUrgentPolling || hasActiveRun ? Self.urgentPollInterval : .seconds(4)
+    }
+
+    private func adopt(_ value: MessagingHistory?) {
+        let merged = value.map { MessagingHistoryCache.merge(history, incoming: $0) }
+        if !MessagingHistoryCache.equivalent(history, merged) { history = merged }
+        refreshAwaitingReplyFromRuns()
     }
 
     func load(older: Bool = false) async {
-        guard canWrite, let service = owner.service, !loading else { return }
-        loading = true
-        defer { loading = false }
+        guard canWrite, let service = owner.service else { return }
+        if older, history?.before == nil { return }
         do {
-            let result = try await service.history(destination, before: older ? history?.before : nil)
+            _ = try await owner.historyCache.load(destination, current: history, older: older, service: service)
             guard canWrite else { return }
-            if let expected = destination.conversationID, result.conversation.id != expected { throw MessagingError.invalidResponse }
-            if let profile = destination.profileID, result.conversation.kind != "dm" || result.conversation.profiles != [profile] { throw MessagingError.invalidResponse }
-            if let current = history {
-                var incoming = result.messages
-                var before = result.before
-                // After a background interval there may be more than one page of new replies.
-                // Fill the gap before merging, and never discard pages the reader loaded earlier.
-                if !older, let last = current.messages.last {
-                    while let first = incoming.first, first.sequence > last.sequence + 1, let cursor = before {
-                        let page = try await service.history(destination, before: cursor)
-                        guard canWrite, page.conversation.id == result.conversation.id else { throw MessagingError.staleContext }
-                        guard !page.messages.isEmpty, page.before == nil || page.before! < cursor else { throw MessagingError.invalidResponse }
-                        incoming = page.messages + incoming
-                        before = page.before
-                    }
-                }
-                let merged = Dictionary((current.messages + incoming).map { ($0.id, $0) }, uniquingKeysWith: { _, new in new })
-                let retainsEarlierPage = (current.messages.first?.sequence ?? Int.max) < (incoming.first?.sequence ?? Int.max)
-                history = MessagingHistory(conversation: result.conversation, messages: merged.values.sorted { $0.sequence < $1.sequence }, runs: result.runs,
-                                           before: retainsEarlierPage ? current.before : before)
-            } else { history = result }
-            error = nil
-            refreshAwaitingReplyFromRuns()
+            if error != nil { error = nil }
+        } catch is CancellationError {
+            // A mutation or identity change superseded this read.
+        } catch MessagingError.staleContext {
         } catch DashboardTicketBridgeError.http(let status, _) where status == 404 && destination.conversationID == nil {
             // An unsaved DM has no history and opening it must remain read-only.
         } catch { record(error) }
@@ -132,11 +126,12 @@ final class MessagingConversationStore: ObservableObject {
         if let profile = destination.profileID, receipt.conversation.kind != "dm" || receipt.conversation.profiles != [profile] {
             error = MessagingError.invalidResponse.localizedDescription; return
         }
+        owner.historyCache.accept(receipt, for: destination, current: history)
         pending = nil; defaults.removeObject(forKey: draftKey + ".pending")
         if draft == value.text { draft = ""; saveDraft() }
         error = nil
         await load()
-        await owner.refreshConversations()
+        await owner.refreshConversations(force: true)
     }
     func markRead(through sequence: Int) async {
         guard canWrite, sequence > lastRead, let service = owner.service, let conversation = history?.conversation else { return }
@@ -149,7 +144,9 @@ final class MessagingConversationStore: ObservableObject {
         guard canWrite, let service = owner.service, let conversation = history?.conversation else { return }
         do {
             _ = try await service.request(MessagingConversation.self, "/conversations/" + service.component(conversation.id) + "/user-state", method: "PATCH", body: values)
-            await load(); await owner.refreshConversations()
+            guard canWrite else { return }
+            owner.historyCache.invalidate(destination)
+            await load(); await owner.refreshConversations(force: true)
         } catch { record(error) }
     }
     func cancelRun(_ id: String) async {
@@ -157,6 +154,8 @@ final class MessagingConversationStore: ObservableObject {
         struct Receipt: Decodable { let ok: Bool }
         do {
             _ = try await service.request(Receipt.self, "/runs/" + service.component(id) + "/cancel", method: "POST")
+            guard canWrite else { return }
+            owner.historyCache.invalidate(destination)
             await load()
         } catch { record(error) }
     }
@@ -166,7 +165,8 @@ final class MessagingConversationStore: ObservableObject {
             "title": title, "profiles": profiles, "default_responder": responder, "revision": revision
         ])
         guard canWrite else { throw MessagingError.staleContext }
-        await load(); await owner.refreshConversations()
+        owner.historyCache.invalidate(destination)
+        await load(); await owner.refreshConversations(force: true)
     }
 
     func deleteGroup() async -> Bool {
@@ -175,8 +175,8 @@ final class MessagingConversationStore: ObservableObject {
         do {
             _ = try await service.request(Receipt.self, "/conversations/" + service.component(conversation.id), method: "DELETE")
             guard canWrite else { return false }
-            history = nil
-            await owner.refreshConversations()
+            owner.historyCache.invalidate(destination, removeSnapshot: true)
+            await owner.refreshConversations(force: true)
             return true
         } catch {
             record(error)
